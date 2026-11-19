@@ -26,3 +26,5 @@ Thumbs.db
 *.db-shm
 *.log
 .env
+dist/
+versions/

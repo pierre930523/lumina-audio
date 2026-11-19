@@ -29,7 +29,15 @@
   - 選擇 **`v2.0 重構新版`**：立即切換為重構新版，享受無重複標題、單一導覽與動態微吸頂。
   - 全程零終端機輸入、無重啟延遲、播放音樂不中斷。
 
-### 3. 詳細差異比對文件
+### 3. 已打包完成的 Windows 獨立 Release 執行檔（EXE）
+- **發行包目錄**：
+  [`dist/Lumina-Audio-v2.0-Windows/`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/dist/Lumina-Audio-v2.0-Windows/)
+- **直接執行程式檔**：
+  [`dist/Lumina-Audio-v2.0-Windows/lumina_app.exe`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/dist/Lumina-Audio-v2.0-Windows/lumina_app.exe)
+- **根目錄一鍵啟動腳本**：
+  [`run_lumina.bat`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/run_lumina.bat)（在檔案總管雙擊即可直接運行）
+
+### 4. 詳細差異比對文件
 - 完整對比說明文件：
   [`docs/ixd/DIFF_COMPARISON.md`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/docs/ixd/DIFF_COMPARISON.md)
 
