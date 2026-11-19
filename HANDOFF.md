@@ -1,7 +1,7 @@
-# Lumina Audio — v0.1.0 Initial Release
+# Lumina Audio — v0.1.0 Initial Release & Distribution Packages
 
 ## 1. Task Goal
-- **Release Lumina Audio v0.1.0**: Package and publish the current stable build to GitHub (`pierre930523/lumina-audio`), create the remote repository, and provide a comprehensive software introduction (`README.md`).
+- **Release Lumina Audio v0.1.0**: Package and publish the current stable build to GitHub (`pierre930523/lumina-audio`), create the remote repository, provide a comprehensive software introduction (`README.md`), and build/upload production installation packages.
 
 ## 2. Completed Milestones
 1. **Bit-Perfect Audio Engine (Phases 1–11)**: Native WASAPI Exclusive, Win64 Clean-Room COM ASIO, Native DSD / DoP v1.1 passthrough, intelligent device negotiation, and real-time Signal Path visualization.
@@ -15,14 +15,15 @@
 4. **Per-Monitor V2 Multi-Screen & High-DPI Adaptation**:
    - Win32 native DPI awareness handling `WM_DPICHANGED`, `WM_WINDOWPOSCHANGED`, and `WM_DISPLAYCHANGE`.
    - Sharp rendering from 100% to 200% scaling across mixed-DPI monitors with bounded popovers and responsive layout breakpoints.
+5. **Windows Production Release Packaging**:
+   - Built optimized 64-bit Rust audio library (`core_ffi.dll`) and Flutter Windows Release runner (`lumina_app.exe`).
+   - Verified 3-second smoke launch test (`Smoke launch passed cleanly`).
+   - Built Inno Setup LZMA2 installer: `Lumina-Audio-Setup-v0.1.0.exe` (18.7 MB).
+   - Built portable zip archive: `Lumina-Audio-v0.1.0-Windows-x64.zip` (24.6 MB).
+   - Uploaded assets to GitHub Release `v0.1.0`.
 
-## 3. Verification Summary
-- `flutter analyze`: 0 issues found (clean).
-- `flutter test -j 1`: 129 / 129 passed (100%).
-- `cargo check --workspace`: 0 errors / clean build.
-- `python tests/e2e/runner.py --suite r1 --strict`: 116 / 116 passed (100%).
-- `multi_monitor_dpi_responsive_test.dart`: 6 / 6 scenarios passed.
-
-## 4. GitHub Release Info
-- Repository: `https://github.com/pierre930523/lumina-audio`
-- Version Tag: `v0.1.0`
+## 3. GitHub Release & Assets
+- **Repository**: `https://github.com/pierre930523/lumina-audio`
+- **Release**: `https://github.com/pierre930523/lumina-audio/releases/tag/v0.1.0`
+- **Installer (.exe)**: `Lumina-Audio-Setup-v0.1.0.exe` (18.7 MB)
+- **Portable (.zip)**: `Lumina-Audio-v0.1.0-Windows-x64.zip` (24.6 MB)
