@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
@@ -582,35 +582,17 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                key: const Key('album_detail_back_btn'),
-                onPressed: widget.onBack,
-                icon: const Icon(
-                  Icons.arrow_back_rounded,
-                  size: 20,
-                  color: LuminaTokens.textSecondary,
-                ),
-                tooltip: '返回專輯列表',
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-              ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  _detail?.title ?? _summaryFallback?.title ?? '',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: LuminaTokens.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
+          child: IconButton(
+            key: const Key('album_detail_back_btn'),
+            onPressed: widget.onBack,
+            icon: const Icon(
+              Icons.arrow_back_rounded,
+              size: 20,
+              color: LuminaTokens.textSecondary,
+            ),
+            tooltip: '返回專輯列表',
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
           ),
         ),
         Expanded(child: body),

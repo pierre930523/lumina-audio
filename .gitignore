@@ -8,13 +8,16 @@ app/.dart_tool/
 app/.flutter-plugins
 app/.flutter-plugins-dependencies
 app/build/
+**/build/
 app/.packages
 app/pubspec.lock
 **/GeneratedPluginRegistrant.*
 
 # Python
 __pycache__/
-*.pyc
+**/__pycache__/
+*.py[cod]
+*$py.class
 
 # IDE / OS
 .vscode/
@@ -26,5 +29,10 @@ Thumbs.db
 *.db-shm
 *.log
 .env
+
+# Binary artifacts & distribution packages
 dist/
 versions/
+*.exe
+*.dll
+*.pdb

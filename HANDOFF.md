@@ -1,51 +1,28 @@
-# Lumina Audio — Handoff State [COMPLETED]
+# Lumina Audio — v0.1.0 Initial Release
 
-## Task Goal
-依照 `ixd-design` 技能規範全面升級 Lumina Audio 桌面端互動架構，並落實**零終端機版本隔開（Zero-Terminal Version Separation）**：
-1. **徹底根除截圖瑕疵**：消除專輯與歌手詳情頁中頂欄 `<` `>` 下方多餘的次級返回列與重複標題（如截圖中的 `← DROP - EP`），實作單一導覽錨點（Single-Anchor Navigation）與頂欄動態微吸頂標題（Dynamic Sticky Title）。
-2. **零終端機版本隔離（實體硬碟資料夾）**：將 v1.0 與 v2.0 分置於獨立實體目錄，使用者無需使用命令列切換 Git 分支，直接在檔案總管或 IDE 即可開啟對比。
-3. **軟體內介面版本即時切換鈕**：在桌面端頂部工具列直接提供「版本切換」選單（`v2.0 重構新版` ↔ `v1.0 原始舊版`），在運行中即可點擊即時無縫比對前後視覺與交互差異。
-4. **桌面級微交互**：曲目清單曲目編號 30ms 懸停變形為播放圖示；滑鼠側鍵與全域桌面鍵盤快捷鍵（`Space`, `Alt+Left/Right`, `Backspace`, `Ctrl+F`, `M`, `Escape`）。
-5. **完整互動設計文件**：依據 `ixd-design` 產出 Phase 1~4 共 12 份規格文件與前後對比報告。
+## 1. Task Goal
+- **Release Lumina Audio v0.1.0**: Package and publish the current stable build to GitHub (`pierre930523/lumina-audio`), create the remote repository, and provide a comprehensive software introduction (`README.md`).
 
----
+## 2. Completed Milestones
+1. **Bit-Perfect Audio Engine (Phases 1–11)**: Native WASAPI Exclusive, Win64 Clean-Room COM ASIO, Native DSD / DoP v1.1 passthrough, intelligent device negotiation, and real-time Signal Path visualization.
+2. **Player Core & Media Engine (Phases 12–18)**: Original-resolution artwork extraction, CJK encoding repairs, SQLite WAL+FTS5 database, synchronized LRC scrolling lyrics, Epoch-based lock-free ring buffer, and unified audio clock.
+3. **UI/UX Pro Max Modern Aesthetics**:
+   - WCAG 2.1 AA compliant dark-mode token architecture (`LuminaTokens`).
+   - Frameless minimalist album grid and list view with user-customizable columns and spacing.
+   - Dynamic ambient glow and frosted glass hovering controls with 0-load GPU optimizations.
+   - Single-anchor bidirectional navigation with dynamic sticky title in top bar and no duplicate header bars.
+   - Global desktop keyboard shortcuts (`Space`, `Alt+Left/Right`, `Backspace`, `Ctrl+F`, `M`, `Escape`).
+4. **Per-Monitor V2 Multi-Screen & High-DPI Adaptation**:
+   - Win32 native DPI awareness handling `WM_DPICHANGED`, `WM_WINDOWPOSCHANGED`, and `WM_DISPLAYCHANGE`.
+   - Sharp rendering from 100% to 200% scaling across mixed-DPI monitors with bounded popovers and responsive layout breakpoints.
 
-## 零終端機版本對比指南（無需使用命令列）
+## 3. Verification Summary
+- `flutter analyze`: 0 issues found (clean).
+- `flutter test -j 1`: 129 / 129 passed (100%).
+- `cargo check --workspace`: 0 errors / clean build.
+- `python tests/e2e/runner.py --suite r1 --strict`: 116 / 116 passed (100%).
+- `multi_monitor_dpi_responsive_test.dart`: 6 / 6 scenarios passed.
 
-### 1. 實體檔案目錄（可直接在檔案總管 / IDE 點擊開啟）
-- **v1.0 原始版專案目錄**：
-  [`versions/v1.0-baseline/`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/versions/v1.0-baseline/)
-  - 保留修改前的原始佈局。
-  - 含有次級返回列與重複標題（如 `← DROP - EP`）。
-- **v2.0 互動重構版專案目錄**：
-  [`versions/v2.0-ixd-redesign/`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/versions/v2.0-ixd-redesign/)
-  - 徹底移除次級返回列，統一由頂欄 `<` `>` 控制歷史。
-  - 滾動超過 200px 平滑淡入頂欄黏貼標題。
-  - 30ms 懸停播放按鈕與全域桌面快捷鍵。
-
-### 2. 運行中介面即時切換（In-App UI Switcher）
-- 在執行中的 Lumina Audio 頂部工具列右側，點擊 **`v2.0 新版`** 標籤膠囊按鈕：
-  - 選擇 **`v1.0 原始舊版`**：立即切換為舊版佈局，重現次級返回列與重複標題。
-  - 選擇 **`v2.0 重構新版`**：立即切換為重構新版，享受無重複標題、單一導覽與動態微吸頂。
-  - 全程零終端機輸入、無重啟延遲、播放音樂不中斷。
-
-### 3. 已打包完成的 Windows 獨立 Release 執行檔（EXE）
-- **發行包目錄**：
-  [`dist/Lumina-Audio-v2.0-Windows/`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/dist/Lumina-Audio-v2.0-Windows/)
-- **直接執行程式檔**：
-  [`dist/Lumina-Audio-v2.0-Windows/lumina_app.exe`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/dist/Lumina-Audio-v2.0-Windows/lumina_app.exe)
-- **根目錄一鍵啟動腳本**：
-  [`run_lumina.bat`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/run_lumina.bat)（在檔案總管雙擊即可直接運行）
-
-### 4. 詳細差異比對文件
-- 完整對比說明文件：
-  [`docs/ixd/DIFF_COMPARISON.md`](file:///c:/Users/pierre/.gemini/antigravity/scratch/lumina-audio/docs/ixd/DIFF_COMPARISON.md)
-
----
-
-## Current Status & Verification
-- **靜態分析**：`cd app; flutter analyze` → 0 issues found（0 錯誤、0 警告）。
-- **測試套件**：`cd app; flutter test` → 130 / 130 tests passed（100% 通過，0 失敗）。
-- **Git 標籤記錄**：
-  - `v1.0-baseline`：commit `d36d33e`
-  - `v2.0-ixd-redesign`：commit `18fe2e6`
+## 4. GitHub Release Info
+- Repository: `https://github.com/pierre930523/lumina-audio`
+- Version Tag: `v0.1.0`

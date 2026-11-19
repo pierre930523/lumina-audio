@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-19T18:05:07.129937+00:00",
+  "timestamp": "2026-11-19T20:13:54.131400+00:00",
   "tier": "all",
   "total": 116,
   "passed": 116,
@@ -7,7 +7,7 @@
   "errors": 0,
   "skipped": 0,
   "pass_rate": 100.0,
-  "duration_seconds": 8.813,
+  "duration_seconds": 8.959,
   "tests": [
     {
       "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_01_compiled_core_ffi_dll_exports_present",
@@ -16,7 +16,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 2.08,
+      "duration_ms": 1.814,
       "error": null
     },
     {
@@ -26,7 +26,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 6.722,
+      "duration_ms": 4.259,
       "error": null
     },
     {
@@ -36,7 +36,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 6.681,
+      "duration_ms": 3.956,
       "error": null
     },
     {
@@ -46,7 +46,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 0.463,
+      "duration_ms": 0.207,
       "error": null
     },
     {
@@ -56,7 +56,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 7.583,
+      "duration_ms": 19.908,
       "error": null
     },
     {
@@ -66,7 +66,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 13.023,
+      "duration_ms": 8.065,
       "error": null
     },
     {
@@ -76,7 +76,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 19.433,
+      "duration_ms": 41.984,
       "error": null
     },
     {
@@ -86,7 +86,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 14.435,
+      "duration_ms": 6.806,
       "error": null
     },
     {
@@ -96,7 +96,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 33.981,
+      "duration_ms": 30.471,
       "error": null
     },
     {
@@ -106,7 +106,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 13.759,
+      "duration_ms": 19.801,
       "error": null
     },
     {
@@ -116,7 +116,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 0.017,
+      "duration_ms": 0.013,
       "error": null
     },
     {
@@ -126,7 +126,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 23.931,
+      "duration_ms": 24.2,
       "error": null
     },
     {
@@ -136,7 +136,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 53.25,
+      "duration_ms": 53.097,
       "error": null
     },
     {
@@ -146,7 +146,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 0.014,
+      "duration_ms": 0.015,
       "error": null
     },
     {
@@ -156,7 +156,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 23.55,
+      "duration_ms": 31.258,
       "error": null
     },
     {
@@ -196,7 +196,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 7.273,
+      "duration_ms": 16.098,
       "error": null
     },
     {
@@ -206,7 +206,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 17.893,
+      "duration_ms": 30.243,
       "error": null
     },
     {
@@ -216,7 +216,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 0.012,
+      "duration_ms": 0.013,
       "error": null
     },
     {
@@ -226,7 +226,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 0.006,
+      "duration_ms": 0.007,
       "error": null
     },
     {
@@ -236,7 +236,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 0.007,
+      "duration_ms": 0.006,
       "error": null
     },
     {
@@ -246,7 +246,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 14.944,
+      "duration_ms": 33.1,
       "error": null
     },
     {
@@ -256,7 +256,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 22.58,
+      "duration_ms": 5.05,
       "error": null
     },
     {
@@ -266,7 +266,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 0.014,
+      "duration_ms": 0.013,
       "error": null
     },
     {
@@ -276,7 +276,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 0.007,
+      "duration_ms": 0.008,
       "error": null
     },
     {
@@ -286,7 +286,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 55.313,
+      "duration_ms": 57.083,
       "error": null
     },
     {
@@ -296,7 +296,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 12.088,
+      "duration_ms": 29.191,
       "error": null
     },
     {
@@ -306,7 +306,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 18.278,
+      "duration_ms": 35.51,
       "error": null
     },
     {
@@ -316,7 +316,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 0.018,
+      "duration_ms": 0.017,
       "error": null
     },
     {
@@ -326,7 +326,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 40.947,
+      "duration_ms": 49.631,
       "error": null
     },
     {
@@ -336,7 +336,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 13.03,
+      "duration_ms": 10.498,
       "error": null
     },
     {
@@ -346,7 +346,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 51.834,
+      "duration_ms": 55.286,
       "error": null
     },
     {
@@ -356,7 +356,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 24.429,
+      "duration_ms": 65.825,
       "error": null
     },
     {
@@ -366,7 +366,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 0.014,
+      "duration_ms": 0.018,
       "error": null
     },
     {
@@ -376,7 +376,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 0.008,
+      "duration_ms": 0.009,
       "error": null
     },
     {
@@ -386,7 +386,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 5.736,
+      "duration_ms": 4.764,
       "error": null
     },
     {
@@ -396,7 +396,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 11.083,
+      "duration_ms": 33.065,
       "error": null
     },
     {
@@ -406,7 +406,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 0.011,
+      "duration_ms": 0.012,
       "error": null
     },
     {
@@ -416,7 +416,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.317,
+      "duration_ms": 0.325,
       "error": null
     },
     {
@@ -426,7 +426,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.389,
+      "duration_ms": 0.365,
       "error": null
     },
     {
@@ -436,7 +436,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.154,
+      "duration_ms": 0.146,
       "error": null
     },
     {
@@ -446,7 +446,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.229,
+      "duration_ms": 0.203,
       "error": null
     },
     {
@@ -456,7 +456,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.101,
       "error": null
     },
     {
@@ -466,7 +466,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.145,
       "error": null
     },
     {
@@ -476,7 +476,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.253,
+      "duration_ms": 0.257,
       "error": null
     },
     {
@@ -486,7 +486,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.192,
+      "duration_ms": 0.196,
       "error": null
     },
     {
@@ -496,7 +496,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.119,
+      "duration_ms": 0.12,
       "error": null
     },
     {
@@ -506,7 +506,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.205,
+      "duration_ms": 0.212,
       "error": null
     },
     {
@@ -516,7 +516,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 7.38,
+      "duration_ms": 4.298,
       "error": null
     },
     {
@@ -526,7 +526,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 7.665,
+      "duration_ms": 12.888,
       "error": null
     },
     {
@@ -536,7 +536,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 0.41,
+      "duration_ms": 0.396,
       "error": null
     },
     {
@@ -546,7 +546,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 0.013,
+      "duration_ms": 0.011,
       "error": null
     },
     {
@@ -556,7 +556,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 0.005,
+      "duration_ms": 0.006,
       "error": null
     },
     {
@@ -566,7 +566,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 15.375,
+      "duration_ms": 19.298,
       "error": null
     },
     {
@@ -576,7 +576,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 8.601,
+      "duration_ms": 3.585,
       "error": null
     },
     {
@@ -586,7 +586,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 7.706,
+      "duration_ms": 24.782,
       "error": null
     },
     {
@@ -596,7 +596,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 7.877,
+      "duration_ms": 16.351,
       "error": null
     },
     {
@@ -606,7 +606,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 0.016,
+      "duration_ms": 0.371,
       "error": null
     },
     {
@@ -616,7 +616,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 6.286,
+      "duration_ms": 6.108,
       "error": null
     },
     {
@@ -626,7 +626,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 21.15,
+      "duration_ms": 45.718,
       "error": null
     },
     {
@@ -636,7 +636,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 7.395,
+      "duration_ms": 4.762,
       "error": null
     },
     {
@@ -646,7 +646,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 13.838,
+      "duration_ms": 22.799,
       "error": null
     },
     {
@@ -656,7 +656,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 12.092,
+      "duration_ms": 48.266,
       "error": null
     },
     {
@@ -666,7 +666,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 0.025,
+      "duration_ms": 0.016,
       "error": null
     },
     {
@@ -676,7 +676,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 0.015,
+      "duration_ms": 0.006,
       "error": null
     },
     {
@@ -686,7 +686,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 0.012,
+      "duration_ms": 0.005,
       "error": null
     },
     {
@@ -696,7 +696,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 7.319,
+      "duration_ms": 6.928,
       "error": null
     },
     {
@@ -706,7 +706,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 20.67,
+      "duration_ms": 5.395,
       "error": null
     },
     {
@@ -736,7 +736,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 16.131,
+      "duration_ms": 14.124,
       "error": null
     },
     {
@@ -746,7 +746,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 6.068,
+      "duration_ms": 16.537,
       "error": null
     },
     {
@@ -756,7 +756,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 5.285,
+      "duration_ms": 15.293,
       "error": null
     },
     {
@@ -766,7 +766,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 0.013,
+      "duration_ms": 0.011,
       "error": null
     },
     {
@@ -776,7 +776,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 0.007,
+      "duration_ms": 0.006,
       "error": null
     },
     {
@@ -786,7 +786,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 6.697,
+      "duration_ms": 15.319,
       "error": null
     },
     {
@@ -796,7 +796,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 29.018,
+      "duration_ms": 6.593,
       "error": null
     },
     {
@@ -806,7 +806,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 7.827,
+      "duration_ms": 3.706,
       "error": null
     },
     {
@@ -816,7 +816,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 0.014,
+      "duration_ms": 0.02,
       "error": null
     },
     {
@@ -836,7 +836,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 0.007,
+      "duration_ms": 0.024,
       "error": null
     },
     {
@@ -846,7 +846,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 21.34,
+      "duration_ms": 6.543,
       "error": null
     },
     {
@@ -856,7 +856,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 7.652,
+      "duration_ms": 14.393,
       "error": null
     },
     {
@@ -866,7 +866,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 7.355,
+      "duration_ms": 15.727,
       "error": null
     },
     {
@@ -876,7 +876,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 15.352,
+      "duration_ms": 15.062,
       "error": null
     },
     {
@@ -886,7 +886,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 5.648,
+      "duration_ms": 5.787,
       "error": null
     },
     {
@@ -896,7 +896,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 24.831,
+      "duration_ms": 3.236,
       "error": null
     },
     {
@@ -906,7 +906,7 @@
       "doc": "",
       "feature": "F40",
       "status": "PASS",
-      "duration_ms": 0.022,
+      "duration_ms": 0.01,
       "error": null
     },
     {
@@ -916,7 +916,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.496,
+      "duration_ms": 0.306,
       "error": null
     },
     {
@@ -926,7 +926,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.243,
+      "duration_ms": 0.168,
       "error": null
     },
     {
@@ -936,7 +936,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.242,
+      "duration_ms": 0.168,
       "error": null
     },
     {
@@ -946,7 +946,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.186,
+      "duration_ms": 0.107,
       "error": null
     },
     {
@@ -956,7 +956,7 @@
       "doc": "",
       "feature": "F41",
       "status": "PASS",
-      "duration_ms": 0.264,
+      "duration_ms": 0.11,
       "error": null
     },
     {
@@ -966,7 +966,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.171,
+      "duration_ms": 0.102,
       "error": null
     },
     {
@@ -976,7 +976,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.25,
+      "duration_ms": 0.159,
       "error": null
     },
     {
@@ -986,7 +986,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.112,
+      "duration_ms": 0.105,
       "error": null
     },
     {
@@ -996,7 +996,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.164,
+      "duration_ms": 0.135,
       "error": null
     },
     {
@@ -1006,7 +1006,7 @@
       "doc": "",
       "feature": "F42",
       "status": "PASS",
-      "duration_ms": 0.116,
+      "duration_ms": 0.097,
       "error": null
     },
     {
@@ -1016,7 +1016,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 28.293,
+      "duration_ms": 25.805,
       "error": null
     },
     {
@@ -1026,7 +1026,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 6.494,
+      "duration_ms": 15.994,
       "error": null
     },
     {
@@ -1036,7 +1036,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 45.837,
+      "duration_ms": 80.71,
       "error": null
     },
     {
@@ -1046,7 +1046,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 36.116,
+      "duration_ms": 43.392,
       "error": null
     },
     {
@@ -1056,7 +1056,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 1069.014,
+      "duration_ms": 1053.087,
       "error": null
     },
     {
@@ -1066,7 +1066,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 60.264,
+      "duration_ms": 20.344,
       "error": null
     },
     {
@@ -1076,7 +1076,7 @@
       "doc": "",
       "feature": "F35",
       "status": "PASS",
-      "duration_ms": 76.948,
+      "duration_ms": 42.297,
       "error": null
     },
     {
@@ -1086,7 +1086,7 @@
       "doc": "",
       "feature": "F36",
       "status": "PASS",
-      "duration_ms": 47.371,
+      "duration_ms": 70.78,
       "error": null
     },
     {
@@ -1096,7 +1096,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 86.316,
+      "duration_ms": 102.442,
       "error": null
     },
     {
@@ -1106,7 +1106,7 @@
       "doc": "",
       "feature": "F37",
       "status": "PASS",
-      "duration_ms": 14.708,
+      "duration_ms": 18.91,
       "error": null
     },
     {
@@ -1116,7 +1116,7 @@
       "doc": "",
       "feature": "F38",
       "status": "PASS",
-      "duration_ms": 71.649,
+      "duration_ms": 64.467,
       "error": null
     },
     {
@@ -1126,7 +1126,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 47.371,
+      "duration_ms": 69.863,
       "error": null
     },
     {
@@ -1136,7 +1136,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 648.914,
+      "duration_ms": 592.239,
       "error": null
     },
     {
@@ -1146,7 +1146,7 @@
       "doc": "",
       "feature": "F34",
       "status": "PASS",
-      "duration_ms": 663.925,
+      "duration_ms": 569.827,
       "error": null
     },
     {
@@ -1156,7 +1156,7 @@
       "doc": "",
       "feature": "F39",
       "status": "PASS",
-      "duration_ms": 631.731,
+      "duration_ms": 563.457,
       "error": null
     },
     {
@@ -1166,7 +1166,7 @@
       "doc": "",
       "feature": "F33",
       "status": "PASS",
-      "duration_ms": 0.439,
+      "duration_ms": 0.39,
       "error": null
     }
   ]
