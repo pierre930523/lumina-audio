@@ -54,6 +54,11 @@ class _NavItemSpec {
   });
 }
 
+enum LuminaUiVersion {
+  v2Overhaul,
+  v1Classic,
+}
+
 class HomeScreen extends StatefulWidget {
   final AudioService audioService;
   final UiScaleController? uiScaleController;
@@ -228,6 +233,7 @@ class _HomeScreenState extends State<HomeScreen>
   late final SmartPlaylistService _playlistService;
   late final LibrarySettingsController _librarySettingsController;
   late final AlbumLayoutSettingsController _albumLayoutController;
+  LuminaUiVersion _uiVersion = LuminaUiVersion.v2Overhaul;
 
   HomeTab get _activeTab => _navController.current.tab;
 
@@ -978,6 +984,154 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildUiVersionMenu() {
+    return PopupMenuButton<LuminaUiVersion>(
+      key: const Key('btn_ui_version_switcher'),
+      tooltip: '介面版本切換：v2.0 互動重構版 / v1.0 原始版',
+      color: _sidebarBg,
+      onSelected: (ver) {
+        if (_uiVersion != ver) {
+          setState(() {
+            _uiVersion = ver;
+            if (ver == LuminaUiVersion.v1Classic) {
+              _activeDetailTitle = null;
+            }
+          });
+        }
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem<LuminaUiVersion>(
+          value: LuminaUiVersion.v2Overhaul,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _uiVersion == LuminaUiVersion.v2Overhaul
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 16,
+                color: _uiVersion == LuminaUiVersion.v2Overhaul
+                    ? _accentBlue
+                    : LuminaTokens.textMuted,
+              ),
+              const SizedBox(width: 8),
+              const Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'v2.0 重構新版（建議）',
+                      style: TextStyle(
+                        color: LuminaTokens.textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      '單一頂欄導覽 / 無重複標題',
+                      style: TextStyle(
+                        color: LuminaTokens.textMuted,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        PopupMenuItem<LuminaUiVersion>(
+          value: LuminaUiVersion.v1Classic,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _uiVersion == LuminaUiVersion.v1Classic
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 16,
+                color: _uiVersion == LuminaUiVersion.v1Classic
+                    ? _accentBlue
+                    : LuminaTokens.textMuted,
+              ),
+              const SizedBox(width: 8),
+              const Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'v1.0 原始舊版',
+                      style: TextStyle(
+                        color: LuminaTokens.textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      '次級返回列 / 重複標題',
+                      style: TextStyle(
+                        color: LuminaTokens.textMuted,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        decoration: BoxDecoration(
+          color: _uiVersion == LuminaUiVersion.v2Overhaul
+              ? _accentBlue.withValues(alpha: 0.15)
+              : LuminaTokens.cardBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+          border: Border.all(
+            color: _uiVersion == LuminaUiVersion.v2Overhaul
+                ? _accentBlue.withValues(alpha: 0.55)
+                : LuminaTokens.borderSubtle,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.layers_rounded,
+              size: 13,
+              color: _uiVersion == LuminaUiVersion.v2Overhaul
+                  ? _accentBlue
+                  : LuminaTokens.textSecondary,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              _uiVersion == LuminaUiVersion.v2Overhaul ? 'v2.0 新版' : 'v1.0 舊版',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: _uiVersion == LuminaUiVersion.v2Overhaul
+                    ? _accentBlue
+                    : LuminaTokens.textSecondary,
+              ),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              Icons.arrow_drop_down_rounded,
+              size: 14,
+              color: _uiVersion == LuminaUiVersion.v2Overhaul
+                  ? _accentBlue
+                  : LuminaTokens.textMuted,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildQuickScaleMenu() {
     return ListenableBuilder(
       listenable: _scaleController,
@@ -1067,8 +1221,9 @@ class _HomeScreenState extends State<HomeScreen>
     final canGoBack = _navController.canGoBack;
     final canGoForward = _navController.canGoForward;
     final inSettings = _isSettingsTab(_activeTab);
-    final isCompactTopBar = availWidth < 480;
-    final isCompactProfile = availWidth < 520;
+    final effectiveWidth = availWidth / _scaleController.scale;
+    final isCompactTopBar = effectiveWidth < 460;
+    final isCompactProfile = effectiveWidth < 560;
 
     return Container(
       decoration: BoxDecoration(
@@ -1139,7 +1294,11 @@ class _HomeScreenState extends State<HomeScreen>
             isDesktop: isDesktop,
             isCompactTopBar: isCompactTopBar,
           ),
-          if (isDesktop && availWidth >= 600) ...[
+          if (isDesktop && effectiveWidth >= 580) ...[
+            _buildUiVersionMenu(),
+            const SizedBox(width: 6),
+          ],
+          if (isDesktop && effectiveWidth >= 500) ...[
             _buildQuickScaleMenu(),
             const SizedBox(width: 6),
             IconButton(
@@ -1636,17 +1795,19 @@ class _HomeScreenState extends State<HomeScreen>
           onOpenArtist: _openArtist,
         ),
         HomeTab.albumDetail => AlbumDetailPage(
-          key: ValueKey('album_detail_$entryId'),
+          key: ValueKey('album_detail_${entryId}_${_uiVersion.name}'),
           albumId: entry.albumId ?? _selectedAlbumId ?? '',
           audioService: widget.audioService,
           libraryCache: _libraryCache,
           onBack: _goBack,
-          showInlineBackButton: false,
+          showInlineBackButton: _uiVersion == LuminaUiVersion.v1Classic,
           onOpenArtist: _openArtist,
           onOpenArtistCredits: _openArtistCredits,
           initialScrollOffset: savedOffset,
           onScrollOffsetChanged: onOffsetChanged,
-          onTitleChanged: _onDetailTitleChanged,
+          onTitleChanged: _uiVersion == LuminaUiVersion.v2Overhaul
+              ? _onDetailTitleChanged
+              : null,
         ),
         HomeTab.credits => AlbumsAndCreditsView(
           key: ValueKey('credits_mode_${entry.creditArtistId ?? entryId}'),
@@ -1668,18 +1829,20 @@ class _HomeScreenState extends State<HomeScreen>
           onOpenAlbumDetail: _openAlbumDetail,
         ),
         HomeTab.artistDetail => ArtistDetailPage(
-          key: ValueKey('artist_detail_$entryId'),
+          key: ValueKey('artist_detail_${entryId}_${_uiVersion.name}'),
           artistName: entry.artistName ?? entry.artistKey ?? '',
           artistKey: entry.artistKey,
           audioService: widget.audioService,
           libraryCache: _libraryCache,
           onBack: _goBack,
-          showInlineBackButton: false,
+          showInlineBackButton: _uiVersion == LuminaUiVersion.v1Classic,
           onOpenAlbumDetail: _openAlbumDetail,
           onOpenCredits: () => _openArtistCredits(null),
           initialScrollOffset: savedOffset,
           onScrollOffsetChanged: onOffsetChanged,
-          onTitleChanged: _onDetailTitleChanged,
+          onTitleChanged: _uiVersion == LuminaUiVersion.v2Overhaul
+              ? _onDetailTitleChanged
+              : null,
         ),
         HomeTab.audiobooks => AudiobooksView(audioService: widget.audioService),
         HomeTab.podcasts => PodcastsView(audioService: widget.audioService),
