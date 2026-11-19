@@ -1,0 +1,1173 @@
+{
+  "timestamp": "2026-11-19T18:05:07.129937+00:00",
+  "tier": "all",
+  "total": 116,
+  "passed": 116,
+  "failed": 0,
+  "errors": 0,
+  "skipped": 0,
+  "pass_rate": 100.0,
+  "duration_seconds": 8.813,
+  "tests": [
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_01_compiled_core_ffi_dll_exports_present",
+      "classname": "TestFeature33",
+      "name": "test_f33_01_compiled_core_ffi_dll_exports_present",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 2.08,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_02_server_info_capabilities",
+      "classname": "TestFeature33",
+      "name": "test_f33_02_server_info_capabilities",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 6.722,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_03_workspace_cargo_clippy_clean",
+      "classname": "TestFeature33",
+      "name": "test_f33_03_workspace_cargo_clippy_clean",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 6.681,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_04_ffi_version_constant",
+      "classname": "TestFeature33",
+      "name": "test_f33_04_ffi_version_constant",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 0.463,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature33.test_f33_05_server_health_endpoint",
+      "classname": "TestFeature33",
+      "name": "test_f33_05_server_health_endpoint",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 7.583,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature34.test_f34_01_qobuz_configure_via_rest",
+      "classname": "TestFeature34",
+      "name": "test_f34_01_qobuz_configure_via_rest",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 13.023,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature34.test_f34_02_tidal_pkce_start_and_exchange_rest",
+      "classname": "TestFeature34",
+      "name": "test_f34_02_tidal_pkce_start_and_exchange_rest",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 19.433,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature34.test_f34_03_deezer_configure_via_rest",
+      "classname": "TestFeature34",
+      "name": "test_f34_03_deezer_configure_via_rest",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 14.435,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature34.test_f34_04_webdav_configure_and_sync_via_ffi_and_rest",
+      "classname": "TestFeature34",
+      "name": "test_f34_04_webdav_configure_and_sync_via_ffi_and_rest",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 33.981,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature34.test_f34_05_smb_configure_and_providers_list",
+      "classname": "TestFeature34",
+      "name": "test_f34_05_smb_configure_and_providers_list",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 13.759,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature35.test_f35_01_ffi_plays_http_range_flac_stream",
+      "classname": "TestFeature35",
+      "name": "test_f35_01_ffi_plays_http_range_flac_stream",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 0.017,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature35.test_f35_02_rest_playback_play_with_http_stream_url",
+      "classname": "TestFeature35",
+      "name": "test_f35_02_rest_playback_play_with_http_stream_url",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 23.931,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature35.test_f35_03_rest_play_with_webdav_basic_auth_headers",
+      "classname": "TestFeature35",
+      "name": "test_f35_03_rest_play_with_webdav_basic_auth_headers",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 53.25,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature35.test_f35_04_signal_path_reflects_http_stream_source",
+      "classname": "TestFeature35",
+      "name": "test_f35_04_signal_path_reflects_http_stream_source",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 0.014,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature35.test_f35_05_rest_stop_after_stream_playback",
+      "classname": "TestFeature35",
+      "name": "test_f35_05_rest_stop_after_stream_playback",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 23.55,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature36.test_f36_01_ffi_scan_extracts_replaygain_flac_metadata",
+      "classname": "TestFeature36",
+      "name": "test_f36_01_ffi_scan_extracts_replaygain_flac_metadata",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.012,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature36.test_f36_02_ffi_import_autoeq_parses_bands",
+      "classname": "TestFeature36",
+      "name": "test_f36_02_ffi_import_autoeq_parses_bands",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.009,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature36.test_f36_03_ffi_set_and_get_dsp_config_roundtrip",
+      "classname": "TestFeature36",
+      "name": "test_f36_03_ffi_set_and_get_dsp_config_roundtrip",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.009,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature36.test_f36_04_rest_autoeq_import_updates_live_dsp",
+      "classname": "TestFeature36",
+      "name": "test_f36_04_rest_autoeq_import_updates_live_dsp",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 7.273,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature36.test_f36_05_rest_put_and_get_dsp_config_and_signal_path",
+      "classname": "TestFeature36",
+      "name": "test_f36_05_rest_put_and_get_dsp_config_and_signal_path",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 17.893,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature37.test_f37_01_ffi_get_albums_returns_scanned_albums",
+      "classname": "TestFeature37",
+      "name": "test_f37_01_ffi_get_albums_returns_scanned_albums",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 0.012,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature37.test_f37_02_ffi_deduplicate_executes_cleanly",
+      "classname": "TestFeature37",
+      "name": "test_f37_02_ffi_deduplicate_executes_cleanly",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 0.006,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature37.test_f37_03_ffi_album_detail_includes_versions_and_tracks",
+      "classname": "TestFeature37",
+      "name": "test_f37_03_ffi_album_detail_includes_versions_and_tracks",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 0.007,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature37.test_f37_04_rest_albums_and_album_detail",
+      "classname": "TestFeature37",
+      "name": "test_f37_04_rest_albums_and_album_detail",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 14.944,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature37.test_f37_05_rest_post_deduplicate",
+      "classname": "TestFeature37",
+      "name": "test_f37_05_rest_post_deduplicate",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 22.58,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature38.test_f38_01_ffi_enrich_credits_against_mock_servers",
+      "classname": "TestFeature38",
+      "name": "test_f38_01_ffi_enrich_credits_against_mock_servers",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 0.014,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature38.test_f38_02_ffi_artist_detail_populated",
+      "classname": "TestFeature38",
+      "name": "test_f38_02_ffi_artist_detail_populated",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 0.007,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature38.test_f38_03_rest_enrich_endpoint_populates_credits",
+      "classname": "TestFeature38",
+      "name": "test_f38_03_rest_enrich_endpoint_populates_credits",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 55.313,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature38.test_f38_04_rest_album_credits_endpoint",
+      "classname": "TestFeature38",
+      "name": "test_f38_04_rest_album_credits_endpoint",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 12.088,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature38.test_f38_05_rest_artist_detail_endpoint",
+      "classname": "TestFeature38",
+      "name": "test_f38_05_rest_artist_detail_endpoint",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 18.278,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature39.test_f39_01_ffi_profile_crud_lifecycle",
+      "classname": "TestFeature39",
+      "name": "test_f39_01_ffi_profile_crud_lifecycle",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 0.018,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature39.test_f39_02_rest_profile_create_list_activate",
+      "classname": "TestFeature39",
+      "name": "test_f39_02_rest_profile_create_list_activate",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 40.947,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature39.test_f39_03_rest_profile_update",
+      "classname": "TestFeature39",
+      "name": "test_f39_03_rest_profile_update",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 13.03,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature39.test_f39_04_rest_profile_favorites_crud",
+      "classname": "TestFeature39",
+      "name": "test_f39_04_rest_profile_favorites_crud",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 51.834,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature39.test_f39_05_rest_profile_play_history",
+      "classname": "TestFeature39",
+      "name": "test_f39_05_rest_profile_play_history",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 24.429,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature40.test_f40_01_ffi_lists_audio_output_devices",
+      "classname": "TestFeature40",
+      "name": "test_f40_01_ffi_lists_audio_output_devices",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 0.014,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature40.test_f40_02_ffi_select_audio_device_succeeds",
+      "classname": "TestFeature40",
+      "name": "test_f40_02_ffi_select_audio_device_succeeds",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 0.008,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature40.test_f40_03_rest_list_audio_devices",
+      "classname": "TestFeature40",
+      "name": "test_f40_03_rest_list_audio_devices",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 5.736,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature40.test_f40_04_rest_select_audio_device",
+      "classname": "TestFeature40",
+      "name": "test_f40_04_rest_select_audio_device",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 11.083,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature40.test_f40_05_server_get_port_bound_nonzero",
+      "classname": "TestFeature40",
+      "name": "test_f40_05_server_get_port_bound_nonzero",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 0.011,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature41.test_f41_01_home_screen_navigation_tabs_present",
+      "classname": "TestFeature41",
+      "name": "test_f41_01_home_screen_navigation_tabs_present",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.317,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature41.test_f41_02_albums_and_credits_view_widgets_present",
+      "classname": "TestFeature41",
+      "name": "test_f41_02_albums_and_credits_view_widgets_present",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.389,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature41.test_f41_03_studio_models_define_canonical_album_and_credits",
+      "classname": "TestFeature41",
+      "name": "test_f41_03_studio_models_define_canonical_album_and_credits",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.154,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature41.test_f41_04_ffi_audio_service_binds_album_and_artist_exports",
+      "classname": "TestFeature41",
+      "name": "test_f41_04_ffi_audio_service_binds_album_and_artist_exports",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.229,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature41.test_f41_05_m8_ui_test_covers_versions_and_credits_graph",
+      "classname": "TestFeature41",
+      "name": "test_f41_05_m8_ui_test_covers_versions_and_credits_graph",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature42.test_f42_01_dsp_control_panel_keys_present",
+      "classname": "TestFeature42",
+      "name": "test_f42_01_dsp_control_panel_keys_present",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature42.test_f42_02_output_zone_panel_keys_present",
+      "classname": "TestFeature42",
+      "name": "test_f42_02_output_zone_panel_keys_present",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.253,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature42.test_f42_03_providers_and_remote_panel_keys_present",
+      "classname": "TestFeature42",
+      "name": "test_f42_03_providers_and_remote_panel_keys_present",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.192,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature42.test_f42_04_profile_switcher_bar_keys_present",
+      "classname": "TestFeature42",
+      "name": "test_f42_04_profile_switcher_bar_keys_present",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.119,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier1_r1_r3.TestFeature42.test_f42_05_ffi_audio_service_binds_dsp_device_profile_provider_exports",
+      "classname": "TestFeature42",
+      "name": "test_f42_05_ffi_audio_service_binds_dsp_device_profile_provider_exports",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.205,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature33.test_f33_01_unknown_api_route_returns_404",
+      "classname": "TestFeature33",
+      "name": "test_f33_01_unknown_api_route_returns_404",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 7.38,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature33.test_f33_02_malformed_json_post_returns_400_or_422",
+      "classname": "TestFeature33",
+      "name": "test_f33_02_malformed_json_post_returns_400_or_422",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 7.665,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature33.test_f33_03_missing_optional_ffi_symbol_returns_none",
+      "classname": "TestFeature33",
+      "name": "test_f33_03_missing_optional_ffi_symbol_returns_none",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 0.41,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature33.test_f33_04_dsp_set_before_init_returns_not_initialized",
+      "classname": "TestFeature33",
+      "name": "test_f33_04_dsp_set_before_init_returns_not_initialized",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 0.013,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature33.test_f33_05_dev_select_before_init_returns_not_initialized",
+      "classname": "TestFeature33",
+      "name": "test_f33_05_dev_select_before_init_returns_not_initialized",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 0.005,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature34.test_f34_01_qobuz_invalid_token_rejected",
+      "classname": "TestFeature34",
+      "name": "test_f34_01_qobuz_invalid_token_rejected",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 15.375,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature34.test_f34_02_tidal_pkce_short_verifier_rejected",
+      "classname": "TestFeature34",
+      "name": "test_f34_02_tidal_pkce_short_verifier_rejected",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 8.601,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature34.test_f34_03_deezer_short_arl_rejected",
+      "classname": "TestFeature34",
+      "name": "test_f34_03_deezer_short_arl_rejected",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 7.706,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature34.test_f34_04_webdav_invalid_scheme_or_empty_uri_rejected",
+      "classname": "TestFeature34",
+      "name": "test_f34_04_webdav_invalid_scheme_or_empty_uri_rejected",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 7.877,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature34.test_f34_05_ffi_provider_null_or_unknown_kind_returns_error",
+      "classname": "TestFeature34",
+      "name": "test_f34_05_ffi_provider_null_or_unknown_kind_returns_error",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 0.016,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature35.test_f35_01_stream_416_out_of_range_mock",
+      "classname": "TestFeature35",
+      "name": "test_f35_01_stream_416_out_of_range_mock",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 6.286,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature35.test_f35_02_webdav_503_offline_propagates_500_on_sync",
+      "classname": "TestFeature35",
+      "name": "test_f35_02_webdav_503_offline_propagates_500_on_sync",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 21.15,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature35.test_f35_03_play_missing_local_file_does_not_crash_server",
+      "classname": "TestFeature35",
+      "name": "test_f35_03_play_missing_local_file_does_not_crash_server",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 7.395,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature35.test_f35_04_seek_beyond_zero_stopped_state_safe",
+      "classname": "TestFeature35",
+      "name": "test_f35_04_seek_beyond_zero_stopped_state_safe",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 13.838,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature35.test_f35_05_volume_nan_or_negative_clamped",
+      "classname": "TestFeature35",
+      "name": "test_f35_05_volume_nan_or_negative_clamped",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 12.092,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature36.test_f36_01_ffi_dsp_set_null_returns_null_pointer",
+      "classname": "TestFeature36",
+      "name": "test_f36_01_ffi_dsp_set_null_returns_null_pointer",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.025,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature36.test_f36_02_ffi_autoeq_null_returns_null",
+      "classname": "TestFeature36",
+      "name": "test_f36_02_ffi_autoeq_null_returns_null",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.015,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature36.test_f36_03_ffi_autoeq_comments_only_returns_empty_list",
+      "classname": "TestFeature36",
+      "name": "test_f36_03_ffi_autoeq_comments_only_returns_empty_list",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 0.012,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature36.test_f36_04_rest_autoeq_blank_text_returns_empty_bands",
+      "classname": "TestFeature36",
+      "name": "test_f36_04_rest_autoeq_blank_text_returns_empty_bands",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 7.319,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature36.test_f36_05_rest_dsp_put_invalid_json_returns_4xx",
+      "classname": "TestFeature36",
+      "name": "test_f36_05_rest_dsp_put_invalid_json_returns_4xx",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 20.67,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature37.test_f37_01_ffi_album_detail_null_returns_null",
+      "classname": "TestFeature37",
+      "name": "test_f37_01_ffi_album_detail_null_returns_null",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 0.011,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature37.test_f37_02_ffi_album_detail_missing_returns_none",
+      "classname": "TestFeature37",
+      "name": "test_f37_02_ffi_album_detail_missing_returns_none",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 0.005,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature37.test_f37_03_rest_album_detail_missing_returns_404",
+      "classname": "TestFeature37",
+      "name": "test_f37_03_rest_album_detail_missing_returns_404",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 16.131,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature37.test_f37_04_rest_empty_search_returns_empty_array",
+      "classname": "TestFeature37",
+      "name": "test_f37_04_rest_empty_search_returns_empty_array",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 6.068,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature37.test_f37_05_rest_deduplicate_on_empty_db_returns_zero",
+      "classname": "TestFeature37",
+      "name": "test_f37_05_rest_deduplicate_on_empty_db_returns_zero",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 5.285,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature38.test_f38_01_ffi_artist_detail_null_returns_null",
+      "classname": "TestFeature38",
+      "name": "test_f38_01_ffi_artist_detail_null_returns_null",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 0.013,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature38.test_f38_02_ffi_artist_detail_missing_returns_none",
+      "classname": "TestFeature38",
+      "name": "test_f38_02_ffi_artist_detail_missing_returns_none",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 0.007,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature38.test_f38_03_rest_artist_detail_missing_returns_404",
+      "classname": "TestFeature38",
+      "name": "test_f38_03_rest_artist_detail_missing_returns_404",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 6.697,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature38.test_f38_04_rest_album_credits_missing_album_returns_404",
+      "classname": "TestFeature38",
+      "name": "test_f38_04_rest_album_credits_missing_album_returns_404",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 29.018,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature38.test_f38_05_mb_missing_user_agent_returns_400_and_429_injected",
+      "classname": "TestFeature38",
+      "name": "test_f38_05_mb_missing_user_agent_returns_400_and_429_injected",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 7.827,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature39.test_f39_01_ffi_profile_null_pointers_handled",
+      "classname": "TestFeature39",
+      "name": "test_f39_01_ffi_profile_null_pointers_handled",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 0.014,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature39.test_f39_02_ffi_profile_empty_name_rejected",
+      "classname": "TestFeature39",
+      "name": "test_f39_02_ffi_profile_empty_name_rejected",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 0.007,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature39.test_f39_03_ffi_profile_switch_unknown_returns_error",
+      "classname": "TestFeature39",
+      "name": "test_f39_03_ffi_profile_switch_unknown_returns_error",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 0.007,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature39.test_f39_04_rest_profile_create_empty_name_returns_400",
+      "classname": "TestFeature39",
+      "name": "test_f39_04_rest_profile_create_empty_name_returns_400",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 21.34,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature39.test_f39_05_rest_profile_activate_missing_returns_404",
+      "classname": "TestFeature39",
+      "name": "test_f39_05_rest_profile_activate_missing_returns_404",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 7.652,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature40.test_f40_01_rest_invalid_backend_returns_400",
+      "classname": "TestFeature40",
+      "name": "test_f40_01_rest_invalid_backend_returns_400",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 7.355,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature40.test_f40_02_rest_select_missing_device_id_handles_gracefully",
+      "classname": "TestFeature40",
+      "name": "test_f40_02_rest_select_missing_device_id_handles_gracefully",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 15.352,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature40.test_f40_03_unauthenticated_device_list_returns_401",
+      "classname": "TestFeature40",
+      "name": "test_f40_03_unauthenticated_device_list_returns_401",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 5.648,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature40.test_f40_04_unauthenticated_dsp_config_returns_401",
+      "classname": "TestFeature40",
+      "name": "test_f40_04_unauthenticated_dsp_config_returns_401",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 24.831,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature40.test_f40_05_last_error_message_populated_after_ffi_error",
+      "classname": "TestFeature40",
+      "name": "test_f40_05_last_error_message_populated_after_ffi_error",
+      "doc": "",
+      "feature": "F40",
+      "status": "PASS",
+      "duration_ms": 0.022,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature41.test_f41_01_mock_audio_service_missing_album_returns_null",
+      "classname": "TestFeature41",
+      "name": "test_f41_01_mock_audio_service_missing_album_returns_null",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.496,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature41.test_f41_02_albums_view_handles_empty_credits_message",
+      "classname": "TestFeature41",
+      "name": "test_f41_02_albums_view_handles_empty_credits_message",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.243,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature41.test_f41_03_server_service_null_on_404_album",
+      "classname": "TestFeature41",
+      "name": "test_f41_03_server_service_null_on_404_album",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.242,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature41.test_f41_04_profile_switcher_guards_empty_profile_name",
+      "classname": "TestFeature41",
+      "name": "test_f41_04_profile_switcher_guards_empty_profile_name",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.186,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature41.test_f41_05_mini_player_responsive_test_present",
+      "classname": "TestFeature41",
+      "name": "test_f41_05_mini_player_responsive_test_present",
+      "doc": "",
+      "feature": "F41",
+      "status": "PASS",
+      "duration_ms": 0.264,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature42.test_f42_01_dsp_panel_guards_empty_autoeq_input",
+      "classname": "TestFeature42",
+      "name": "test_f42_01_dsp_panel_guards_empty_autoeq_input",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.171,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature42.test_f42_02_output_zone_panel_clamps_volume",
+      "classname": "TestFeature42",
+      "name": "test_f42_02_output_zone_panel_clamps_volume",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.25,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature42.test_f42_03_dsp_sliders_clamp_db_range",
+      "classname": "TestFeature42",
+      "name": "test_f42_03_dsp_sliders_clamp_db_range",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.112,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature42.test_f42_04_server_audio_service_rejects_empty_remote_pin",
+      "classname": "TestFeature42",
+      "name": "test_f42_04_server_audio_service_rejects_empty_remote_pin",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.164,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier2_r1_r3.TestFeature42.test_f42_05_mock_audio_service_prevents_deleting_default_profile",
+      "classname": "TestFeature42",
+      "name": "test_f42_05_mock_audio_service_prevents_deleting_default_profile",
+      "doc": "",
+      "feature": "F42",
+      "status": "PASS",
+      "duration_ms": 0.116,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f33_f36_core_ffi_autoeq_symbols_match_rest_schema",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f33_f36_core_ffi_autoeq_symbols_match_rest_schema",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 28.293,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f33_f39_profiles_list_has_active_and_default",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f33_f39_profiles_list_has_active_and_default",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 6.494,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f34_f35_qobuz_config_then_http_stream_playback",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f34_f35_qobuz_config_then_http_stream_playback",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 45.837,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f34_f37_webdav_sync_then_canonical_albums_list",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f34_f37_webdav_sync_then_canonical_albums_list",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 36.116,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f34_f38_discogs_rate_limit_recovered_after_retry_config",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f34_f38_discogs_rate_limit_recovered_after_retry_config",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 1069.014,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f35_f36_http_stream_with_autoeq_signal_path_enhanced",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f35_f36_http_stream_with_autoeq_signal_path_enhanced",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 60.264,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f35_f40_playback_webdav_then_device_switch",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f35_f40_playback_webdav_then_device_switch",
+      "doc": "",
+      "feature": "F35",
+      "status": "PASS",
+      "duration_ms": 76.948,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f36_f40_device_selection_with_dsp_bypass_lossless",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f36_f40_device_selection_with_dsp_bypass_lossless",
+      "doc": "",
+      "feature": "F36",
+      "status": "PASS",
+      "duration_ms": 47.371,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f37_f38_dedup_then_credit_enrichment_and_artist_graph",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f37_f38_dedup_then_credit_enrichment_and_artist_graph",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 86.316,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f37_f41_canonical_versions_match_api_detail",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f37_f41_canonical_versions_match_api_detail",
+      "doc": "",
+      "feature": "F37",
+      "status": "PASS",
+      "duration_ms": 14.708,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f38_f39_enriched_album_favorited_by_profile",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f38_f39_enriched_album_favorited_by_profile",
+      "doc": "",
+      "feature": "F38",
+      "status": "PASS",
+      "duration_ms": 71.649,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier3_r1_r3.TestTier3R1R3Pairwise.test_pw_f39_f42_profile_history_records_track_play",
+      "classname": "TestTier3R1R3Pairwise",
+      "name": "test_pw_f39_f42_profile_history_records_track_play",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 47.371,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier4_r1_r3.TestScenario17.test_s17_cross_source_ingest_dedup_and_enrichment",
+      "classname": "TestScenario17",
+      "name": "test_s17_cross_source_ingest_dedup_and_enrichment",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 648.914,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier4_r1_r3.TestScenario18.test_s18_http_stream_replaygain_peq_crossfeed",
+      "classname": "TestScenario18",
+      "name": "test_s18_http_stream_replaygain_peq_crossfeed",
+      "doc": "",
+      "feature": "F34",
+      "status": "PASS",
+      "duration_ms": 663.925,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier4_r1_r3.TestScenario19.test_s19_multi_profile_favorites_history_isolation",
+      "classname": "TestScenario19",
+      "name": "test_s19_multi_profile_favorites_history_isolation",
+      "doc": "",
+      "feature": "F39",
+      "status": "PASS",
+      "duration_ms": 631.731,
+      "error": null
+    },
+    {
+      "id": "tests.e2e.test_tier4_r1_r3.TestScenario20.test_s20_desktop_flutter_ui_and_ffi_contracts",
+      "classname": "TestScenario20",
+      "name": "test_s20_desktop_flutter_ui_and_ffi_contracts",
+      "doc": "",
+      "feature": "F33",
+      "status": "PASS",
+      "duration_ms": 0.439,
+      "error": null
+    }
+  ]
+}

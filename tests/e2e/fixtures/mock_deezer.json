@@ -1,0 +1,15 @@
+{
+  "arl_session": {
+    "status": "VALID",
+    "user_id": 482910,
+    "user_name": "Audiophile Deezer",
+    "offer_id": 1002,
+    "can_stream_flac": true
+  },
+  "track_playback": {
+    "track_id": 3135556,
+    "format": "FLAC",
+    "bitrate": 1411,
+    "stream_url": "https://e-cdns-proxy-c.dzcdn.net/mobile/1/mock_flac_stream"
+  }
+}

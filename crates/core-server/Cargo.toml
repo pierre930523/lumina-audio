@@ -1,0 +1,29 @@
+[package]
+name = "core-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+chrono = { workspace = true }
+core-audio = { path = "../core-audio" }
+core-db = { path = "../core-db" }
+core-providers = { path = "../core-providers" }
+core-types = { path = "../core-types" }
+futures-util = "0.3"
+hex = "0.4"
+quick-xml = { workspace = true }
+rand = "0.8"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "limit", "trace"] }
+tracing = { workspace = true }
+url = "2.5"
+uuid = { workspace = true }

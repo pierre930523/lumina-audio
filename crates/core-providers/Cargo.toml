@@ -1,0 +1,41 @@
+[package]
+name = "core-providers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+chrono = { workspace = true }
+core-db = { path = "../core-db" }
+core-types = { path = "../core-types" }
+encoding_rs = { workspace = true }
+image = { workspace = true }
+quick-xml = { workspace = true }
+rand = "0.8"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+symphonia = { version = "0.5.4", default-features = false, features = [
+    "aac",
+    "aiff",
+    "alac",
+    "caf",
+    "flac",
+    "isomp4",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "2.5"
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

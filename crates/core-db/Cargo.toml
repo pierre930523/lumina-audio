@@ -1,0 +1,32 @@
+[package]
+name = "core-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+core-types = { path = "../core-types" }
+serde = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+unicode-normalization = { workspace = true }
+uuid = { workspace = true }
+[features]
+default = ["os-keyring"]
+os-keyring = ["dep:keyring"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", optional = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", optional = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", optional = true, features = ["linux-native-sync-persistent", "sync-secret-service"] }
+
+[dev-dependencies]
+tempfile = "3"

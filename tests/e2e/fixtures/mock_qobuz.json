@@ -1,0 +1,38 @@
+{
+  "user_login_response": {
+    "status": "success",
+    "user": {
+      "id": 1083921,
+      "public_id": "qb-user-paris",
+      "login": "audiophile@lumina.io",
+      "user_auth_token": "qb_usr_tok_99182371",
+      "credential": {
+        "id": 19482,
+        "label": "Studio Sublime",
+        "parameters": {
+          "hires": true,
+          "lossless": true,
+          "max_streaming_quality": 27
+        }
+      }
+    }
+  },
+  "stream_response_24_192": {
+    "track_id": 12049182,
+    "format_id": 27,
+    "mime_type": "audio/flac",
+    "sampling_rate": 192.0,
+    "bit_depth": 24,
+    "url": "https://streaming-qobuz.akamaized.net/stream/12049182.flac?token=mock_sig_991a",
+    "duration": 348
+  },
+  "stream_response_24_96": {
+    "track_id": 12049183,
+    "format_id": 7,
+    "mime_type": "audio/flac",
+    "sampling_rate": 96.0,
+    "bit_depth": 24,
+    "url": "https://streaming-qobuz.akamaized.net/stream/12049183.flac?token=mock_sig_991b",
+    "duration": 210
+  }
+}

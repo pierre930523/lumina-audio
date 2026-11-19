@@ -1,0 +1,20 @@
+[package]
+name = "core-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+core-audio = { path = "../core-audio" }
+core-db = { path = "../core-db" }
+core-providers = { path = "../core-providers" }
+core-server = { path = "../core-server" }
+core-types = { path = "../core-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,56 @@
+{
+  "tracks": [
+    {
+      "id": "trk-flac-01",
+      "title": "Breathe (In the Air)",
+      "artist": "Pink Floyd",
+      "album": "The Dark Side of the Moon",
+      "codec": "flac",
+      "sample_rate_hz": 96000,
+      "bit_depth": 24,
+      "channels": 2,
+      "is_dsd": false,
+      "duration_ms": 163000,
+      "isrc": "GBAYE7300021"
+    },
+    {
+      "id": "trk-dsf-02",
+      "title": "Time",
+      "artist": "Pink Floyd",
+      "album": "The Dark Side of the Moon",
+      "codec": "dsf",
+      "sample_rate_hz": 2822400,
+      "bit_depth": 1,
+      "channels": 2,
+      "is_dsd": true,
+      "duration_ms": 425000,
+      "isrc": "GBAYE7300023"
+    },
+    {
+      "id": "trk-wav-03",
+      "title": "Give Life Back to Music",
+      "artist": "Daft Punk",
+      "album": "Random Access Memories",
+      "codec": "wav",
+      "sample_rate_hz": 88200,
+      "bit_depth": 24,
+      "channels": 2,
+      "is_dsd": false,
+      "duration_ms": 274000,
+      "isrc": "USQX91300101"
+    },
+    {
+      "id": "trk-mp3-04",
+      "title": "So What",
+      "artist": "Miles Davis",
+      "album": "Kind of Blue",
+      "codec": "mp3",
+      "sample_rate_hz": 44100,
+      "bit_depth": 16,
+      "channels": 2,
+      "is_dsd": false,
+      "duration_ms": 562000,
+      "isrc": "USSM15900010"
+    }
+  ]
+}
