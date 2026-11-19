@@ -26,6 +26,10 @@ class ArtistDetailPage extends StatefulWidget {
   final VoidCallback? onOpenCredits;
   final double initialScrollOffset;
   final ValueChanged<double>? onScrollOffsetChanged;
+  final ValueChanged<String>? onTitleChanged;
+
+  /// Scroll offset threshold past which the compact sticky header should appear in the top bar.
+  static const double stickyTitleScrollThreshold = 200.0;
 
   const ArtistDetailPage({
     super.key,
@@ -40,6 +44,7 @@ class ArtistDetailPage extends StatefulWidget {
     this.onOpenCredits,
     this.initialScrollOffset = 0.0,
     this.onScrollOffsetChanged,
+    this.onTitleChanged,
   });
 
   @override
@@ -81,6 +86,14 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     _scrollController.addListener(_handleScroll);
     widget.libraryCache?.addListener(_onLibraryCacheChanged);
     _primeFromSyncAndRefresh();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _notifyTitleChanged();
+      if (widget.initialScrollOffset > 0 && _scrollController.hasClients) {
+        widget.onScrollOffsetChanged?.call(_scrollController.offset);
+      }
+    });
   }
 
   @override
@@ -100,6 +113,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
       _displayName = widget.artistName.trim().isNotEmpty
           ? widget.artistName.trim()
           : (widget.artistKey?.trim() ?? '未知藝術家');
+      _notifyTitleChanged();
       _primeFromSyncAndRefresh();
     }
   }
@@ -115,6 +129,12 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
   void _handleScroll() {
     if (!_scrollController.hasClients) return;
     widget.onScrollOffsetChanged?.call(_scrollController.offset);
+  }
+
+  void _notifyTitleChanged() {
+    if (_displayName.isNotEmpty) {
+      widget.onTitleChanged?.call(_displayName);
+    }
   }
 
   bool _isEntryUnchanged(ArtistIndexEntry entry) {
@@ -146,6 +166,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     _tracks = entry.tracks;
     _representativeAlbum = entry.representativeAlbum;
     _representativeTrack = entry.representativeTrack;
+    _notifyTitleChanged();
   }
 
   void _primeFromSyncAndRefresh() {
@@ -448,10 +469,12 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                 ? _tracks.length
                 : math.min(_tracks.length, previewTrackLimit);
 
-            return CustomScrollView(
-              key: PageStorageKey<String>('artist_detail_$_lookupKey'),
-              controller: _scrollController,
-              slivers: [
+            return KeyedSubtree(
+              key: const Key('artist_detail_scroll_view'),
+              child: CustomScrollView(
+                key: PageStorageKey<String>('artist_detail_$_lookupKey'),
+                controller: _scrollController,
+                slivers: [
                 // ─── Section 1: Artist Hero ───
                 SliverToBoxAdapter(
                   child: Padding(
@@ -587,7 +610,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                     ),
                   ),
               ],
-            );
+            ));
           },
         );
       },
@@ -736,17 +759,20 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
           ),
         ),
         const SizedBox(height: 10),
-        Text(
-          _displayName,
-          key: const Key('artist_hero_title'),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: isWide ? 32 : 22,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.4,
-            height: 1.15,
+        KeyedSubtree(
+          key: const Key('artist_hero_name'),
+          child: Text(
+            _displayName,
+            key: const Key('artist_hero_title'),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: isWide ? 32 : 22,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.4,
+              height: 1.15,
+            ),
           ),
         ),
         const SizedBox(height: 8),
@@ -1064,27 +1090,45 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
 
                 return Row(
                   children: [
-                    // Leading index / playing indicator
+                    // Leading index / playing indicator (turns into play button on hover with smooth 30ms transition)
                     SizedBox(
                       width: 24,
-                      child: isPlaying
-                          ? const Icon(
-                              Icons.equalizer_rounded,
-                              key: Key('artist_track_playing_indicator'),
-                              size: 16,
-                              color: _accentBlue,
-                            )
-                          : Text(
-                              '${widget.index + 1}',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: _rowHovered
-                                    ? LuminaTokens.textSecondary
-                                    : LuminaTokens.textMuted,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
+                      child: Center(
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 30),
+                          transitionBuilder: (child, animation) =>
+                              FadeTransition(
+                            opacity: animation,
+                            child: child,
+                          ),
+                          child: isPlaying
+                              ? const Icon(
+                                  Icons.equalizer_rounded,
+                                  key: Key('artist_track_playing_indicator'),
+                                  size: 16,
+                                  color: _accentBlue,
+                                )
+                              : (_rowHovered
+                                  ? const Icon(
+                                      Icons.play_arrow_rounded,
+                                      key: Key('artist_track_hover_play'),
+                                      size: 16,
+                                      color: _accentBlue,
+                                    )
+                                  : Text(
+                                      '${widget.index + 1}',
+                                      key: Key('artist_track_num_${widget.index}'),
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: _rowHovered
+                                            ? LuminaTokens.textSecondary
+                                            : LuminaTokens.textMuted,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    )),
+                        ),
+                      ),
                     ),
                     const SizedBox(width: 8),
 

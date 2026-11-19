@@ -1,6 +1,7 @@
 ﻿import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../models/nav_entry.dart';
@@ -71,7 +72,8 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   static const _canvasBg = LuminaTokens.canvasBg;
   static const _sidebarBg = LuminaTokens.sidebarBg;
   static const _settingsRailBg = LuminaTokens.sidebarBg;
@@ -210,6 +212,10 @@ class _HomeScreenState extends State<HomeScreen> {
   HomeTab _lastSettingsTab = HomeTab.general;
   bool _sidebarCollapsed = false;
   bool _isNowPlayingExpanded = false;
+  bool _isDetailScrolledPastHero = false;
+  String? _activeDetailTitle;
+  late final AnimationController _stickyTitleFadeController;
+  late final Animation<double> _stickyTitleFadeAnimation;
   String? _selectedAlbumId;
   String? _selectedCreditArtistId;
   String? _selectedSmartPlaylistId;
@@ -228,6 +234,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _stickyTitleFadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _stickyTitleFadeAnimation = CurvedAnimation(
+      parent: _stickyTitleFadeController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+
     _ownsNavController = widget.navHistoryController == null;
     _navController = widget.navHistoryController ?? NavHistoryController();
     _navController.addListener(_onNavChanged);
@@ -236,6 +252,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _libraryCache = widget.libraryCache ?? LibraryIndexCache();
     _libraryCache.seedFromQueueSync(widget.audioService.queue);
     _libraryCache.prime(widget.audioService);
+    _libraryCache.addListener(_onLibraryCacheChanged);
 
     _ownsScaleController = widget.uiScaleController == null;
     _scaleController = widget.uiScaleController ?? UiScaleController();
@@ -255,6 +272,78 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _onLibraryCacheChanged() {
+    if (!mounted) return;
+    final isDetail =
+        _activeTab == HomeTab.albumDetail || _activeTab == HomeTab.artistDetail;
+    if (isDetail) {
+      setState(() {});
+    }
+  }
+
+  void _onDetailTitleChanged(String title) {
+    if (_activeDetailTitle == title) return;
+    _activeDetailTitle = title;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  void _handleScrollOffsetChanged(String entryId, double offset) {
+    _navController.saveScrollOffset(entryId, offset);
+    final isDetailTab =
+        _activeTab == HomeTab.albumDetail || _activeTab == HomeTab.artistDetail;
+    if (isDetailTab) {
+      final pastHero = offset > 200;
+      if (pastHero != _isDetailScrolledPastHero) {
+        setState(() {
+          _isDetailScrolledPastHero = pastHero;
+          if (pastHero) {
+            _stickyTitleFadeController.forward();
+          } else {
+            _stickyTitleFadeController.reverse();
+          }
+        });
+      }
+    }
+  }
+
+  String _resolveStickyTitle() {
+    if (_activeDetailTitle != null && _activeDetailTitle!.isNotEmpty) {
+      return _activeDetailTitle!;
+    }
+    final entry = _navController.current;
+    if (_activeTab == HomeTab.albumDetail) {
+      final albumId = entry.albumId ?? _selectedAlbumId ?? '';
+      if (albumId.isEmpty) return '';
+      final cachedDetail = _libraryCache.getAlbumDetailSync(albumId) ??
+          _libraryCache.albumDetailsById[albumId];
+      if (cachedDetail != null && cachedDetail.title.isNotEmpty) {
+        return cachedDetail.title;
+      }
+      final cachedSummary = _libraryCache.getAlbumSummarySync(albumId) ??
+          _libraryCache.albumsById[albumId];
+      if (cachedSummary != null && cachedSummary.title.isNotEmpty) {
+        return cachedSummary.title;
+      }
+      return '';
+    }
+    if (_activeTab == HomeTab.artistDetail) {
+      final name = entry.artistName?.trim() ?? '';
+      if (name.isNotEmpty) return name;
+      final key = entry.artistKey?.trim() ?? '';
+      if (key.isNotEmpty) {
+        final fromIndex = _libraryCache.artistsByKey[key]?.displayName;
+        if (fromIndex != null && fromIndex.isNotEmpty) return fromIndex;
+        return key;
+      }
+      return '';
+    }
+    return '';
+  }
+
   void _syncStateFromEntry(NavEntry entry) {
     if (entry.albumId != null) {
       _selectedAlbumId = entry.albumId;
@@ -270,6 +359,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (entry.tab.isSettings) {
       _lastSettingsTab = entry.tab;
+    }
+
+    final isDetailTab =
+        entry.tab == HomeTab.albumDetail || entry.tab == HomeTab.artistDetail;
+    if (isDetailTab) {
+      final savedOffset = _navController.getScrollOffset(entry.effectiveId);
+      _isDetailScrolledPastHero = savedOffset > 200;
+      _stickyTitleFadeController.value = _isDetailScrolledPastHero ? 1.0 : 0.0;
+    } else {
+      _activeDetailTitle = null;
+      _isDetailScrolledPastHero = false;
+      _stickyTitleFadeController.value = 0.0;
     }
   }
 
@@ -304,6 +405,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _stickyTitleFadeController.dispose();
+    _libraryCache.removeListener(_onLibraryCacheChanged);
     _navController.removeListener(_onNavChanged);
     if (_ownsNavController) {
       _navController.dispose();
@@ -418,101 +521,159 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  bool _isTextEditingFocused() {
+    final focus = FocusManager.instance.primaryFocus;
+    if (focus == null) return false;
+    final context = focus.context;
+    if (context == null) return false;
+    if (context.widget is EditableText) return true;
+    return context.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  void _handleEscape() {
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+      return;
+    }
+    if (_isNowPlayingExpanded) {
+      setState(() {
+        _isNowPlayingExpanded = false;
+      });
+      return;
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _handlePointerDown,
-      child: Scaffold(
-        backgroundColor: _canvasBg,
-        body: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final availWidth = constraints.maxWidth;
-              final isDesktop = LuminaResponsive.showDesktopSidebar(availWidth);
-              final sidebarWidth = LuminaResponsive.sidebarWidth(availWidth);
-              return Column(
-                children: [
-                  Expanded(
-                    child: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 220),
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      transitionBuilder: (child, anim) {
-                        final isOverlay =
-                            child.key == const ValueKey('now_playing_stage');
-                        if (isOverlay) {
-                          final slide = Tween<Offset>(
-                            begin: const Offset(0, 0.06),
-                            end: Offset.zero,
-                          ).animate(anim);
-                          return FadeTransition(
-                            opacity: anim,
-                            child: SlideTransition(
-                              position: slide,
-                              child: child,
-                            ),
-                          );
-                        }
-                        return FadeTransition(opacity: anim, child: child);
-                      },
-                      child: _isNowPlayingExpanded
-                          ? NowPlayingOverlay(
-                              key: const ValueKey('now_playing_stage'),
-                              audioService: widget.audioService,
-                              onCollapse: () {
-                                setState(() => _isNowPlayingExpanded = false);
-                              },
-                            )
-                          : KeyedSubtree(
-                              key: const ValueKey('workspace_stage'),
-                              child: isDesktop
-                                  ? Row(
-                                      children: [
-                                        ClipRect(
-                                          child: AnimatedAlign(
-                                            duration: const Duration(
-                                              milliseconds: 220,
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.space): () {
+            if (_isTextEditingFocused()) return;
+            widget.audioService.togglePlayPause();
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true):
+              _goBack,
+          const SingleActivator(LogicalKeyboardKey.backspace): () {
+            if (_isTextEditingFocused()) return;
+            _goBack();
+          },
+          const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
+              _goForward,
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+            _selectTab(HomeTab.library);
+          },
+          const SingleActivator(LogicalKeyboardKey.keyF, meta: true): () {
+            _selectTab(HomeTab.library);
+          },
+          const SingleActivator(LogicalKeyboardKey.keyM): () {
+            if (_isTextEditingFocused()) return;
+            widget.audioService.toggleMute();
+          },
+          const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            backgroundColor: _canvasBg,
+            body: SafeArea(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final availWidth = constraints.maxWidth;
+                  final isDesktop =
+                      LuminaResponsive.showDesktopSidebar(availWidth);
+                  final sidebarWidth =
+                      LuminaResponsive.sidebarWidth(availWidth);
+                  return Column(
+                    children: [
+                      Expanded(
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 220),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          transitionBuilder: (child, anim) {
+                            final isOverlay = child.key ==
+                                const ValueKey('now_playing_stage');
+                            if (isOverlay) {
+                              final slide = Tween<Offset>(
+                                begin: const Offset(0, 0.06),
+                                end: Offset.zero,
+                              ).animate(anim);
+                              return FadeTransition(
+                                opacity: anim,
+                                child: SlideTransition(
+                                  position: slide,
+                                  child: child,
+                                ),
+                              );
+                            }
+                            return FadeTransition(opacity: anim, child: child);
+                          },
+                          child: _isNowPlayingExpanded
+                              ? NowPlayingOverlay(
+                                  key: const ValueKey('now_playing_stage'),
+                                  audioService: widget.audioService,
+                                  onCollapse: () {
+                                    setState(
+                                        () => _isNowPlayingExpanded = false);
+                                  },
+                                )
+                              : KeyedSubtree(
+                                  key: const ValueKey('workspace_stage'),
+                                  child: isDesktop
+                                      ? Row(
+                                          children: [
+                                            ClipRect(
+                                              child: AnimatedAlign(
+                                                duration: const Duration(
+                                                  milliseconds: 220,
+                                                ),
+                                                curve: Curves.easeOutCubic,
+                                                alignment:
+                                                    Alignment.centerRight,
+                                                widthFactor: _sidebarCollapsed
+                                                    ? 0.0
+                                                    : 1.0,
+                                                child: _buildSidebar(
+                                                  width: sidebarWidth,
+                                                ),
+                                              ),
                                             ),
-                                            curve: Curves.easeOutCubic,
-                                            alignment: Alignment.centerRight,
-                                            widthFactor:
-                                                _sidebarCollapsed ? 0.0 : 1.0,
-                                            child: _buildSidebar(
-                                              width: sidebarWidth,
+                                            Expanded(
+                                              child: _buildMainColumn(
+                                                isDesktop: true,
+                                                availWidth: availWidth,
+                                              ),
                                             ),
-                                          ),
+                                          ],
+                                        )
+                                      : _buildMainColumn(
+                                          isDesktop: false,
+                                          availWidth: availWidth,
                                         ),
-                                        Expanded(
-                                          child: _buildMainColumn(
-                                            isDesktop: true,
-                                            availWidth: availWidth,
-                                          ),
-                                        ),
-                                      ],
-                                    )
-                                  : _buildMainColumn(
-                                      isDesktop: false,
-                                      availWidth: availWidth,
-                                    ),
-                            ),
-                    ),
-                  ),
-                  FloatingCapsuleMiniPlayer(
-                    audioService: widget.audioService,
-                    uiScaleController: _scaleController,
-                    showLyrics: _isNowPlayingExpanded,
-                    isNowPlayingExpanded: _isNowPlayingExpanded,
-                    glassShader: _glassShader,
-                    backdropImage: _shaders.backdropImage,
-                    onToggleLyrics: _toggleNowPlaying,
-                    onToggleNowPlaying: _toggleNowPlaying,
-                    onOpenZones: () => _selectTab(HomeTab.zones),
-                    onOpenLibrary: () => _selectTab(HomeTab.library),
-                  ),
-                ],
-              );
-            },
+                                ),
+                        ),
+                      ),
+                      FloatingCapsuleMiniPlayer(
+                        audioService: widget.audioService,
+                        uiScaleController: _scaleController,
+                        showLyrics: _isNowPlayingExpanded,
+                        isNowPlayingExpanded: _isNowPlayingExpanded,
+                        glassShader: _glassShader,
+                        backdropImage: _shaders.backdropImage,
+                        onToggleLyrics: _toggleNowPlaying,
+                        onToggleNowPlaying: _toggleNowPlaying,
+                        onOpenZones: () => _selectTab(HomeTab.zones),
+                        onOpenLibrary: () => _selectTab(HomeTab.library),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
           ),
         ),
       ),
@@ -974,23 +1135,10 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             onPressed: canGoForward ? _goForward : null,
           ),
-          if (!isDesktop || _sidebarCollapsed) ...[
-            SizedBox(width: isCompactTopBar ? 2 : 4),
-            const Expanded(
-              child: Text(
-                'Lumina Audio',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            SizedBox(width: isCompactTopBar ? 4 : 8),
-          ] else
-            const Spacer(),
+          _buildTopBarTitle(
+            isDesktop: isDesktop,
+            isCompactTopBar: isCompactTopBar,
+          ),
           if (isDesktop && availWidth >= 600) ...[
             _buildQuickScaleMenu(),
             const SizedBox(width: 6),
@@ -1057,6 +1205,66 @@ class _HomeScreenState extends State<HomeScreen> {
             compact: isCompactProfile,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTopBarTitle({
+    required bool isDesktop,
+    required bool isCompactTopBar,
+  }) {
+    final showDefaultTitle = !isDesktop || _sidebarCollapsed;
+    final isDetailTab =
+        _activeTab == HomeTab.albumDetail || _activeTab == HomeTab.artistDetail;
+    final stickyTitle = isDetailTab ? _resolveStickyTitle() : '';
+
+    return Expanded(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
+        child: AnimatedBuilder(
+          animation: _stickyTitleFadeAnimation,
+          builder: (context, _) {
+            final t = _stickyTitleFadeAnimation.value;
+            return Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                if (showDefaultTitle)
+                  Opacity(
+                    opacity: (1.0 - t).clamp(0.0, 1.0),
+                    child: const Text(
+                      'Lumina Audio',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: LuminaTokens.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                if (isDetailTab && stickyTitle.isNotEmpty)
+                  FadeTransition(
+                    opacity: _stickyTitleFadeAnimation,
+                    child: IgnorePointer(
+                      ignoring: t < 0.05,
+                      child: Text(
+                        stickyTitle,
+                        key: const Key('top_bar_sticky_title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: LuminaTokens.textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -1368,7 +1576,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final entryId = entry.effectiveId;
     final savedOffset = _navController.getScrollOffset(entryId);
     void onOffsetChanged(double offset) {
-      _navController.saveScrollOffset(entryId, offset);
+      _handleScrollOffsetChanged(entryId, offset);
     }
 
     if (_activeTab == HomeTab.home) {
@@ -1438,6 +1646,7 @@ class _HomeScreenState extends State<HomeScreen> {
           onOpenArtistCredits: _openArtistCredits,
           initialScrollOffset: savedOffset,
           onScrollOffsetChanged: onOffsetChanged,
+          onTitleChanged: _onDetailTitleChanged,
         ),
         HomeTab.credits => AlbumsAndCreditsView(
           key: ValueKey('credits_mode_${entry.creditArtistId ?? entryId}'),
@@ -1470,6 +1679,7 @@ class _HomeScreenState extends State<HomeScreen> {
           onOpenCredits: () => _openArtistCredits(null),
           initialScrollOffset: savedOffset,
           onScrollOffsetChanged: onOffsetChanged,
+          onTitleChanged: _onDetailTitleChanged,
         ),
         HomeTab.audiobooks => AudiobooksView(audioService: widget.audioService),
         HomeTab.podcasts => PodcastsView(audioService: widget.audioService),

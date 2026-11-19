@@ -23,6 +23,10 @@ class AlbumDetailPage extends StatefulWidget {
   final void Function(String artistName)? onOpenArtist;
   final double initialScrollOffset;
   final ValueChanged<double>? onScrollOffsetChanged;
+  final ValueChanged<String>? onTitleChanged;
+
+  /// Scroll offset threshold past which the compact sticky header should appear in the top bar.
+  static const double stickyTitleScrollThreshold = 200.0;
 
   const AlbumDetailPage({
     super.key,
@@ -35,6 +39,7 @@ class AlbumDetailPage extends StatefulWidget {
     this.onOpenArtist,
     this.initialScrollOffset = 0.0,
     this.onScrollOffsetChanged,
+    this.onTitleChanged,
   });
 
   /// Formats single-line unified album metadata as:
@@ -183,6 +188,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
     _hydrateFromCacheSync();
     _load();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _notifyTitleChanged();
+      if (widget.initialScrollOffset > 0 && _scrollController.hasClients) {
+        widget.onScrollOffsetChanged?.call(_scrollController.offset);
+      }
+    });
   }
 
   @override
@@ -193,6 +206,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       _error = null;
       _hydrateFromCacheSync();
       _load();
+      _notifyTitleChanged();
       if (_scrollController.hasClients) {
         final target = widget.initialScrollOffset.clamp(
           0.0,
@@ -217,6 +231,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     widget.onScrollOffsetChanged?.call(_scrollController.offset);
   }
 
+  void _notifyTitleChanged() {
+    final title = _detail?.title ?? _summaryFallback?.title;
+    if (title != null && title.isNotEmpty) {
+      widget.onTitleChanged?.call(title);
+    }
+  }
+
   void _hydrateFromCacheSync() {
     final cache = widget.libraryCache;
     if (cache == null) return;
@@ -226,6 +247,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     if (cachedDetail != null) {
       _detail = cachedDetail;
       _loading = false;
+      _notifyTitleChanged();
     } else if (cachedSummary != null) {
       _detail = CanonicalAlbumDetail(
         id: cachedSummary.id,
@@ -235,6 +257,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         coverUrl: cachedSummary.coverUrl,
       );
       _loading = false;
+      _notifyTitleChanged();
     }
   }
 
@@ -255,6 +278,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         }
         _loading = false;
       });
+      _notifyTitleChanged();
     } catch (e) {
       if (!mounted || epoch != _loadEpoch) return;
       setState(() {
@@ -494,27 +518,30 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     final title = _detail?.title ?? _summaryFallback?.title ?? '';
     final artist = _detail?.artistName ?? _summaryFallback?.artist ?? '';
     final coverUrl = _detail?.coverUrl ?? _summaryFallback?.coverUrl;
-    return AlbumArtworkView(
-      key: ValueKey('album_detail_cover_${widget.albumId}_$_coverRevision'),
-      album: CanonicalAlbumSummary(
-        id: widget.albumId,
-        title: title,
-        artist: artist,
-        coverUrl: coverUrl,
-      ),
-      size: size,
-      revision: _coverRevision,
-      audioService: widget.audioService,
-      libraryCache: widget.libraryCache,
-      fullResolution: true,
-      borderRadius: BorderRadius.circular(12),
-      boxShadow: const [
-        BoxShadow(
-          color: Color(0x77000000),
-          blurRadius: 32,
-          offset: Offset(0, 12),
+    return KeyedSubtree(
+      key: const Key('album_cover_view'),
+      child: AlbumArtworkView(
+        key: ValueKey('album_detail_cover_${widget.albumId}_$_coverRevision'),
+        album: CanonicalAlbumSummary(
+          id: widget.albumId,
+          title: title,
+          artist: artist,
+          coverUrl: coverUrl,
         ),
-      ],
+        size: size,
+        revision: _coverRevision,
+        audioService: widget.audioService,
+        libraryCache: widget.libraryCache,
+        fullResolution: true,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x77000000),
+            blurRadius: 32,
+            offset: Offset(0, 12),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1226,30 +1253,43 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
               ),
               child: Row(
                 children: [
-                  // Track Number or Playing Indicator Icon
+                  // Track Number or Playing Indicator Icon (smooth 30ms transition on hover to play button)
                   SizedBox(
                     width: 34,
                     child: Center(
-                      child: isPlaying
-                          ? Icon(
-                              Icons.equalizer_rounded,
-                              key: Key(
-                                'track_playing_icon_${widget.track.id}',
-                              ),
-                              size: 18,
-                              color: _accentBlue,
-                            )
-                          : Text(
-                              widget.displayNumber,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: _isHovered
-                                    ? LuminaTokens.textSecondary
-                                    : LuminaTokens.textMuted,
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 30),
+                        transitionBuilder: (child, animation) => FadeTransition(
+                          opacity: animation,
+                          child: child,
+                        ),
+                        child: isPlaying
+                            ? Icon(
+                                Icons.equalizer_rounded,
+                                key: Key(
+                                  'track_playing_icon_${widget.track.id}',
+                                ),
+                                size: 18,
+                                color: _accentBlue,
+                              )
+                            : (_isHovered
+                                ? Icon(
+                                    Icons.play_arrow_rounded,
+                                    key: Key('track_hover_play_${widget.index}'),
+                                    size: 18,
+                                    color: _accentBlue,
+                                  )
+                                : Text(
+                                    widget.displayNumber,
+                                    key: Key('track_number_${widget.index}'),
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: LuminaTokens.textMuted,
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  )),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
