@@ -468,24 +468,56 @@ pub fn parse_id3v2_body(raw_body: &[u8], major: u8, tag_flags: u8) -> Id3v2Parse
         }
     }
 
-    while offset + 10 <= data.len() {
+    while offset < data.len() {
         if data[offset] == 0 {
             break;
         }
 
-        let frame_id = match std::str::from_utf8(&data[offset..offset + 4]) {
-            Ok(id) if id.chars().all(|c| c.is_ascii_alphanumeric()) => id,
-            _ => break,
-        };
-
-        let frame_size = if major == 4 {
-            decode_syncsafe(&data[offset + 4..offset + 8]) as usize
+        let (frame_id, frame_size, header_len, frame_flags) = if major == 2 {
+            if offset + 6 > data.len() {
+                break;
+            }
+            let raw_id = match std::str::from_utf8(&data[offset..offset + 3]) {
+                Ok(id) if id.chars().all(|c| c.is_ascii_alphanumeric()) => id,
+                _ => break,
+            };
+            let sz = ((data[offset + 3] as usize) << 16)
+                | ((data[offset + 4] as usize) << 8)
+                | (data[offset + 5] as usize);
+            let mapped_id = match raw_id {
+                "TT2" => "TIT2",
+                "TP1" => "TPE1",
+                "TAL" => "TALB",
+                "TP2" => "TPE2",
+                "TRK" => "TRCK",
+                "TPA" => "TPOS",
+                "TYE" => "TYER",
+                "TCO" => "TCON",
+                "TCM" => "TCOM",
+                "TXX" => "TXXX",
+                "ULT" => "USLT",
+                "PIC" => "APIC",
+                _ => raw_id,
+            };
+            (mapped_id, sz, 6, 0u16)
         } else {
-            u32::from_be_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize
+            if offset + 10 > data.len() {
+                break;
+            }
+            let raw_id = match std::str::from_utf8(&data[offset..offset + 4]) {
+                Ok(id) if id.chars().all(|c| c.is_ascii_alphanumeric()) => id,
+                _ => break,
+            };
+            let sz = if major == 4 {
+                decode_syncsafe(&data[offset + 4..offset + 8]) as usize
+            } else {
+                u32::from_be_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize
+            };
+            let flags = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
+            (raw_id, sz, 10, flags)
         };
 
-        let frame_flags = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
-        offset += 10;
+        offset += header_len;
 
         if frame_size == 0 || offset + frame_size > data.len() {
             break;
@@ -561,8 +593,14 @@ pub fn parse_id3v2_body(raw_body: &[u8], major: u8, tag_flags: u8) -> Id3v2Parse
             }
             "TRCK" => {
                 let t = decode_id3_text(frame_payload);
-                if let Some(num) = parse_slash_number(&t) {
+                let (trk, disc) = parse_track_and_disc_number(&t);
+                if let Some(num) = trk {
                     tags.track_number = Some(num);
+                }
+                if tags.disc_number.is_none() {
+                    if let Some(d) = disc {
+                        tags.disc_number = Some(d);
+                    }
                 }
             }
             "TPOS" => {
@@ -945,10 +983,35 @@ fn decode_id3_text_with_enc(encoding: u8, content: &[u8]) -> String {
     }
 }
 
-pub fn parse_slash_number(text: &str) -> Option<u16> {
+pub fn parse_track_and_disc_number(text: &str) -> (Option<u16>, Option<u16>) {
     let clean = text.trim();
-    let num_part = clean.split('/').next()?.trim();
-    num_part.parse::<u16>().ok().map(|n| n.max(1))
+    if clean.is_empty() {
+        return (None, None);
+    }
+    // Disc-Track pattern like "1-02", "01-05", "1.02"
+    if let Some((disc_str, trk_str)) = clean.split_once('-').or_else(|| clean.split_once('.')) {
+        let disc_trim = disc_str.trim();
+        let trk_trim = trk_str.trim().split('/').next().unwrap_or("").trim();
+        if let (Ok(disc), Ok(trk)) = (disc_trim.parse::<u16>(), trk_trim.parse::<u16>()) {
+            if disc > 0 && trk > 0 {
+                return (Some(trk), Some(disc));
+            }
+        }
+    }
+    // "02/12" pattern
+    let num_part = clean.split('/').next().unwrap_or(clean).trim();
+    if let Ok(trk) = num_part.parse::<u16>() {
+        return (Some(trk.max(1)), None);
+    }
+    let digits: String = num_part.chars().filter(|c| c.is_ascii_digit()).collect();
+    if let Ok(trk) = digits.parse::<u16>() {
+        return (Some(trk.max(1)), None);
+    }
+    (None, None)
+}
+
+pub fn parse_slash_number(text: &str) -> Option<u16> {
+    parse_track_and_disc_number(text).0
 }
 
 pub fn parse_year(text: &str) -> Option<i32> {

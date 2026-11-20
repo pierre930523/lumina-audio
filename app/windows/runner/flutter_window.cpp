@@ -60,8 +60,10 @@ bool FlutterWindow::OnCreate() {
           PostMessage(hwnd, WM_CLOSE, 0, 0);
           result->Success();
         } else if (method == "startDragging") {
+          POINT pt;
+          GetCursorPos(&pt);
           ReleaseCapture();
-          SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+          SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
           result->Success();
         } else {
           result->NotImplemented();

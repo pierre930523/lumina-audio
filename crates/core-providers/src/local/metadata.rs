@@ -9,9 +9,10 @@ use symphonia::core::meta::{MetadataOptions, StandardTagKey, Value};
 use symphonia::core::probe::Hint;
 
 use super::dsd_meta::{
-    parse_dff, parse_dff_reader, parse_dsf, parse_dsf_reader, parse_id3v2_from_reader,
-    parse_id3v2_from_slice, parse_replay_gain_db_str, parse_replay_gain_peak_str,
-    parse_slash_number, parse_year, Id3v2ParsedTags,
+    decode_syncsafe, parse_dff, parse_dff_reader, parse_dsf, parse_dsf_reader,
+    parse_id3v2_from_reader, parse_id3v2_from_slice, parse_replay_gain_db_str,
+    parse_replay_gain_peak_str, parse_slash_number, parse_track_and_disc_number, parse_year,
+    Id3v2ParsedTags,
 };
 use crate::error::ProviderError;
 
@@ -84,6 +85,13 @@ impl MetadataExtractor {
             "wav" | "wave" => Self::extract_wav(path),
             "dsf" => Self::extract_dsf(path),
             "dff" => Self::extract_dff(path),
+            "flac" => {
+                if let Ok(meta) = Self::extract_flac(path) {
+                    Ok(meta)
+                } else {
+                    Self::extract_symphonia(path, &ext)
+                }
+            }
             _ => Self::extract_symphonia(path, &ext),
         }
     }
@@ -112,6 +120,21 @@ impl MetadataExtractor {
                 let dsd = parse_dff_reader(&mut cursor)?;
                 Ok(build_dff_extracted(dsd, fallback_path))
             }
+            "flac" => {
+                let cursor = Cursor::new(bytes.clone());
+                if let Ok(meta) = extract_flac_from_reader(cursor, fallback_path) {
+                    Ok(meta)
+                } else {
+                    let id3_fallback = scan_id3v2_from_slice(&bytes, &ext_lower);
+                    let cursor = Cursor::new(bytes);
+                    Self::extract_symphonia_from_source(
+                        Box::new(cursor),
+                        &ext_lower,
+                        fallback_path,
+                        id3_fallback,
+                    )
+                }
+            }
             _ => {
                 let id3_fallback = scan_id3v2_from_slice(&bytes, &ext_lower);
                 let cursor = Cursor::new(bytes);
@@ -123,6 +146,11 @@ impl MetadataExtractor {
                 )
             }
         }
+    }
+
+    fn extract_flac(path: &Path) -> Result<ExtractedMetadata, ProviderError> {
+        let file = File::open(path)?;
+        extract_flac_from_reader(file, path)
     }
 
     fn extract_wav(path: &Path) -> Result<ExtractedMetadata, ProviderError> {
@@ -281,8 +309,14 @@ impl MetadataExtractor {
                             }
                         }
                         StandardTagKey::TrackNumber => {
-                            if let Some(num) = parse_slash_number(&tag_str) {
+                            let (trk, disc) = parse_track_and_disc_number(&tag_str);
+                            if let Some(num) = trk {
                                 raw_track_number = Some(num);
+                            }
+                            if raw_disc_number.is_none() {
+                                if let Some(d) = disc {
+                                    raw_disc_number = Some(d);
+                                }
                             }
                         }
                         StandardTagKey::DiscNumber => {
@@ -338,11 +372,19 @@ impl MetadataExtractor {
                         "TITLE" if raw_title.is_none() => raw_title = Some(tag_str),
                         "ARTIST" if raw_artist.is_none() => raw_artist = Some(tag_str),
                         "ALBUM" if raw_album.is_none() => raw_album = Some(tag_str),
-                        "ALBUMARTIST" | "ALBUM_ARTIST" if raw_album_artist.is_none() => {
+                        "ALBUMARTIST" if raw_album_artist.is_none() => {
                             raw_album_artist = Some(tag_str)
                         }
                         "TRACKNUMBER" | "TRACK" if raw_track_number.is_none() => {
-                            raw_track_number = parse_slash_number(&tag_str);
+                            let (trk, disc) = parse_track_and_disc_number(&tag_str);
+                            if let Some(num) = trk {
+                                raw_track_number = Some(num);
+                            }
+                            if raw_disc_number.is_none() {
+                                if let Some(d) = disc {
+                                    raw_disc_number = Some(d);
+                                }
+                            }
                         }
                         "DISCNUMBER" | "DISC" if raw_disc_number.is_none() => {
                             raw_disc_number = parse_slash_number(&tag_str);
@@ -353,22 +395,22 @@ impl MetadataExtractor {
                         "ISRC" if raw_isrc.is_none() => {
                             raw_isrc = normalize_isrc(&tag_str);
                         }
-                        "REPLAYGAIN_TRACK_GAIN" if raw_rg_track_db.is_none() => {
+                        "REPLAYGAINTRACKGAIN" | "REPLAYGAIN_TRACK_GAIN" if raw_rg_track_db.is_none() => {
                             raw_rg_track_db = parse_replay_gain_db_value(&tag.value);
                         }
-                        "REPLAYGAIN_ALBUM_GAIN" if raw_rg_album_db.is_none() => {
+                        "REPLAYGAINALBUMGAIN" | "REPLAYGAIN_ALBUM_GAIN" if raw_rg_album_db.is_none() => {
                             raw_rg_album_db = parse_replay_gain_db_value(&tag.value);
                         }
-                        "REPLAYGAIN_TRACK_PEAK" if raw_rg_track_peak.is_none() => {
+                        "REPLAYGAINTRACKPEAK" | "REPLAYGAIN_TRACK_PEAK" if raw_rg_track_peak.is_none() => {
                             raw_rg_track_peak = parse_replay_gain_peak_value(&tag.value);
                         }
-                        "REPLAYGAIN_ALBUM_PEAK" if raw_rg_album_peak.is_none() => {
+                        "REPLAYGAINALBUMPEAK" | "REPLAYGAIN_ALBUM_PEAK" if raw_rg_album_peak.is_none() => {
                             raw_rg_album_peak = parse_replay_gain_peak_value(&tag.value);
                         }
                         "UPC" | "BARCODE" | "EAN" if raw_upc.is_none() => {
                             raw_upc = normalize_upc(&tag_str);
                         }
-                        "MUSICBRAINZ_RELEASEGROUPID" | "MUSICBRAINZ RELEASE GROUP ID"
+                        "MUSICBRAINZRELEASEGROUPID" | "MUSICBRAINZ_RELEASEGROUPID" | "MUSICBRAINZ RELEASE GROUP ID"
                             if raw_mb_rg_id.is_none() =>
                         {
                             let trimmed = tag_str.trim();
@@ -773,7 +815,7 @@ fn build_dff_extracted(dsd: super::dsd_meta::DsdMetadata, path: &Path) -> Extrac
 fn normalize_custom_tag_key(raw_key: &str) -> String {
     let trimmed = raw_key.trim();
     let tail = trimmed.rsplit(':').next().unwrap_or(trimmed).trim();
-    tail.to_ascii_uppercase()
+    tail.to_ascii_uppercase().replace([' ', '_', '-'], "")
 }
 
 fn parse_replay_gain_db_value(value: &Value) -> Option<f64> {
@@ -902,28 +944,345 @@ pub fn derive_title_and_track_from_filename(path: &Path) -> (String, u16) {
     (final_title, track_num)
 }
 
+pub fn is_generic_directory_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "" | "music"
+            | "mymusic"
+            | "my music"
+            | "desktop"
+            | "downloads"
+            | "download"
+            | "documents"
+            | "mydocuments"
+            | "my documents"
+            | "flac"
+            | "mp3"
+            | "hi-res"
+            | "hires"
+            | "audio"
+            | "sound"
+            | "tracks"
+            | "songs"
+            | "album"
+            | "albums"
+            | "artist"
+            | "artists"
+            | "various"
+            | "various artists"
+            | "unknown"
+            | "unknown artist"
+            | "unknown album"
+            | "users"
+            | "user"
+            | "home"
+    ) || lower.starts_with("cd")
+        || lower.starts_with("disc")
+        || lower.starts_with("disk")
+}
+
 pub fn derive_album_and_artist_from_dir(path: &Path) -> (String, String) {
     let parent = path.parent();
-    let raw_album = parent
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("Unknown Album");
-    let album_name = if raw_album.trim().is_empty() {
+    let mut album_dir = parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+    let mut artist_dir = parent.and_then(|p| p.parent()).and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+
+    // Detect multi-disc subfolders (CD1, Disc 2, etc.)
+    let lower_album = album_dir.trim().to_ascii_lowercase();
+    if lower_album.starts_with("cd") || lower_album.starts_with("disc") || lower_album.starts_with("disk") {
+        album_dir = artist_dir;
+        artist_dir = parent
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+    }
+
+    let album_name = if album_dir.trim().is_empty() || is_generic_directory_name(album_dir) {
         "Unknown Album".to_string()
     } else {
-        raw_album.to_string()
+        album_dir.trim().to_string()
     };
 
-    let raw_artist = parent
-        .and_then(|p| p.parent())
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("Unknown Artist");
-    let artist_name = if raw_artist.trim().is_empty() {
+    let artist_name = if artist_dir.trim().is_empty() || is_generic_directory_name(artist_dir) {
         "Unknown Artist".to_string()
     } else {
-        raw_artist.to_string()
+        artist_dir.trim().to_string()
     };
 
     (album_name, artist_name)
+}
+
+fn extract_flac_from_reader<R: Read + Seek>(
+    mut reader: R,
+    fallback_path: &Path,
+) -> Result<ExtractedMetadata, ProviderError> {
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic)?;
+
+    let mut id3_fallback = None;
+    if &magic[0..3] == b"ID3" {
+        let mut hdr_tail = [0u8; 6];
+        reader.read_exact(&mut hdr_tail)?;
+        let major = hdr_tail[1];
+        let flags = hdr_tail[2];
+        let tag_size = decode_syncsafe(&hdr_tail[2..6]) as usize;
+        let mut body = vec![0u8; tag_size];
+        let _ = reader.read_exact(&mut body);
+        id3_fallback = Some(super::dsd_meta::parse_id3v2_body(&body, major, flags));
+
+        let mut b = [0u8; 1];
+        while reader.read_exact(&mut b).is_ok() {
+            if b[0] != 0 {
+                let mut rest = [0u8; 3];
+                reader.read_exact(&mut rest)?;
+                magic = [b[0], rest[0], rest[1], rest[2]];
+                break;
+            }
+        }
+    }
+
+    if &magic != b"fLaC" {
+        return Err(ProviderError::UnsupportedFormat(
+            "Invalid FLAC stream marker".to_string(),
+        ));
+    }
+
+    let mut sample_rate = 44100u32;
+    let mut channels = 2u8;
+    let mut bit_depth = 16u8;
+    let mut duration_ms = 1000u64;
+
+    let mut raw_title: Option<String> = None;
+    let mut raw_artist: Option<String> = None;
+    let mut raw_album: Option<String> = None;
+    let mut raw_album_artist: Option<String> = None;
+    let mut raw_track_number: Option<u16> = None;
+    let mut raw_disc_number: Option<u16> = None;
+    let mut raw_year: Option<i32> = None;
+    let mut raw_isrc: Option<String> = None;
+    let mut raw_rg_track_db: Option<f64> = None;
+    let mut raw_rg_album_db: Option<f64> = None;
+    let mut raw_rg_track_peak: Option<f64> = None;
+    let mut raw_rg_album_peak: Option<f64> = None;
+    let mut raw_upc: Option<String> = None;
+    let mut raw_mb_rg_id: Option<String> = None;
+    let mut raw_edition: Option<String> = None;
+    let mut raw_genre: Option<String> = None;
+    let mut raw_composer: Option<String> = None;
+    let mut raw_lyrics: Option<String> = None;
+    let mut extracted_pictures: Vec<core_types::ExtractedPicture> = Vec::new();
+
+    loop {
+        let mut hdr = [0u8; 4];
+        if reader.read_exact(&mut hdr).is_err() {
+            break;
+        }
+        let is_last = (hdr[0] & 0x80) != 0;
+        let block_type = hdr[0] & 0x7F;
+        let block_len = ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | (hdr[3] as usize);
+
+        match block_type {
+            0 => {
+                let mut data = vec![0u8; block_len];
+                if reader.read_exact(&mut data).is_ok() && block_len >= 18 {
+                    let b = &data[10..18];
+                    sample_rate = ((b[0] as u32) << 12) | ((b[1] as u32) << 4) | ((b[2] as u32) >> 4);
+                    channels = (((b[2] >> 1) & 0x07) + 1) as u8;
+                    bit_depth = ((((b[2] & 0x01) << 4) | (b[3] >> 4)) + 1) as u8;
+                    let total_samples = (((b[3] & 0x0F) as u64) << 32)
+                        | ((b[4] as u64) << 24)
+                        | ((b[5] as u64) << 16)
+                        | ((b[6] as u64) << 8)
+                        | (b[7] as u64);
+                    if sample_rate > 0 {
+                        duration_ms = ((total_samples * 1000) / sample_rate as u64).max(1);
+                    }
+                }
+            }
+            4 => {
+                let mut data = vec![0u8; block_len];
+                if reader.read_exact(&mut data).is_ok() && data.len() >= 8 {
+                    let vendor_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+                    let mut cursor = 4 + vendor_len;
+                    if cursor + 4 <= data.len() {
+                        let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+                        cursor += 4;
+                        for _ in 0..count {
+                            if cursor + 4 > data.len() {
+                                break;
+                            }
+                            let c_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+                            cursor += 4;
+                            if cursor + c_len > data.len() {
+                                break;
+                            }
+                            let comment_str = String::from_utf8_lossy(&data[cursor..cursor + c_len]);
+                            cursor += c_len;
+
+                            if let Some((raw_k, raw_v)) = comment_str.split_once('=') {
+                                let norm_k = normalize_custom_tag_key(raw_k);
+                                let val = raw_v.trim().to_string();
+                                if val.is_empty() {
+                                    continue;
+                                }
+                                match norm_k.as_str() {
+                                    "TITLE" if raw_title.is_none() => raw_title = Some(val),
+                                    "ARTIST" if raw_artist.is_none() => raw_artist = Some(val),
+                                    "ALBUM" if raw_album.is_none() => raw_album = Some(val),
+                                    "ALBUMARTIST" if raw_album_artist.is_none() => {
+                                        raw_album_artist = Some(val)
+                                    }
+                                    "TRACKNUMBER" | "TRACK" if raw_track_number.is_none() => {
+                                        let (t, d) = parse_track_and_disc_number(&val);
+                                        raw_track_number = t;
+                                        if raw_disc_number.is_none() {
+                                            raw_disc_number = d;
+                                        }
+                                    }
+                                    "DISCNUMBER" | "DISC" if raw_disc_number.is_none() => {
+                                        raw_disc_number = parse_slash_number(&val);
+                                    }
+                                    "DATE" | "YEAR" if raw_year.is_none() => {
+                                        raw_year = parse_year(&val);
+                                    }
+                                    "GENRE" if raw_genre.is_none() => raw_genre = Some(val),
+                                    "COMPOSER" if raw_composer.is_none() => raw_composer = Some(val),
+                                    "LYRICS" | "UNSYNCEDLYRICS" | "SYNCEDLYRICS" if raw_lyrics.is_none() => {
+                                        raw_lyrics = Some(val);
+                                    }
+                                    "ISRC" if raw_isrc.is_none() => {
+                                        raw_isrc = normalize_isrc(&val);
+                                    }
+                                    "UPC" | "BARCODE" | "EAN" if raw_upc.is_none() => {
+                                        raw_upc = normalize_upc(&val);
+                                    }
+                                    "MUSICBRAINZRELEASEGROUPID" if raw_mb_rg_id.is_none() => {
+                                        raw_mb_rg_id = Some(val);
+                                    }
+                                    "EDITION" | "VERSION" | "RELEASETYPE" if raw_edition.is_none() => {
+                                        raw_edition = Some(val);
+                                    }
+                                    "REPLAYGAINTRACKGAIN" if raw_rg_track_db.is_none() => {
+                                        raw_rg_track_db = parse_replay_gain_db_str(&val);
+                                    }
+                                    "REPLAYGAINALBUMGAIN" if raw_rg_album_db.is_none() => {
+                                        raw_rg_album_db = parse_replay_gain_db_str(&val);
+                                    }
+                                    "REPLAYGAINTRACKPEAK" if raw_rg_track_peak.is_none() => {
+                                        raw_rg_track_peak = parse_replay_gain_peak_str(&val);
+                                    }
+                                    "REPLAYGAINALBUMPEAK" if raw_rg_album_peak.is_none() => {
+                                        raw_rg_album_peak = parse_replay_gain_peak_str(&val);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            6 => {
+                let mut data = vec![0u8; block_len];
+                if reader.read_exact(&mut data).is_ok() && data.len() >= 32 {
+                    let pic_type_val = u32::from_be_bytes(data[0..4].try_into().unwrap());
+                    let pic_type = match pic_type_val {
+                        3 => core_types::PictureType::FrontCover,
+                        4 => core_types::PictureType::BackCover,
+                        _ => core_types::PictureType::Other,
+                    };
+                    let mime_len = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
+                    let mut cur = 8;
+                    if cur + mime_len <= data.len() {
+                        let mime_str = String::from_utf8_lossy(&data[cur..cur + mime_len]).to_string();
+                        cur += mime_len;
+                        if cur + 4 <= data.len() {
+                            let desc_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
+                            cur += 4 + desc_len;
+                            if cur + 20 <= data.len() {
+                                cur += 16;
+                                let data_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
+                                cur += 4;
+                                if cur + data_len <= data.len() {
+                                    extracted_pictures.push(core_types::ExtractedPicture {
+                                        picture_type: pic_type,
+                                        mime_type: if mime_str.is_empty() { "image/jpeg".to_string() } else { mime_str },
+                                        data: data[cur..cur + data_len].to_vec(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                let _ = reader.seek(SeekFrom::Current(block_len as i64));
+            }
+        }
+
+        if is_last {
+            break;
+        }
+    }
+
+    if let Some(id3) = id3_fallback {
+        if raw_title.is_none() { raw_title = id3.title; }
+        if raw_artist.is_none() { raw_artist = id3.artist; }
+        if raw_album.is_none() { raw_album = id3.album; }
+        if raw_album_artist.is_none() { raw_album_artist = id3.album_artist; }
+        if raw_track_number.is_none() { raw_track_number = id3.track_number; }
+        if raw_disc_number.is_none() { raw_disc_number = id3.disc_number; }
+        if raw_year.is_none() { raw_year = id3.release_year; }
+        if raw_isrc.is_none() { raw_isrc = id3.isrc; }
+        if extracted_pictures.is_empty() { extracted_pictures = id3.pictures; }
+    }
+
+    let format = AudioFormat::pcm(
+        AudioCodec::Flac,
+        sample_rate.max(8000),
+        bit_depth.clamp(8, 32),
+        channels.clamp(1, 8),
+    )?;
+
+    let (title_fallback, track_num_fallback) = derive_title_and_track_from_filename(fallback_path);
+    let (album_fallback, artist_fallback) = derive_album_and_artist_from_dir(fallback_path);
+
+    let title = raw_title.filter(|s| !s.trim().is_empty()).unwrap_or(title_fallback);
+    let title = if title.trim().is_empty() { "Unknown Title".to_string() } else { title };
+
+    let artist = raw_artist.filter(|s| !s.trim().is_empty()).unwrap_or(artist_fallback);
+    let artist = if artist.trim().is_empty() { "Unknown Artist".to_string() } else { artist };
+
+    let album = raw_album.filter(|s| !s.trim().is_empty()).unwrap_or(album_fallback);
+    let album = if album.trim().is_empty() { "Unknown Album".to_string() } else { album };
+
+    let album_artist = raw_album_artist.filter(|s| !s.trim().is_empty());
+    let track_number = raw_track_number.unwrap_or(track_num_fallback).max(1);
+    let disc_number = raw_disc_number.unwrap_or(1).max(1);
+
+    Ok(ExtractedMetadata {
+        title,
+        artist,
+        album,
+        album_artist,
+        track_number,
+        disc_number,
+        release_year: raw_year,
+        isrc: raw_isrc,
+        duration_ms: duration_ms.max(1),
+        format,
+        cover_url: None,
+        replay_gain_track_db: raw_rg_track_db,
+        replay_gain_album_db: raw_rg_album_db,
+        replay_gain_track_peak: raw_rg_track_peak,
+        replay_gain_album_peak: raw_rg_album_peak,
+        upc: raw_upc,
+        musicbrainz_release_group_id: raw_mb_rg_id,
+        edition_label: raw_edition,
+        genre: raw_genre,
+        composer: raw_composer,
+        embedded_lyrics: raw_lyrics,
+        pictures: extracted_pictures,
+    })
 }

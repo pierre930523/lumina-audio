@@ -154,13 +154,13 @@ class NowPlayingLayoutMetrics {
           math.max(minPadTop, h * (compact ? 0.08 : 0.14)),
         );
         final padBottom = math.min(
-          ultraCompact ? 8.0 : (compact || shadowBlur < 36.0 ? 14.0 : 24.0),
+          ultraCompact ? 8.0 : (compact || shadowBlur < 36.0 ? 12.0 : 20.0),
           math.max(0.0, h * 0.12),
         );
         final innerW = math.max(0.0, w - stagePadH * 2);
         final innerH = math.max(0.0, h - padTop - padBottom);
         final gap = math.min(
-          ultraCompact ? 8.0 : (compact ? 12.0 : (h >= 460 ? 22.0 : 14.0)),
+          ultraCompact ? 8.0 : (compact ? 12.0 : (h >= 460 ? 18.0 : 14.0)),
           innerH * 0.15,
         );
         final titleFontSize = ultraCompact ? 17.0 : (compact ? 19.0 : 22.0);

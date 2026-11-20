@@ -1024,3 +1024,69 @@ async fn test_same_directory_distinct_albums_do_not_collide_and_multidisc_stays_
     assert_eq!(dbl_detail.versions.len(), 1);
     assert_eq!(dbl_detail.versions[0].tracks.len(), 2);
 }
+
+#[test]
+fn test_flac_native_metadata_and_track_disc_parsing() {
+    use core_providers::local::dsd_meta::{parse_slash_number, parse_track_and_disc_number};
+    use core_providers::local::metadata::MetadataExtractor;
+
+    // 1. Verify track & disc number parsing
+    assert_eq!(parse_track_and_disc_number("1-02"), (Some(2), Some(1)));
+    assert_eq!(parse_track_and_disc_number("2-14"), (Some(14), Some(2)));
+    assert_eq!(parse_track_and_disc_number("01-05"), (Some(5), Some(1)));
+    assert_eq!(parse_track_and_disc_number("1.02"), (Some(2), Some(1)));
+    assert_eq!(parse_track_and_disc_number("03/12"), (Some(3), None));
+    assert_eq!(parse_track_and_disc_number("4"), (Some(4), None));
+    assert_eq!(parse_slash_number("1-02"), Some(2));
+    assert_eq!(parse_slash_number("03/12"), Some(3));
+
+    // 2. Build mock FLAC bytes with STREAMINFO and VORBIS_COMMENT
+    let mut flac_bytes = Vec::new();
+    flac_bytes.extend_from_slice(b"fLaC");
+
+    // STREAMINFO block (34 bytes), not last (header: type 0, len 34)
+    let mut streaminfo = vec![0u8; 34];
+    streaminfo[10] = 0x0A;
+    streaminfo[11] = 0xC4;
+    streaminfo[12] = 0x42;
+    streaminfo[13] = 0xF0;
+    flac_bytes.push(0x00);
+    flac_bytes.extend_from_slice(&[0x00, 0x00, 0x22]);
+    flac_bytes.extend_from_slice(&streaminfo);
+
+    // VORBIS_COMMENT block, is_last = true (header: 0x80 | 4 = 0x84)
+    let mut comments_data = Vec::new();
+    let vendor = b"reference libFLAC 1.4.2";
+    comments_data.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    comments_data.extend_from_slice(vendor);
+
+    let comments = [
+        "TITLE=空から降ってきた少女",
+        "ARTIST=久石譲",
+        "ALBUM=天空の城ラピュタ ハイテックシリーズ",
+        "ALBUM ARTIST=久石譲",
+        "TRACKNUMBER=1-02",
+        "DATE=1986",
+    ];
+    comments_data.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+    for c in &comments {
+        comments_data.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        comments_data.extend_from_slice(c.as_bytes());
+    }
+
+    flac_bytes.push(0x84);
+    let clen = comments_data.len() as u32;
+    flac_bytes.push(((clen >> 16) & 0xFF) as u8);
+    flac_bytes.push(((clen >> 8) & 0xFF) as u8);
+    flac_bytes.push((clen & 0xFF) as u8);
+    flac_bytes.extend_from_slice(&comments_data);
+
+    let meta = MetadataExtractor::extract_from_bytes(flac_bytes, "flac", None).unwrap();
+    assert_eq!(meta.title, "空から降ってきた少女");
+    assert_eq!(meta.artist, "久石譲");
+    assert_eq!(meta.album, "天空の城ラピュタ ハイテックシリーズ");
+    assert_eq!(meta.album_artist.as_deref(), Some("久石譲"));
+    assert_eq!(meta.track_number, 2);
+    assert_eq!(meta.disc_number, 1);
+    assert_eq!(meta.release_year, Some(1986));
+}

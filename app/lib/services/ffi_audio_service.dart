@@ -753,7 +753,9 @@ class FfiAudioService implements AudioService {
                 ? _state.track!.copyWith(duration: Duration(milliseconds: durMs))
                 : _state.track;
 
-            if (status == PlaybackStatus.stopped || status == PlaybackStatus.error) {
+            if (status == PlaybackStatus.stopped ||
+                status == PlaybackStatus.error ||
+                status == PlaybackStatus.paused) {
               if (_isReroutingDevice) return;
               if (lastErr != null && lastErr.isNotEmpty) {
                 _lastError = lastErr;
@@ -785,7 +787,7 @@ class FfiAudioService implements AudioService {
           ? _state.track!.copyWith(duration: Duration(milliseconds: durMs))
           : _state.track;
 
-      if (stateCode == 0 || stateCode == 1 || stateCode == 4) {
+      if (stateCode == 0 || stateCode == 1 || stateCode == 4 || stateCode == 2) {
         if (_isReroutingDevice) {
           return;
         }

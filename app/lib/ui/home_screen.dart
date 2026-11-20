@@ -308,14 +308,26 @@ class _HomeScreenState extends State<HomeScreen>
 
     _playbackPersistenceService = PlaybackPersistenceService();
     _playbackPersistenceService.restoreSession(widget.audioService);
+    PlaybackStatus? lastPersistedStatus;
+    String? lastPersistedTrackId;
     _playbackStateSub = widget.audioService.stateStream.listen((state) {
-      final snapshot = _playbackPersistenceService.buildSnapshot(
-        state: state,
-        queue: widget.audioService.queue,
-      );
-      if (state.status == PlaybackStatus.playing) {
+      final isPlaying = state.status == PlaybackStatus.playing;
+      final statusChanged = state.status != lastPersistedStatus;
+      final trackChanged = state.track?.id != lastPersistedTrackId;
+      lastPersistedStatus = state.status;
+      lastPersistedTrackId = state.track?.id;
+
+      if (isPlaying) {
+        final snapshot = _playbackPersistenceService.buildSnapshot(
+          state: state,
+          queue: widget.audioService.queue,
+        );
         _playbackPersistenceService.saveThrottled(snapshot);
-      } else {
+      } else if (statusChanged || trackChanged) {
+        final snapshot = _playbackPersistenceService.buildSnapshot(
+          state: state,
+          queue: widget.audioService.queue,
+        );
         _playbackPersistenceService.saveImmediate(snapshot);
       }
     });
@@ -664,118 +676,180 @@ class _HomeScreenState extends State<HomeScreen>
                       LuminaResponsive.showDesktopSidebar(availWidth);
                   final sidebarWidth =
                       LuminaResponsive.sidebarWidth(availWidth);
-                  return Column(
-                    children: [
-                      Expanded(
-                        child: Builder(
-                          builder: (context) {
-                            final showOverlay = _hasEverExpandedNowPlaying &&
-                                (_isNowPlayingExpanded ||
-                                    !_nowPlayingAnimController.isDismissed);
-                            final showWorkspace = !_isNowPlayingExpanded ||
-                                !_nowPlayingAnimController.isCompleted;
+                  final showOverlay = _hasEverExpandedNowPlaying &&
+                      (_isNowPlayingExpanded ||
+                          !_nowPlayingAnimController.isDismissed);
+                  final showWorkspace = !_isNowPlayingExpanded ||
+                      !_nowPlayingAnimController.isCompleted;
 
-                            return Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                Offstage(
-                                  offstage: !showWorkspace,
-                                  child: TickerMode(
-                                    enabled: showWorkspace,
-                                    child: IgnorePointer(
-                                      ignoring: _isNowPlayingExpanded,
-                                      child: FadeTransition(
-                                        opacity: ReverseAnimation(
-                                          _nowPlayingCurvedAnim,
-                                        ),
-                                        child: KeyedSubtree(
-                                          key: const ValueKey('workspace_stage'),
-                                          child: isDesktop
-                                              ? Row(
-                                                  children: [
-                                                    ClipRect(
-                                                      child: AnimatedAlign(
-                                                        duration: const Duration(
-                                                          milliseconds: 220,
-                                                        ),
-                                                        curve: Curves.easeOutCubic,
-                                                        alignment:
-                                                            Alignment.centerRight,
-                                                        widthFactor:
-                                                            _sidebarCollapsed
-                                                                ? 0.0
-                                                                : 1.0,
-                                                        child: _buildSidebar(
-                                                          width: sidebarWidth,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    Expanded(
-                                                      child: _buildMainColumn(
-                                                        isDesktop: true,
-                                                        availWidth: availWidth -
-                                                            (_sidebarCollapsed
-                                                                ? 0.0
-                                                                : sidebarWidth),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                )
-                                              : _buildMainColumn(
-                                                  isDesktop: false,
-                                                  availWidth: availWidth,
-                                                ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                if (_hasEverExpandedNowPlaying)
-                                  Offstage(
-                                    offstage: !showOverlay,
-                                    child: TickerMode(
-                                      enabled: showOverlay,
-                                      child: IgnorePointer(
-                                        ignoring: !_isNowPlayingExpanded,
-                                        child: FadeTransition(
-                                          opacity: _nowPlayingCurvedAnim,
-                                          child: SlideTransition(
-                                            position: _nowPlayingSlideAnim,
-                                            child: NowPlayingOverlay(
-                                              key: const ValueKey(
-                                                'now_playing_stage',
-                                              ),
-                                              audioService: widget.audioService,
-                                              libraryCache: _libraryCache,
-                                              controller: _nowPlayingController,
-                                              paletteService: _paletteService,
-                                              meshFluidProgram:
-                                                  _shaders.meshFluidProgram,
-                                              isVisible: showOverlay,
-                                              onCollapse: () =>
-                                                  _setNowPlayingExpanded(false),
-                                            ),
+                  if (!showOverlay) {
+                    return Column(
+                      children: [
+                        Expanded(
+                          child: KeyedSubtree(
+                            key: const ValueKey('workspace_stage'),
+                            child: isDesktop
+                                ? Row(
+                                    children: [
+                                      ClipRect(
+                                        child: AnimatedAlign(
+                                          duration: const Duration(
+                                            milliseconds: 220,
+                                          ),
+                                          curve: Curves.easeOutCubic,
+                                          alignment: Alignment.centerRight,
+                                          widthFactor:
+                                              _sidebarCollapsed ? 0.0 : 1.0,
+                                          child: _buildSidebar(
+                                            width: sidebarWidth,
                                           ),
                                         ),
                                       ),
+                                      Expanded(
+                                        child: _buildMainColumn(
+                                          isDesktop: true,
+                                          availWidth: availWidth -
+                                              (_sidebarCollapsed
+                                                  ? 0.0
+                                                  : sidebarWidth),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : _buildMainColumn(
+                                    isDesktop: false,
+                                    availWidth: availWidth,
+                                  ),
+                          ),
+                        ),
+                        FloatingCapsuleMiniPlayer(
+                          audioService: widget.audioService,
+                          uiScaleController: _scaleController,
+                          showLyrics: false,
+                          isNowPlayingExpanded: false,
+                          glassShader: _glassShader,
+                          backdropImage: _shaders.backdropImage,
+                          onToggleLyrics: _toggleNowPlaying,
+                          onToggleNowPlaying: _toggleNowPlaying,
+                          onOpenZones: () => _selectTab(HomeTab.zones),
+                          onOpenLibrary: () => _selectTab(HomeTab.library),
+                        ),
+                      ],
+                    );
+                  }
+
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // Layer 0: Workspace (if animating out)
+                      if (showWorkspace)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            ignoring: true,
+                            child: FadeTransition(
+                              opacity: ReverseAnimation(_nowPlayingCurvedAnim),
+                              child: Column(
+                                children: [
+                                  Expanded(
+                                    child: KeyedSubtree(
+                                      key: const ValueKey('workspace_stage'),
+                                      child: isDesktop
+                                          ? Row(
+                                              children: [
+                                                ClipRect(
+                                                  child: AnimatedAlign(
+                                                    duration: const Duration(
+                                                      milliseconds: 220,
+                                                    ),
+                                                    curve: Curves.easeOutCubic,
+                                                    alignment:
+                                                        Alignment.centerRight,
+                                                    widthFactor:
+                                                        _sidebarCollapsed
+                                                            ? 0.0
+                                                            : 1.0,
+                                                    child: _buildSidebar(
+                                                      width: sidebarWidth,
+                                                    ),
+                                                  ),
+                                                ),
+                                                Expanded(
+                                                  child: _buildMainColumn(
+                                                    isDesktop: true,
+                                                    availWidth: availWidth -
+                                                        (_sidebarCollapsed
+                                                            ? 0.0
+                                                            : sidebarWidth),
+                                                  ),
+                                                ),
+                                              ],
+                                            )
+                                          : _buildMainColumn(
+                                              isDesktop: false,
+                                              availWidth: availWidth,
+                                            ),
                                     ),
                                   ),
-                              ],
-                            );
-                          },
+                                  Opacity(
+                                    opacity: 0.0,
+                                    child: IgnorePointer(
+                                      child: FloatingCapsuleMiniPlayer(
+                                        audioService: widget.audioService,
+                                        uiScaleController: _scaleController,
+                                        showLyrics: false,
+                                        isNowPlayingExpanded: false,
+                                        glassShader: _glassShader,
+                                        backdropImage: _shaders.backdropImage,
+                                        onToggleLyrics: _toggleNowPlaying,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+
+                      // Layer 1: Fullscreen NowPlayingOverlay (spans 100% height from top: 0 to bottom: 0)
+                      Positioned.fill(
+                        child: FadeTransition(
+                          opacity: _nowPlayingCurvedAnim,
+                          child: SlideTransition(
+                            position: _nowPlayingSlideAnim,
+                            child: NowPlayingOverlay(
+                              key: const ValueKey('now_playing_stage'),
+                              audioService: widget.audioService,
+                              libraryCache: _libraryCache,
+                              controller: _nowPlayingController,
+                              paletteService: _paletteService,
+                              meshFluidProgram: _shaders.meshFluidProgram,
+                              isVisible: showOverlay,
+                              bottomClearance: availWidth >= 1024
+                                  ? 98.0
+                                  : (availWidth >= 640 ? 116.0 : 138.0),
+                              onCollapse: () => _setNowPlayingExpanded(false),
+                            ),
+                          ),
                         ),
                       ),
-                      FloatingCapsuleMiniPlayer(
-                        audioService: widget.audioService,
-                        uiScaleController: _scaleController,
-                        showLyrics: _isNowPlayingExpanded,
-                        isNowPlayingExpanded: _isNowPlayingExpanded,
-                        glassShader: _glassShader,
-                        backdropImage: _shaders.backdropImage,
-                        onToggleLyrics: _toggleNowPlaying,
-                        onToggleNowPlaying: _toggleNowPlaying,
-                        onOpenZones: () => _selectTab(HomeTab.zones),
-                        onOpenLibrary: () => _selectTab(HomeTab.library),
+
+                      // Layer 2: Floating capsule mini player pinned at bottom edge
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: FloatingCapsuleMiniPlayer(
+                          audioService: widget.audioService,
+                          uiScaleController: _scaleController,
+                          showLyrics: _isNowPlayingExpanded,
+                          isNowPlayingExpanded: _isNowPlayingExpanded,
+                          glassShader: _glassShader,
+                          backdropImage: _shaders.backdropImage,
+                          onToggleLyrics: _toggleNowPlaying,
+                          onToggleNowPlaying: _toggleNowPlaying,
+                          onOpenZones: () => _selectTab(HomeTab.zones),
+                          onOpenLibrary: () => _selectTab(HomeTab.library),
+                        ),
                       ),
                     ],
                   );
@@ -1333,13 +1407,19 @@ class _HomeScreenState extends State<HomeScreen>
     final stickyTitle = isDetailTab ? _resolveStickyTitle() : '';
 
     return Expanded(
-      child: GestureDetector(
+      child: Listener(
         behavior: HitTestBehavior.translucent,
-        onPanStart: (_) => DesktopWindowController.instance.startDragging(),
-        onDoubleTap: () => DesktopWindowController.instance.toggleMaximize(),
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
-          child: AnimatedBuilder(
+        onPointerDown: (e) {
+          if (e.buttons == kPrimaryMouseButton) {
+            DesktopWindowController.instance.startDragging();
+          }
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onDoubleTap: () => DesktopWindowController.instance.toggleMaximize(),
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
+            child: AnimatedBuilder(
           animation: _stickyTitleFadeAnimation,
           builder: (context, _) {
             final t = _stickyTitleFadeAnimation.value;
@@ -1384,8 +1464,9 @@ class _HomeScreenState extends State<HomeScreen>
           },
         ),
       ),
-      ),
-    );
+    ),
+  ),
+);
   }
 
   Widget _buildCompactNavStrip() {

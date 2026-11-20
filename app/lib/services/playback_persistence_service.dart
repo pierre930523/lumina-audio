@@ -18,8 +18,14 @@ class PlaybackPersistenceService {
   Timer? _throttleTimer;
   bool _hasPendingSave = false;
   Map<String, dynamic>? _lastSavedData;
-  Future<void> _saveChain = Future<void>.value();
+  bool _isSaving = false;
+  Map<String, dynamic>? _pendingSnapshot;
+  Completer<void>? _activeSaveCompleter;
   bool _disposed = false;
+
+  List<Map<String, dynamic>>? _cachedQueueTracks;
+  int _cachedQueueLength = -1;
+  String _cachedQueueSignature = '';
 
   PlaybackPersistenceService({
     this.prefsFileOverride,
@@ -114,6 +120,16 @@ class PlaybackPersistenceService {
     final resolvedQueueIndex = queueIndex ??
         (track != null ? queue.indexWhere((t) => t.id == track.id) : 0);
 
+    final queueSig =
+        '${queue.length}_${queue.firstOrNull?.id}_${queue.lastOrNull?.id}';
+    if (_cachedQueueTracks == null ||
+        _cachedQueueLength != queue.length ||
+        _cachedQueueSignature != queueSig) {
+      _cachedQueueTracks = queue.map(_serializeTrack).toList();
+      _cachedQueueLength = queue.length;
+      _cachedQueueSignature = queueSig;
+    }
+
     return {
       'version': 1,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
@@ -122,40 +138,61 @@ class PlaybackPersistenceService {
       'is_muted': state.isMuted,
       'track': track != null ? _serializeTrack(track) : null,
       'queue_index': resolvedQueueIndex < 0 ? 0 : resolvedQueueIndex,
-      'queue_tracks': queue.map(_serializeTrack).toList(),
+      'queue_tracks': _cachedQueueTracks,
     };
   }
 
-  /// Saves snapshot immediately to disk.
-  Future<void> saveImmediate(Map<String, dynamic> snapshot) {
-    if (_disposed) return Future.value();
+  /// Saves snapshot immediately to disk using a single-flight worker to prevent unbounded Future queues.
+  Future<void> saveImmediate(Map<String, dynamic> snapshot) async {
+    if (_disposed) return;
     _lastSavedData = snapshot;
     _hasPendingSave = false;
     _throttleTimer?.cancel();
     _throttleTimer = null;
 
-    final file = _resolveFile();
-    if (file == null) return Future.value();
+    if (_isSaving) {
+      _pendingSnapshot = snapshot;
+      return _activeSaveCompleter?.future ?? Future.value();
+    }
 
-    final payload = const JsonEncoder.withIndent('  ').convert(snapshot);
-    _saveChain = _saveChain.then((_) async {
-      try {
-        final parent = file.parent;
-        if (prefsFileOverride != null) {
-          if (!parent.existsSync()) parent.createSync(recursive: true);
-          file.writeAsStringSync(payload, flush: true);
-        } else {
-          if (!await parent.exists()) await parent.create(recursive: true);
-          await file.writeAsString(payload, flush: true);
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          // ignore: avoid_print
-          print('PlaybackPersistenceService save error: $e');
-        }
+    _isSaving = true;
+    _activeSaveCompleter = Completer<void>();
+
+    try {
+      Map<String, dynamic>? nextSnapshot = snapshot;
+      while (nextSnapshot != null && !_disposed) {
+        final currentToSave = nextSnapshot;
+        _pendingSnapshot = null;
+        await _performSave(currentToSave);
+        nextSnapshot = _pendingSnapshot;
       }
-    });
-    return _saveChain;
+    } finally {
+      _isSaving = false;
+      _activeSaveCompleter?.complete();
+      _activeSaveCompleter = null;
+    }
+  }
+
+  Future<void> _performSave(Map<String, dynamic> snapshot) async {
+    final file = _resolveFile();
+    if (file == null) return;
+
+    try {
+      final payload = const JsonEncoder.withIndent('  ').convert(snapshot);
+      final parent = file.parent;
+      if (prefsFileOverride != null) {
+        if (!parent.existsSync()) parent.createSync(recursive: true);
+        file.writeAsStringSync(payload, flush: true);
+      } else {
+        if (!await parent.exists()) await parent.create(recursive: true);
+        await file.writeAsString(payload, flush: true);
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('PlaybackPersistenceService save error: $e');
+      }
+    }
   }
 
   /// Throttled save: calls will execute at most once per [throttleDuration].
@@ -181,8 +218,9 @@ class PlaybackPersistenceService {
     _throttleTimer = null;
     if (_hasPendingSave && _lastSavedData != null) {
       await saveImmediate(_lastSavedData!);
+    } else if (_isSaving && _activeSaveCompleter != null) {
+      await _activeSaveCompleter!.future;
     }
-    await _saveChain;
   }
 
   /// Loads saved state from disk.
