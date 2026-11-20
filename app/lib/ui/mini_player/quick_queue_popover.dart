@@ -152,6 +152,9 @@ class QuickQueuePopover extends StatelessWidget {
                         : SizedBox(
                             height: boundedListHeight,
                             child: ListView.builder(
+                              key: const PageStorageKey<String>(
+                                'quick_queue_list_scroll',
+                              ),
                               padding: const EdgeInsets.symmetric(
                                 vertical: LuminaTokens.space2xs,
                               ),

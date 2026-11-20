@@ -133,14 +133,16 @@ class _DspControlPanelState extends State<DspControlPanel> {
         ? LuminaTokens.textDisabled
         : LuminaTokens.textMuted;
 
-    return SingleChildScrollView(
+    return KeyedSubtree(
       key: const Key('dsp_control_panel'),
-      padding: const EdgeInsets.fromLTRB(
-        LuminaTokens.spaceLg,
-        LuminaTokens.spaceMd,
-        LuminaTokens.spaceLg,
-        LuminaTokens.bottomScrollClearance,
-      ),
+      child: SingleChildScrollView(
+        key: const PageStorageKey<String>('dsp_control_panel_scroll'),
+        padding: const EdgeInsets.fromLTRB(
+          LuminaTokens.spaceLg,
+          LuminaTokens.spaceMd,
+          LuminaTokens.spaceLg,
+          LuminaTokens.bottomScrollClearance,
+        ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -528,6 +530,7 @@ class _DspControlPanelState extends State<DspControlPanel> {
             ),
           ),
         ],
+      ),
       ),
     );
   }

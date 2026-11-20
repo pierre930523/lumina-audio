@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:material_ui/material_ui.dart';
 import '../../models/lyric.dart';
 import '../../services/audio_service.dart';
+import '../../services/now_playing_view_controller.dart';
 import '../theme/lumina_tokens.dart';
 import 'word_by_word_text.dart';
 
@@ -14,6 +15,7 @@ class LyricsView extends StatefulWidget {
   final bool isPlaying;
   final String? trackId;
   final AudioService? audioService;
+  final NowPlayingViewController? viewController;
   final void Function(String filePath)? onManualLyricsLoaded;
 
   const LyricsView({
@@ -25,6 +27,7 @@ class LyricsView extends StatefulWidget {
     this.isPlaying = true,
     this.trackId,
     this.audioService,
+    this.viewController,
     this.onManualLyricsLoaded,
   });
 
@@ -67,19 +70,71 @@ class _LyricsViewState extends State<LyricsView> {
   double _fontScale = 1.0;
   Duration _displayOffset = Duration.zero;
   bool _showSettings = false;
+  bool _pendingTrackScrollRestore = false;
+
+  static bool _lyricsStructurallyEqual(List<LyricLine> a, List<LyricLine> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    if (a.isEmpty) return true;
+    final aFirst = a.first;
+    final bFirst = b.first;
+    final aLast = a.last;
+    final bLast = b.last;
+    return aFirst.text == bFirst.text &&
+        aFirst.words.length == bFirst.words.length &&
+        aLast.text == bLast.text &&
+        aLast.words.length == bLast.words.length;
+  }
 
   @override
   void initState() {
     super.initState();
-    _scrollController = ScrollController();
+    final vc = widget.viewController;
+    if (vc != null) {
+      _fontScale = vc.lyricsFontScale;
+      _displayOffset = vc.lyricsDisplayOffsetFor(widget.trackId);
+      _showSettings = vc.lyricsSettingsExpanded;
+      vc.addListener(_onViewControllerChanged);
+    }
+    _scrollController = ScrollController(
+      initialScrollOffset: vc?.lyricsScrollOffsetFor(widget.trackId) ?? 0.0,
+    );
+    _scrollController.addListener(_onScroll);
     _lastActiveIndex = LyricsView.activeIndexForPosition(
       widget.lyrics,
       widget.currentPosition + _displayOffset,
     );
   }
 
+  void _onScroll() {
+    if (_pendingTrackScrollRestore || !_scrollController.hasClients) return;
+    widget.viewController?.saveLyricsScrollOffset(
+      widget.trackId,
+      _scrollController.offset,
+    );
+  }
+
+  void _onViewControllerChanged() {
+    final vc = widget.viewController;
+    if (vc == null || !mounted) return;
+    final nextFont = vc.lyricsFontScale;
+    final nextOffset = vc.lyricsDisplayOffsetFor(widget.trackId);
+    final nextSettings = vc.lyricsSettingsExpanded;
+    if ((nextFont - _fontScale).abs() > 0.001 ||
+        nextOffset != _displayOffset ||
+        nextSettings != _showSettings) {
+      setState(() {
+        _fontScale = nextFont;
+        _displayOffset = nextOffset;
+        _showSettings = nextSettings;
+      });
+    }
+  }
+
   @override
   void dispose() {
+    widget.viewController?.removeListener(_onViewControllerChanged);
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
@@ -87,8 +142,59 @@ class _LyricsViewState extends State<LyricsView> {
   @override
   void didUpdateWidget(covariant LyricsView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.lyrics != widget.lyrics) {
+    if (oldWidget.viewController != widget.viewController) {
+      oldWidget.viewController?.removeListener(_onViewControllerChanged);
+      widget.viewController?.addListener(_onViewControllerChanged);
+      final vc = widget.viewController;
+      if (vc != null) {
+        _fontScale = vc.lyricsFontScale;
+        _displayOffset = vc.lyricsDisplayOffsetFor(widget.trackId);
+        _showSettings = vc.lyricsSettingsExpanded;
+      }
+    }
+
+    final trackChanged = oldWidget.trackId != widget.trackId;
+    final lyricsChanged =
+        !_lyricsStructurallyEqual(oldWidget.lyrics, widget.lyrics);
+
+    if (trackChanged || lyricsChanged) {
       _lastActiveIndex = -1;
+    }
+
+    if (trackChanged && widget.viewController != null) {
+      _displayOffset = widget.viewController!.lyricsDisplayOffsetFor(
+        widget.trackId,
+      );
+      _pendingTrackScrollRestore = true;
+      final restoredTrackId = widget.trackId;
+      final targetScroll = widget.viewController!.lyricsScrollOffsetFor(
+        restoredTrackId,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _pendingTrackScrollRestore = false;
+        if (!mounted ||
+            widget.trackId != restoredTrackId ||
+            !_scrollController.hasClients) {
+          return;
+        }
+        final maxExtent = _scrollController.position.maxScrollExtent;
+        final clamped = targetScroll.clamp(0.0, maxExtent).toDouble();
+        if (targetScroll > 0.0 || !widget.isPlaying) {
+          if ((_scrollController.offset - clamped).abs() > 0.5) {
+            _scrollController.jumpTo(clamped);
+          }
+        } else {
+          final active = LyricsView.activeIndexForPosition(
+            widget.lyrics,
+            widget.currentPosition + _displayOffset,
+          );
+          if (active > 0) {
+            _autoScrollTo(active);
+          } else if (_scrollController.offset > 0.5) {
+            _scrollController.jumpTo(0.0);
+          }
+        }
+      });
     }
 
     final effectivePos = widget.currentPosition + _displayOffset;
@@ -99,7 +205,41 @@ class _LyricsViewState extends State<LyricsView> {
 
     if (newActiveIndex != _lastActiveIndex) {
       _lastActiveIndex = newActiveIndex;
-      _autoScrollTo(newActiveIndex);
+      if (widget.isPlaying &&
+          (!trackChanged || widget.viewController == null)) {
+        _autoScrollTo(newActiveIndex);
+      }
+    }
+  }
+
+  void _updateFontScale(double next) {
+    final clamped = next.clamp(0.7, 1.6).toDouble();
+    if (widget.viewController != null) {
+      widget.viewController!.setLyricsFontScale(clamped);
+    } else {
+      setState(() {
+        _fontScale = clamped;
+      });
+    }
+  }
+
+  void _updateDisplayOffset(Duration next) {
+    if (widget.viewController != null) {
+      widget.viewController!.setLyricsDisplayOffset(widget.trackId, next);
+    } else {
+      setState(() {
+        _displayOffset = next;
+      });
+    }
+  }
+
+  void _setSettingsExpanded(bool expanded) {
+    if (widget.viewController != null) {
+      widget.viewController!.setLyricsSettingsExpanded(expanded);
+    } else {
+      setState(() {
+        _showSettings = expanded;
+      });
     }
   }
 
@@ -264,11 +404,7 @@ class _LyricsViewState extends State<LyricsView> {
             style: _toolbarIconStyle(LuminaTokens.textSecondary),
             tooltip: '縮小歌詞字體',
             icon: const Icon(Icons.text_decrease_rounded, size: 17),
-            onPressed: () {
-              setState(() {
-                _fontScale = (_fontScale - 0.1).clamp(0.7, 1.6);
-              });
-            },
+            onPressed: () => _updateFontScale(_fontScale - 0.1),
           ),
           Text(
             '${(_fontScale * 100).round()}%',
@@ -285,11 +421,7 @@ class _LyricsViewState extends State<LyricsView> {
             style: _toolbarIconStyle(LuminaTokens.textSecondary),
             tooltip: '放大歌詞字體',
             icon: const Icon(Icons.text_increase_rounded, size: 17),
-            onPressed: () {
-              setState(() {
-                _fontScale = (_fontScale + 0.1).clamp(0.7, 1.6);
-              });
-            },
+            onPressed: () => _updateFontScale(_fontScale + 0.1),
           ),
           const SizedBox(width: LuminaTokens.spaceXs),
           const SizedBox(
@@ -304,11 +436,9 @@ class _LyricsViewState extends State<LyricsView> {
             style: _toolbarIconStyle(LuminaTokens.textSecondary),
             tooltip: '歌詞提前 0.5 秒',
             icon: const Icon(Icons.fast_rewind_rounded, size: 17),
-            onPressed: () {
-              setState(() {
-                _displayOffset -= const Duration(milliseconds: 500);
-              });
-            },
+            onPressed: () => _updateDisplayOffset(
+              _displayOffset - const Duration(milliseconds: 500),
+            ),
           ),
           Text(
             _displayOffset == Duration.zero
@@ -328,11 +458,9 @@ class _LyricsViewState extends State<LyricsView> {
             style: _toolbarIconStyle(LuminaTokens.textSecondary),
             tooltip: '歌詞延後 0.5 秒',
             icon: const Icon(Icons.fast_forward_rounded, size: 17),
-            onPressed: () {
-              setState(() {
-                _displayOffset += const Duration(milliseconds: 500);
-              });
-            },
+            onPressed: () => _updateDisplayOffset(
+              _displayOffset + const Duration(milliseconds: 500),
+            ),
           ),
           const SizedBox(width: LuminaTokens.spaceXs),
           const SizedBox(
@@ -458,10 +586,14 @@ class _LyricsViewState extends State<LyricsView> {
                   maxWidth: 840,
                   maxHeight: constraints.maxHeight,
                 ),
-                child: ListView.builder(
-                  controller: _scrollController,
+                child: KeyedSubtree(
                   key: const Key('lyrics_list_view'),
-                  padding: EdgeInsets.fromLTRB(28, topPad, 28, bottomPad),
+                  child: ListView.builder(
+                    key: PageStorageKey<String>(
+                      'lyrics_scroll_${widget.trackId ?? 'default'}',
+                    ),
+                    controller: _scrollController,
+                    padding: EdgeInsets.fromLTRB(28, topPad, 28, bottomPad),
                   itemCount: widget.lyrics.length,
                   itemBuilder: (context, index) {
                     final line = widget.lyrics[index];
@@ -542,8 +674,9 @@ class _LyricsViewState extends State<LyricsView> {
                           ),
                         ),
                       ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
@@ -562,7 +695,7 @@ class _LyricsViewState extends State<LyricsView> {
                         : CrossFadeState.showSecond,
                     firstChild: _buildToolbar(),
                     secondChild: _LyricsToolbarToggleButton(
-                      onTap: () => setState(() => _showSettings = true),
+                      onTap: () => _setSettingsExpanded(true),
                     ),
                   ),
                 ),

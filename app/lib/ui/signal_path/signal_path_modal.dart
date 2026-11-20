@@ -121,6 +121,7 @@ class _SignalPathModalState extends State<SignalPathModal> {
         final statusColor = _statusColor(ver.status);
 
         return SingleChildScrollView(
+          key: const PageStorageKey<String>('signal_path_modal_scroll'),
           padding: const EdgeInsets.fromLTRB(
             LuminaTokens.spaceLg,
             LuminaTokens.spaceMd + 4,
