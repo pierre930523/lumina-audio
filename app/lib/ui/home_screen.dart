@@ -12,7 +12,6 @@ import '../models/studio_models.dart';
 import '../services/album_layout_settings_controller.dart';
 import '../services/artwork_palette_service.dart';
 import '../services/audio_service.dart';
-import '../services/desktop_window_controller.dart';
 import '../services/library_index_cache.dart';
 import '../services/library_settings_controller.dart';
 import '../services/now_playing_view_controller.dart';
@@ -26,6 +25,7 @@ import 'artists/artist_detail_page.dart';
 import 'artists/artists_view.dart';
 import 'audiobooks/audiobooks_view.dart';
 import 'common/desktop_window_caption.dart';
+import 'common/window_drag_bar.dart';
 import 'dsp/dsp_control_panel.dart';
 import 'home/home_dashboard_view.dart';
 import 'library/library_browser_view.dart';
@@ -685,6 +685,11 @@ class _HomeScreenState extends State<HomeScreen>
                   if (!showOverlay) {
                     return Column(
                       children: [
+                        _buildTopBar(
+                          isDesktop: isDesktop,
+                          availWidth: availWidth,
+                          sidebarWidth: sidebarWidth,
+                        ),
                         Expanded(
                           child: KeyedSubtree(
                             key: const ValueKey('workspace_stage'),
@@ -750,6 +755,11 @@ class _HomeScreenState extends State<HomeScreen>
                               opacity: ReverseAnimation(_nowPlayingCurvedAnim),
                               child: Column(
                                 children: [
+                                  _buildTopBar(
+                                    isDesktop: isDesktop,
+                                    availWidth: availWidth,
+                                    sidebarWidth: sidebarWidth,
+                                  ),
                                   Expanded(
                                     child: KeyedSubtree(
                                       key: const ValueKey('workspace_stage'),
@@ -872,20 +882,7 @@ class _HomeScreenState extends State<HomeScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(18, 16, 18, 14),
-            child: Text(
-              'Lumina Audio',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.3,
-              ),
-            ),
-          ),
+          const SizedBox(height: 8),
           Expanded(
             child: ListenableBuilder(
               listenable: _playlistService,
@@ -1130,7 +1127,6 @@ class _HomeScreenState extends State<HomeScreen>
     final currentEntry = _navController.current;
     return Column(
       children: [
-        _buildTopBar(isDesktop: isDesktop, availWidth: availWidth),
         if (!isDesktop) _buildCompactNavStrip(),
         Expanded(
           child: AnimatedSwitcher(
@@ -1245,29 +1241,60 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildTopBar({required bool isDesktop, required double availWidth}) {
+  Widget _buildTopBar({
+    required bool isDesktop,
+    required double availWidth,
+    required double sidebarWidth,
+  }) {
     final canGoBack = _navController.canGoBack;
     final canGoForward = _navController.canGoForward;
     final inSettings = _isSettingsTab(_activeTab);
-    final isCompactTopBar = availWidth < 480;
-    final isCompactProfile = availWidth < (isDesktop ? 720 : 520);
+    final contentAvailWidth =
+        availWidth - (isDesktop && !_sidebarCollapsed ? sidebarWidth : 0.0);
+    final isCompactTopBar = contentAvailWidth < 480;
+    final isCompactProfile = contentAvailWidth < (isDesktop ? 720 : 520);
 
-    return Container(
-      decoration: BoxDecoration(
-        border: inSettings
-            ? const Border(
-                bottom: BorderSide(color: _dividerColor, width: 1),
-              )
-            : null,
-      ),
-      padding: EdgeInsets.fromLTRB(
-        isDesktop ? 18 : (isCompactTopBar ? 8 : 12),
-        10,
-        isDesktop ? 24 : (isCompactTopBar ? 8 : 12),
-        8,
-      ),
+    return WindowDragBar(
+      height: 48.0,
+      border: inSettings
+          ? const Border(
+              bottom: BorderSide(color: _dividerColor, width: 1),
+            )
+          : null,
       child: Row(
         children: [
+          if (isDesktop)
+            IgnorePointer(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                width: _sidebarCollapsed ? 0.0 : sidebarWidth,
+                decoration: BoxDecoration(
+                  color: _sidebarBg,
+                  border: _sidebarCollapsed
+                      ? null
+                      : const Border(
+                          right: BorderSide(color: _dividerColor, width: 1),
+                        ),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                alignment: Alignment.centerLeft,
+                child: _sidebarCollapsed
+                    ? null
+                    : const Text(
+                        'Lumina Audio',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+              ),
+            ),
+          if (isDesktop) const SizedBox(width: 8),
           if (isDesktop)
             IconButton(
               tooltip: _sidebarCollapsed ? '展開側欄' : '收合側欄',
@@ -1321,7 +1348,7 @@ class _HomeScreenState extends State<HomeScreen>
             isDesktop: isDesktop,
             isCompactTopBar: isCompactTopBar,
           ),
-          if (isDesktop && availWidth >= 760) ...[
+          if (isDesktop && contentAvailWidth >= 760) ...[
             _buildQuickScaleMenu(),
             const SizedBox(width: 6),
             IconButton(
@@ -1381,7 +1408,7 @@ class _HomeScreenState extends State<HomeScreen>
               onPressed: () => _selectTab(_lastSettingsTab),
             ),
           ),
-          if (availWidth >= 380) ...[
+          if (contentAvailWidth >= 380) ...[
             SizedBox(width: isCompactTopBar ? 2 : 6),
             ProfileSwitcherBar(
               audioService: widget.audioService,
@@ -1390,7 +1417,7 @@ class _HomeScreenState extends State<HomeScreen>
           ],
           if (isDesktop) ...[
             const SizedBox(width: 8),
-            const DesktopWindowCaptionButtons(),
+            const DesktopWindowCaptionButtons(height: 48.0),
           ],
         ],
       ),
@@ -1407,19 +1434,9 @@ class _HomeScreenState extends State<HomeScreen>
     final stickyTitle = isDetailTab ? _resolveStickyTitle() : '';
 
     return Expanded(
-      child: Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: (e) {
-          if (e.buttons == kPrimaryMouseButton) {
-            DesktopWindowController.instance.startDragging();
-          }
-        },
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onDoubleTap: () => DesktopWindowController.instance.toggleMaximize(),
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
-            child: AnimatedBuilder(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
+        child: AnimatedBuilder(
           animation: _stickyTitleFadeAnimation,
           builder: (context, _) {
             final t = _stickyTitleFadeAnimation.value;
@@ -1429,14 +1446,16 @@ class _HomeScreenState extends State<HomeScreen>
                 if (showDefaultTitle)
                   Opacity(
                     opacity: (1.0 - t).clamp(0.0, 1.0),
-                    child: const Text(
-                      'Lumina Audio',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: LuminaTokens.textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
+                    child: const IgnorePointer(
+                      child: Text(
+                        'Lumina Audio',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: LuminaTokens.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                   ),
@@ -1464,9 +1483,7 @@ class _HomeScreenState extends State<HomeScreen>
           },
         ),
       ),
-    ),
-  ),
-);
+    );
   }
 
   Widget _buildCompactNavStrip() {

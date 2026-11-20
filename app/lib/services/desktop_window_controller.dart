@@ -12,6 +12,8 @@ class DesktopWindowController {
   static DesktopWindowController get instance =>
       _instance ??= DesktopWindowController();
 
+  static set instance(DesktopWindowController? value) => _instance = value;
+
   final MethodChannel channel;
   final bool? isSupportedOverride;
 

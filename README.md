@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0-blue.svg?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.2.1-blue.svg?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6.svg?style=flat-square&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/audio-WASAPI%20Exclusive%20%7C%20ASIO-brightgreen.svg?style=flat-square" alt="Audio Engine" />
   <img src="https://img.shields.io/badge/DSP-64--bit%20Float-orange.svg?style=flat-square" alt="DSP" />

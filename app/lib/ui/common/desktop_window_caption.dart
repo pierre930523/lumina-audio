@@ -26,14 +26,36 @@ class DesktopWindowCaptionButtons extends StatefulWidget {
 }
 
 class _DesktopWindowCaptionButtonsState
-    extends State<DesktopWindowCaptionButtons> {
-  late final DesktopWindowController _controller;
+    extends State<DesktopWindowCaptionButtons> with WidgetsBindingObserver {
+  late DesktopWindowController _controller;
   bool _isMaximized = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = widget.controller ?? DesktopWindowController.instance;
+    _checkMaximizedState();
+  }
+
+  @override
+  void didUpdateWidget(DesktopWindowCaptionButtons oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.controller != oldWidget.controller) {
+      _controller = widget.controller ?? DesktopWindowController.instance;
+      _checkMaximizedState();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
     _checkMaximizedState();
   }
 

@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:flutter/gestures.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/lyric.dart';
@@ -11,12 +10,12 @@ import '../../models/playback_state.dart';
 import '../../models/signal_path.dart';
 import '../../services/artwork_palette_service.dart';
 import '../../services/audio_service.dart';
-import '../../services/desktop_window_controller.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/now_playing_view_controller.dart';
 import '../../shaders/mesh_fluid_painter.dart';
 import '../artwork/album_artwork_view.dart';
 import '../common/desktop_window_caption.dart';
+import '../common/window_drag_bar.dart';
 import '../lyrics/lyrics_view.dart';
 import '../signal_path/quality_badge.dart';
 import '../signal_path/signal_path_modal.dart';
@@ -49,10 +48,10 @@ class NowPlayingOverlay extends StatefulWidget {
   });
 
   @override
-  State<NowPlayingOverlay> createState() => _NowPlayingOverlayState();
+  State<NowPlayingOverlay> createState() => NowPlayingOverlayState();
 }
 
-class _NowPlayingOverlayState extends State<NowPlayingOverlay>
+class NowPlayingOverlayState extends State<NowPlayingOverlay>
     with TickerProviderStateMixin {
   late NowPlayingViewController _controller;
   late bool _ownsController;
@@ -65,6 +64,75 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
   late final AnimationController _fluidAnimController;
   late final AnimationController _modeAnimController;
   late final Animation<double> _modeAnim;
+
+  AnimationController get modeAnimController => _modeAnimController;
+  AnimationController get transitionController => _modeAnimController;
+
+  Widget? _cachedHeroWidget;
+  String? _cachedHeroTrackKey;
+  double? _cachedHeroCoverSide;
+
+  Widget _getPersistentHeroWidget({
+    required TrackInfo? track,
+    required double baseCoverSide,
+    required double gap,
+    required double titleFontSize,
+    required double maxMetaHeight,
+    required double shadowBlur,
+    required double shadowSpread,
+    required double shadowOffsetY,
+    required bool compactMetadata,
+  }) {
+    final trackKey = _trackIdentityKey(track);
+    if (_cachedHeroWidget != null &&
+        _cachedHeroTrackKey == trackKey &&
+        _cachedHeroCoverSide == baseCoverSide) {
+      return _cachedHeroWidget!;
+    }
+    _cachedHeroTrackKey = trackKey;
+    _cachedHeroCoverSide = baseCoverSide;
+
+    _cachedHeroWidget = RepaintBoundary(
+      key: const Key('now_playing_cover_repaint_boundary'),
+      child: SizedBox(
+        width: baseCoverSide,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildHeroCoverCard(
+              track,
+              maxSide: baseCoverSide,
+              shadowBlur: shadowBlur,
+              shadowSpread: shadowSpread,
+              shadowOffsetY: shadowOffsetY,
+            ),
+            SizedBox(height: gap),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: baseCoverSide,
+                maxHeight: maxMetaHeight,
+              ),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.center,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: baseCoverSide),
+                  child: _buildTrackMetadata(
+                    track,
+                    centered: true,
+                    showPills: true,
+                    titleFontSize: titleFontSize,
+                    compact: compactMetadata,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    return _cachedHeroWidget!;
+  }
 
   late AmbientPalette _fromPalette;
   late AmbientPalette _toPalette;
@@ -158,12 +226,12 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
 
     _modeAnimController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 320),
+      duration: const Duration(milliseconds: 420),
       value: _controller.mode == NowPlayingViewMode.cover ? 0.0 : 1.0,
     );
     _modeAnim = CurvedAnimation(
       parent: _modeAnimController,
-      curve: Curves.easeOutCubic,
+      curve: Curves.easeInOutCubic,
     );
 
     _stateSub = widget.audioService.stateStream.listen(_onPlaybackState);
@@ -233,11 +301,24 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
     if (_controller.mode != _lastMode) {
       _lastMode = _controller.mode;
       if (_controller.mode == NowPlayingViewMode.cover) {
-        _modeAnimController.animateTo(0.0);
-      } else {
-        _modeAnimController.animateTo(1.0);
+        _modeAnimController.reverse();
+      } else if (_controller.mode == NowPlayingViewMode.split) {
+        _modeAnimController.forward();
       }
       setState(() {});
+    }
+  }
+
+  void _toggleCoverSplitMode() {
+    final isHeadingToSplit = _modeAnimController.status == AnimationStatus.forward ||
+        (_modeAnimController.value > 0.5 &&
+            _modeAnimController.status != AnimationStatus.reverse);
+    if (isHeadingToSplit) {
+      _modeAnimController.reverse();
+      _controller.setMode(NowPlayingViewMode.cover);
+    } else {
+      _modeAnimController.forward();
+      _controller.setMode(NowPlayingViewMode.split);
     }
   }
 
@@ -367,6 +448,7 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
         fit: StackFit.expand,
         children: [
           RepaintBoundary(
+            key: const Key('now_playing_bg_repaint_boundary'),
             child: AnimatedBuilder(
               animation: Listenable.merge([
                 _paletteAnimController,
@@ -482,13 +564,9 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
   }
 
   Widget _buildTopBar(NowPlayingViewMode mode) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        LuminaTokens.spaceMd,
-        LuminaTokens.spaceSm,
-        LuminaTokens.spaceMd + 2,
-        LuminaTokens.space2xs,
-      ),
+    return WindowDragBar(
+      height: 48.0,
+      padding: const EdgeInsets.symmetric(horizontal: LuminaTokens.spaceMd),
       child: Row(
         children: [
           ClipRRect(
@@ -527,28 +605,16 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
               ),
             ),
           ),
-          Expanded(
-            child: Listener(
-              behavior: HitTestBehavior.translucent,
-              onPointerDown: (e) {
-                if (e.buttons == kPrimaryMouseButton) {
-                  DesktopWindowController.instance.startDragging();
-                }
-              },
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onDoubleTap: () =>
-                    DesktopWindowController.instance.toggleMaximize(),
-                child: const SizedBox(height: 40),
-              ),
-            ),
-          ),
+          const Spacer(),
           _ModeIconButton(
             key: const Key('btn_now_playing_mode_split'),
             icon: Icons.vertical_split_rounded,
             tooltip: '封面與逐字歌詞',
             selected: mode == NowPlayingViewMode.split,
-            onTap: () => _controller.setMode(NowPlayingViewMode.split),
+            onTap: () {
+              _modeAnimController.forward();
+              _controller.setMode(NowPlayingViewMode.split);
+            },
           ),
           const SizedBox(width: LuminaTokens.space2xs),
           _ModeIconButton(
@@ -564,11 +630,15 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
             icon: Icons.album_outlined,
             tooltip: '純封面檢視',
             selected: mode == NowPlayingViewMode.cover,
-            onTap: () => _controller.setMode(NowPlayingViewMode.cover),
+            onTap: () {
+              _modeAnimController.reverse();
+              _controller.setMode(NowPlayingViewMode.cover);
+            },
           ),
           const SizedBox(width: LuminaTokens.spaceSm),
           const DesktopWindowCaptionButtons(
             color: Colors.white70,
+            height: 48.0,
           ),
         ],
       ),
@@ -584,138 +654,115 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
     required TrackInfo? track,
     required List<LyricLine> lyrics,
   }) {
-    switch (metrics.arrangement) {
-      case NowPlayingStageArrangement.coverLandscapeRow:
-        final maxRowWidth = math.min(960.0, math.max(120.0, maxWidth));
-        final innerRowWidth = math.max(
-          0.0,
-          maxRowWidth - metrics.stagePadH * 2,
-        );
-        final maxMetaWidth = math.max(
-          100.0,
-          innerRowWidth - metrics.coverSide - metrics.gap,
-        );
-        return Padding(
-          key: key,
-          padding: EdgeInsets.fromLTRB(
-            metrics.stagePadH,
-            metrics.padTop,
-            metrics.stagePadH,
-            metrics.padBottom,
-          ),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: maxRowWidth),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  _buildHeroCoverCard(
-                    track,
-                    maxSide: metrics.coverSide,
-                    shadowBlur: metrics.shadowBlur,
-                    shadowSpread: metrics.shadowSpread,
-                    shadowOffsetY: metrics.shadowOffsetY,
-                  ),
-                  SizedBox(width: metrics.gap),
-                  Expanded(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: metrics.maxMetaHeight,
-                      ),
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(maxWidth: maxMetaWidth),
-                          child: _buildTrackMetadata(
-                            track,
-                            centered: false,
-                            showPills: true,
-                            titleFontSize: metrics.titleFontSize,
-                            compact: metrics.compactMetadata,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
+    if (metrics.arrangement == NowPlayingStageArrangement.lyricsFull) {
+      return _buildLyricsFullStage(
+        key: key,
+        metrics: metrics,
+        state: state,
+        track: track,
+        lyrics: lyrics,
+      );
+    }
 
-      case NowPlayingStageArrangement.coverVertical:
-        final innerW = math.max(120.0, maxWidth - metrics.stagePadH * 2);
-        return Padding(
-          key: key,
-          padding: EdgeInsets.fromLTRB(
-            metrics.stagePadH,
-            metrics.padTop,
-            metrics.stagePadH,
-            metrics.padBottom,
-          ),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: LayoutBuilder(
-                    builder: (context, coverConstraints) {
-                      final availSide = math.min(
-                        coverConstraints.maxWidth,
-                        coverConstraints.maxHeight,
-                      );
-                      final side = availSide.isFinite
-                          ? math.min(metrics.coverSide, availSide).floorToDouble()
-                          : metrics.coverSide;
-                      return _buildHeroCoverCard(
-                        track,
-                        maxSide: math.max(0.0, side),
-                        shadowBlur: metrics.shadowBlur,
-                        shadowSpread: metrics.shadowSpread,
-                        shadowOffsetY: metrics.shadowOffsetY,
-                      );
-                    },
-                  ),
-                ),
-                SizedBox(height: metrics.gap),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: innerW,
-                    maxHeight: metrics.maxMetaHeight,
-                  ),
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.center,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: innerW),
-                      child: _buildTrackMetadata(
-                        track,
-                        centered: true,
-                        showPills: true,
-                        titleFontSize: metrics.titleFontSize,
-                        compact: metrics.compactMetadata,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
+    if (metrics.arrangement == NowPlayingStageArrangement.lyricsCompactHeader ||
+        metrics.arrangement == NowPlayingStageArrangement.splitCompactHeader) {
+      return _buildCompactHeaderStage(
+        key: key,
+        metrics: metrics,
+        state: state,
+        track: track,
+        lyrics: lyrics,
+      );
+    }
 
-      case NowPlayingStageArrangement.lyricsFull:
-        return Padding(
-          key: key,
-          padding: EdgeInsets.fromLTRB(
-            metrics.stagePadH,
-            metrics.padTop,
-            metrics.stagePadH,
-            metrics.padBottom,
-          ),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 860),
+    if (metrics.arrangement == NowPlayingStageArrangement.splitNarrowStacked) {
+      return _buildNarrowStackedStage(
+        key: key,
+        metrics: metrics,
+        maxWidth: maxWidth,
+        state: state,
+        track: track,
+        lyrics: lyrics,
+      );
+    }
+
+    if (metrics.arrangement == NowPlayingStageArrangement.coverLandscapeRow) {
+      return _buildLandscapeRowStage(
+        key: key,
+        metrics: metrics,
+        maxWidth: maxWidth,
+        track: track,
+      );
+    }
+
+    return _buildDesktopTransitionStage(
+      key: key,
+      metrics: metrics,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      state: state,
+      track: track,
+      lyrics: lyrics,
+    );
+  }
+
+  Widget _buildDesktopTransitionStage({
+    required Key key,
+    required NowPlayingLayoutMetrics metrics,
+    required double maxWidth,
+    required double maxHeight,
+    required PlaybackState state,
+    required TrackInfo? track,
+    required List<LyricLine> lyrics,
+  }) {
+    final coverMetrics = NowPlayingLayoutMetrics.compute(
+      width: maxWidth,
+      height: maxHeight,
+      mode: NowPlayingViewMode.cover,
+    );
+    final baseCoverSide = coverMetrics.coverSide;
+    final gap = coverMetrics.gap;
+    final titleFontSize = coverMetrics.titleFontSize;
+    final maxMetaHeight = coverMetrics.maxMetaHeight;
+    final shadowBlur = coverMetrics.shadowBlur;
+    final shadowSpread = coverMetrics.shadowSpread;
+    final shadowOffsetY = coverMetrics.shadowOffsetY;
+    final compactMetadata = coverMetrics.compactMetadata;
+
+    final persistentHero = _getPersistentHeroWidget(
+      track: track,
+      baseCoverSide: baseCoverSide,
+      gap: gap,
+      titleFontSize: titleFontSize,
+      maxMetaHeight: maxMetaHeight,
+      shadowBlur: shadowBlur,
+      shadowSpread: shadowSpread,
+      shadowOffsetY: shadowOffsetY,
+      compactMetadata: compactMetadata,
+    );
+
+    final scaledCoverHalfWidth = baseCoverSide * 0.88 * 0.5;
+    final targetLeftCenterX = math.max(
+      scaledCoverHalfWidth + math.max(16.0, metrics.stagePadH),
+      maxWidth * 0.26,
+    );
+    final dx = targetLeftCenterX - (maxWidth / 2.0);
+    final centerOffset = Offset.zero;
+    final leftOffset = Offset(dx, 0.0);
+
+    return Stack(
+      key: key,
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          left: maxWidth * 0.48,
+          right: math.max(16.0, metrics.stagePadH),
+          top: metrics.padTop,
+          bottom: metrics.padBottom,
+          child: RepaintBoundary(
+            key: const Key('now_playing_lyrics_repaint_boundary'),
+            child: AnimatedBuilder(
+              animation: _modeAnimController,
               child: LyricsView(
                 lyrics: lyrics,
                 currentPosition: state.position,
@@ -726,284 +773,339 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                 audioService: widget.audioService,
                 viewController: _controller,
               ),
+              builder: (context, lyricsChild) {
+                final t = _modeAnimController.value;
+                final lyricsT = const Interval(
+                  0.28,
+                  1.0,
+                  curve: Curves.easeOutCubic,
+                ).transform(t);
+                final slideX = (1.0 - lyricsT) * 24.0;
+
+                return IgnorePointer(
+                  key: const Key('now_playing_lyrics_ignore_pointer'),
+                  ignoring: t < 0.05,
+                  child: Visibility(
+                    key: const Key('now_playing_lyrics_visibility'),
+                    visible: t > 0.01,
+                    maintainState: true,
+                    child: Opacity(
+                      opacity: lyricsT.clamp(0.0, 1.0),
+                      child: Transform.translate(
+                        offset: Offset(slideX, 0.0),
+                        child: lyricsChild,
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
-        );
+        ),
+        Center(
+          child: AnimatedBuilder(
+            animation: _modeAnimController,
+            child: persistentHero,
+            builder: (context, child) {
+              final t = _modeAnimController.value;
+              final slideT = Curves.easeInOutCubic.transform(t);
+              final currentOffset =
+                  Offset.lerp(centerOffset, leftOffset, slideT)!;
+              final currentScale = ui.lerpDouble(1.0, 0.88, slideT)!;
 
-      case NowPlayingStageArrangement.lyricsCompactHeader:
-      case NowPlayingStageArrangement.splitCompactHeader:
-        return Column(
-          key: key,
-          children: [
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                metrics.stagePadH,
-                metrics.padTop,
-                metrics.stagePadH,
-                metrics.padBottom,
-              ),
-              child: Row(
-                children: [
-                  _buildHeroCoverCard(
-                    track,
-                    maxSide: metrics.coverSide,
-                    compact: true,
-                  ),
-                  SizedBox(width: metrics.gap),
-                  Expanded(
-                    child: _buildTrackMetadata(
-                      track,
-                      centered: false,
-                      showPills: false,
-                      titleFontSize: metrics.titleFontSize,
-                      compact: metrics.compactMetadata,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 860),
-                  child: FadeTransition(
-                    opacity: _modeAnim,
-                    child: LyricsView(
-                      lyrics: lyrics,
-                      currentPosition: state.position,
-                      onSeek: widget.audioService.seek,
-                      centered: true,
-                      isPlaying: state.status == PlaybackStatus.playing,
-                      trackId: track?.id,
-                      audioService: widget.audioService,
-                      viewController: _controller,
-                    ),
-                  ),
+              return Transform.translate(
+                offset: currentOffset,
+                child: Transform.scale(
+                  scale: currentScale,
+                  alignment: Alignment.center,
+                  child: child,
                 ),
-              ),
-            ),
-          ],
-        );
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
 
-      case NowPlayingStageArrangement.splitNarrowStacked:
-        final innerW = math.max(120.0, maxWidth - metrics.stagePadH * 2);
-        final useHorizontalHero = maxWidth >= 440;
-        return Column(
-          key: key,
-          children: [
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                metrics.stagePadH,
-                metrics.padTop,
-                metrics.stagePadH,
-                metrics.padBottom,
-              ),
-              child: useHorizontalHero
-                  ? Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        _buildHeroCoverCard(
-                          track,
-                          maxSide: metrics.coverSide,
-                          shadowBlur: metrics.shadowBlur,
-                          shadowSpread: metrics.shadowSpread,
-                          shadowOffsetY: metrics.shadowOffsetY,
-                        ),
-                        SizedBox(width: metrics.gap),
-                        Expanded(
-                          child: LayoutBuilder(
-                            builder: (context, metaConstraints) {
-                              final metaW = math.max(
-                                80.0,
-                                metaConstraints.maxWidth,
-                              );
-                              return ConstrainedBox(
-                                constraints: BoxConstraints(
-                                  maxHeight: metrics.maxMetaHeight,
-                                ),
-                                child: FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: ConstrainedBox(
-                                    constraints: BoxConstraints(maxWidth: metaW),
-                                    child: _buildTrackMetadata(
-                                      track,
-                                      centered: false,
-                                      showPills: true,
-                                      titleFontSize: metrics.titleFontSize,
-                                      compact: metrics.compactMetadata,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    )
-                  : Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildHeroCoverCard(
-                          track,
-                          maxSide: metrics.coverSide,
-                          shadowBlur: metrics.shadowBlur,
-                          shadowSpread: metrics.shadowSpread,
-                          shadowOffsetY: metrics.shadowOffsetY,
-                        ),
-                        const SizedBox(height: LuminaTokens.spaceXs),
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth: innerW,
-                            maxHeight: metrics.maxMetaHeight,
-                          ),
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.center,
-                            child: ConstrainedBox(
-                              constraints: BoxConstraints(maxWidth: innerW),
-                              child: _buildTrackMetadata(
-                                track,
-                                centered: true,
-                                showPills: true,
-                                titleFontSize: metrics.titleFontSize,
-                                compact: true,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-            ),
-            Expanded(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 860),
-                  child: FadeTransition(
-                    opacity: _modeAnim,
-                    child: LyricsView(
-                      lyrics: lyrics,
-                      currentPosition: state.position,
-                      onSeek: widget.audioService.seek,
-                      centered: true,
-                      isPlaying: state.status == PlaybackStatus.playing,
-                      trackId: track?.id,
-                      audioService: widget.audioService,
-                      viewController: _controller,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        );
-
-      case NowPlayingStageArrangement.splitTwoColumn:
-        return Padding(
-          key: key,
-          padding: EdgeInsets.only(right: metrics.stagePadH),
+  Widget _buildLandscapeRowStage({
+    required Key key,
+    required NowPlayingLayoutMetrics metrics,
+    required double maxWidth,
+    required TrackInfo? track,
+  }) {
+    final maxRowWidth = math.min(960.0, math.max(120.0, maxWidth));
+    final innerRowWidth = math.max(
+      0.0,
+      maxRowWidth - metrics.stagePadH * 2,
+    );
+    final maxMetaWidth = math.max(
+      100.0,
+      innerRowWidth - metrics.coverSide - metrics.gap,
+    );
+    return Padding(
+      key: key,
+      padding: EdgeInsets.fromLTRB(
+        metrics.stagePadH,
+        metrics.padTop,
+        metrics.stagePadH,
+        metrics.padBottom,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxRowWidth),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Expanded(
-                flex: metrics.leftFlex,
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    metrics.stagePadH,
-                    metrics.padTop,
-                    metrics.stagePadH,
-                    metrics.padBottom,
-                  ),
-                  child: LayoutBuilder(
-                    builder: (context, leftConstraints) {
-                      final leftInnerW = math.max(
-                        120.0,
-                        leftConstraints.maxWidth,
-                      );
-                      return Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: LayoutBuilder(
-                                builder: (context, coverConstraints) {
-                                  final availSide = math.min(
-                                    coverConstraints.maxWidth,
-                                    coverConstraints.maxHeight,
-                                  );
-                                  final side = availSide.isFinite
-                                      ? math
-                                            .min(metrics.coverSide, availSide)
-                                            .floorToDouble()
-                                      : metrics.coverSide;
-                                  return _buildHeroCoverCard(
-                                    track,
-                                    maxSide: math.max(0.0, side),
-                                    shadowBlur: metrics.shadowBlur,
-                                    shadowSpread: metrics.shadowSpread,
-                                    shadowOffsetY: metrics.shadowOffsetY,
-                                  );
-                                },
-                              ),
-                            ),
-                            SizedBox(height: metrics.gap),
-                            ConstrainedBox(
-                              constraints: BoxConstraints(
-                                maxWidth: leftInnerW,
-                                maxHeight: metrics.maxMetaHeight,
-                              ),
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.center,
-                                child: ConstrainedBox(
-                                  constraints: BoxConstraints(
-                                    maxWidth: leftInnerW,
-                                  ),
-                                  child: _buildTrackMetadata(
-                                    track,
-                                    centered: true,
-                                    showPills: true,
-                                    titleFontSize: metrics.titleFontSize,
-                                    compact: metrics.compactMetadata,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ),
+              _buildHeroCoverCard(
+                track,
+                maxSide: metrics.coverSide,
+                shadowBlur: metrics.shadowBlur,
+                shadowSpread: metrics.shadowSpread,
+                shadowOffsetY: metrics.shadowOffsetY,
               ),
-              const SizedBox(width: LuminaTokens.spaceMd),
+              SizedBox(width: metrics.gap),
               Expanded(
-                flex: metrics.rightFlex,
-                child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    vertical: metrics.compactMetadata
-                        ? LuminaTokens.spaceXs
-                        : LuminaTokens.spaceMd,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: metrics.maxMetaHeight,
                   ),
-                  child: FadeTransition(
-                    opacity: _modeAnim,
-                    child: LyricsView(
-                      lyrics: lyrics,
-                      currentPosition: state.position,
-                      onSeek: widget.audioService.seek,
-                      centered: true,
-                      isPlaying: state.status == PlaybackStatus.playing,
-                      trackId: track?.id,
-                      audioService: widget.audioService,
-                      viewController: _controller,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: maxMetaWidth),
+                      child: _buildTrackMetadata(
+                        track,
+                        centered: false,
+                        showPills: true,
+                        titleFontSize: metrics.titleFontSize,
+                        compact: metrics.compactMetadata,
+                      ),
                     ),
                   ),
                 ),
               ),
             ],
           ),
-        );
-    }
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLyricsFullStage({
+    required Key key,
+    required NowPlayingLayoutMetrics metrics,
+    required PlaybackState state,
+    required TrackInfo? track,
+    required List<LyricLine> lyrics,
+  }) {
+    return Padding(
+      key: key,
+      padding: EdgeInsets.fromLTRB(
+        metrics.stagePadH,
+        metrics.padTop,
+        metrics.stagePadH,
+        metrics.padBottom,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: LyricsView(
+            lyrics: lyrics,
+            currentPosition: state.position,
+            onSeek: widget.audioService.seek,
+            centered: true,
+            isPlaying: state.status == PlaybackStatus.playing,
+            trackId: track?.id,
+            audioService: widget.audioService,
+            viewController: _controller,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCompactHeaderStage({
+    required Key key,
+    required NowPlayingLayoutMetrics metrics,
+    required PlaybackState state,
+    required TrackInfo? track,
+    required List<LyricLine> lyrics,
+  }) {
+    return Column(
+      key: key,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            metrics.stagePadH,
+            metrics.padTop,
+            metrics.stagePadH,
+            metrics.padBottom,
+          ),
+          child: Row(
+            children: [
+              _buildHeroCoverCard(
+                track,
+                maxSide: metrics.coverSide,
+                compact: true,
+              ),
+              SizedBox(width: metrics.gap),
+              Expanded(
+                child: _buildTrackMetadata(
+                  track,
+                  centered: false,
+                  showPills: false,
+                  titleFontSize: metrics.titleFontSize,
+                  compact: metrics.compactMetadata,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 860),
+              child: FadeTransition(
+                opacity: _modeAnim,
+                child: LyricsView(
+                  lyrics: lyrics,
+                  currentPosition: state.position,
+                  onSeek: widget.audioService.seek,
+                  centered: true,
+                  isPlaying: state.status == PlaybackStatus.playing,
+                  trackId: track?.id,
+                  audioService: widget.audioService,
+                  viewController: _controller,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNarrowStackedStage({
+    required Key key,
+    required NowPlayingLayoutMetrics metrics,
+    required double maxWidth,
+    required PlaybackState state,
+    required TrackInfo? track,
+    required List<LyricLine> lyrics,
+  }) {
+    final innerW = math.max(120.0, maxWidth - metrics.stagePadH * 2);
+    final useHorizontalHero = maxWidth >= 440;
+    return Column(
+      key: key,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            metrics.stagePadH,
+            metrics.padTop,
+            metrics.stagePadH,
+            metrics.padBottom,
+          ),
+          child: useHorizontalHero
+              ? Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _buildHeroCoverCard(
+                      track,
+                      maxSide: metrics.coverSide,
+                      shadowBlur: metrics.shadowBlur,
+                      shadowSpread: metrics.shadowSpread,
+                      shadowOffsetY: metrics.shadowOffsetY,
+                    ),
+                    SizedBox(width: metrics.gap),
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, metaConstraints) {
+                          final metaW = math.max(
+                            80.0,
+                            metaConstraints.maxWidth,
+                          );
+                          return ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: metrics.maxMetaHeight,
+                            ),
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: ConstrainedBox(
+                                constraints: BoxConstraints(maxWidth: metaW),
+                                child: _buildTrackMetadata(
+                                  track,
+                                  centered: false,
+                                  showPills: true,
+                                  titleFontSize: metrics.titleFontSize,
+                                  compact: metrics.compactMetadata,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildHeroCoverCard(
+                      track,
+                      maxSide: metrics.coverSide,
+                      shadowBlur: metrics.shadowBlur,
+                      shadowSpread: metrics.shadowSpread,
+                      shadowOffsetY: metrics.shadowOffsetY,
+                    ),
+                    const SizedBox(height: LuminaTokens.spaceXs),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: innerW,
+                        maxHeight: metrics.maxMetaHeight,
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.center,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(maxWidth: innerW),
+                          child: _buildTrackMetadata(
+                            track,
+                            centered: true,
+                            showPills: true,
+                            titleFontSize: metrics.titleFontSize,
+                            compact: true,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        Expanded(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 860),
+              child: FadeTransition(
+                opacity: _modeAnim,
+                child: LyricsView(
+                  lyrics: lyrics,
+                  currentPosition: state.position,
+                  onSeek: widget.audioService.seek,
+                  centered: true,
+                  isPlaying: state.status == PlaybackStatus.playing,
+                  trackId: track?.id,
+                  audioService: widget.audioService,
+                  viewController: _controller,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildHeroCoverCard(
@@ -1045,13 +1147,7 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
       card = MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
-          onTap: () {
-            if (_controller.mode == NowPlayingViewMode.cover) {
-              _controller.setMode(NowPlayingViewMode.split);
-            } else if (_controller.mode == NowPlayingViewMode.split) {
-              _controller.setMode(NowPlayingViewMode.cover);
-            }
-          },
+          onTap: _toggleCoverSplitMode,
           child: card,
         ),
       );
