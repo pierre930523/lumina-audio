@@ -49,19 +49,72 @@ class MeshFluidBgPainter extends CustomPainter {
       return;
     }
 
+    if (size.isEmpty) return;
+
     // CPU fallback mirroring 4-point fluid mesh atmosphere
     final t = time * 0.22;
-    final alignBegin = Alignment(math.sin(t) * 0.5, math.cos(t * 1.3) * 0.5);
-    final alignEnd = Alignment(-math.cos(t * 0.9) * 0.5, math.sin(t * 1.1) * 0.5);
 
-    final bgPaint = Paint()
+    final basePaint = Paint()
       ..shader = LinearGradient(
-        begin: alignBegin,
-        end: alignEnd,
-        colors: [colorA, colorB, colorC, colorD],
-        stops: const [0.0, 0.35, 0.7, 1.0],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [colorD, colorC],
       ).createShader(rect);
-    canvas.drawRect(rect, bgPaint);
+    canvas.drawRect(rect, basePaint);
+
+    // Drifting coordinates matching `shaders/mesh_fluid_bg.frag`
+    final p1 = Alignment(
+      (0.25 + 0.18 * math.sin(t)) * 2.0 - 1.0,
+      (0.30 + 0.16 * math.cos(t * 1.3)) * 2.0 - 1.0,
+    );
+    final p2 = Alignment(
+      (0.75 + 0.16 * math.cos(t * 0.9)) * 2.0 - 1.0,
+      (0.25 + 0.18 * math.sin(t * 1.1)) * 2.0 - 1.0,
+    );
+    final p3 = Alignment(
+      (0.30 + 0.20 * math.cos(t * 1.2)) * 2.0 - 1.0,
+      (0.75 + 0.14 * math.sin(t * 0.8)) * 2.0 - 1.0,
+    );
+
+    _drawBlob(canvas, rect, p1, colorA, 0.72, 0.95);
+    _drawBlob(canvas, rect, p2, colorB, 0.58, 0.90);
+    _drawBlob(canvas, rect, p3, colorC, 0.45, 0.85);
+
+    // Subtle bottom dark vignette for crisp foreground text contrast
+    final vignettePaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Colors.transparent,
+          colorD.withValues(alpha: 0.28),
+          const Color(0x6606080D),
+        ],
+        stops: const [0.45, 0.78, 1.0],
+      ).createShader(rect);
+    canvas.drawRect(rect, vignettePaint);
+  }
+
+  void _drawBlob(
+    Canvas canvas,
+    Rect rect,
+    Alignment center,
+    Color color,
+    double alpha,
+    double radius,
+  ) {
+    final blobPaint = Paint()
+      ..shader = RadialGradient(
+        center: center,
+        radius: radius,
+        colors: [
+          color.withValues(alpha: alpha),
+          color.withValues(alpha: alpha * 0.45),
+          color.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.45, 1.0],
+      ).createShader(rect);
+    canvas.drawRect(rect, blobPaint);
   }
 
   @override
