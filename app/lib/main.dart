@@ -2,8 +2,10 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'services/artwork_palette_service.dart';
 import 'services/audio_service.dart';
 import 'services/ffi_audio_service.dart';
+import 'services/now_playing_view_controller.dart';
 import 'services/ui_scale_controller.dart';
 import 'ui/home_screen.dart';
 import 'ui/theme/lumina_tokens.dart';
@@ -73,11 +75,15 @@ void main() {
 class LuminaApp extends StatefulWidget {
   final AudioService? audioService;
   final UiScaleController? uiScaleController;
+  final NowPlayingViewController? nowPlayingController;
+  final ArtworkPaletteService? artworkPaletteService;
 
   const LuminaApp({
     super.key,
     this.audioService,
     this.uiScaleController,
+    this.nowPlayingController,
+    this.artworkPaletteService,
   });
 
   @override
@@ -215,6 +221,8 @@ class _LuminaAppState extends State<LuminaApp> with WidgetsBindingObserver {
           home: HomeScreen(
             audioService: _audioService,
             uiScaleController: _scaleController,
+            nowPlayingController: widget.nowPlayingController,
+            artworkPaletteService: widget.artworkPaletteService,
           ),
         );
       },

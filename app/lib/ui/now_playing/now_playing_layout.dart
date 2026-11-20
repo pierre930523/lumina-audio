@@ -154,7 +154,7 @@ class NowPlayingLayoutMetrics {
           math.max(minPadTop, h * (compact ? 0.08 : 0.14)),
         );
         final padBottom = math.min(
-          ultraCompact ? 8.0 : (shadowBlur < 36.0 ? 14.0 : 24.0),
+          ultraCompact ? 8.0 : (compact || shadowBlur < 36.0 ? 14.0 : 24.0),
           math.max(0.0, h * 0.12),
         );
         final innerW = math.max(0.0, w - stagePadH * 2);
@@ -165,7 +165,7 @@ class NowPlayingLayoutMetrics {
         );
         final titleFontSize = ultraCompact ? 17.0 : (compact ? 19.0 : 22.0);
         final metaReserve = math.min(
-          ultraCompact ? 84.0 : (compact ? 112.0 : 148.0),
+          ultraCompact ? 84.0 : (compact ? 88.0 : 148.0),
           innerH * 0.45,
         );
         final roomH = math.max(0.0, innerH - gap - metaReserve);

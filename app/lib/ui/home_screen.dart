@@ -9,9 +9,11 @@ import '../models/playback_state.dart';
 import '../models/streaming_provider_meta.dart';
 import '../models/studio_models.dart';
 import '../services/album_layout_settings_controller.dart';
+import '../services/artwork_palette_service.dart';
 import '../services/audio_service.dart';
 import '../services/library_index_cache.dart';
 import '../services/library_settings_controller.dart';
+import '../services/now_playing_view_controller.dart';
 import '../services/smart_playlist_service.dart';
 import '../services/ui_scale_controller.dart';
 import '../shaders/shader_loader.dart';
@@ -59,6 +61,8 @@ class HomeScreen extends StatefulWidget {
   final UiScaleController? uiScaleController;
   final LibraryIndexCache? libraryCache;
   final NavHistoryController? navHistoryController;
+  final NowPlayingViewController? nowPlayingController;
+  final ArtworkPaletteService? artworkPaletteService;
 
   const HomeScreen({
     super.key,
@@ -66,6 +70,8 @@ class HomeScreen extends StatefulWidget {
     this.uiScaleController,
     this.libraryCache,
     this.navHistoryController,
+    this.nowPlayingController,
+    this.artworkPaletteService,
   });
 
   @override
@@ -73,7 +79,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   static const _canvasBg = LuminaTokens.canvasBg;
   static const _sidebarBg = LuminaTokens.sidebarBg;
   static const _settingsRailBg = LuminaTokens.sidebarBg;
@@ -212,6 +218,13 @@ class _HomeScreenState extends State<HomeScreen>
   HomeTab _lastSettingsTab = HomeTab.general;
   bool _sidebarCollapsed = false;
   bool _isNowPlayingExpanded = false;
+  bool _hasEverExpandedNowPlaying = false;
+  late final NowPlayingViewController _nowPlayingController;
+  late final bool _ownsNowPlayingController;
+  late final ArtworkPaletteService _paletteService;
+  late final AnimationController _nowPlayingAnimController;
+  late final Animation<double> _nowPlayingCurvedAnim;
+  late final Animation<Offset> _nowPlayingSlideAnim;
   bool _isDetailScrolledPastHero = false;
   String? _activeDetailTitle;
   late final AnimationController _stickyTitleFadeController;
@@ -243,6 +256,29 @@ class _HomeScreenState extends State<HomeScreen>
       curve: Curves.easeOutCubic,
       reverseCurve: Curves.easeInCubic,
     );
+
+    _ownsNowPlayingController = widget.nowPlayingController == null;
+    _nowPlayingController =
+        widget.nowPlayingController ?? NowPlayingViewController();
+    if (_ownsNowPlayingController) {
+      _nowPlayingController.load();
+    }
+    _paletteService = widget.artworkPaletteService ?? ArtworkPaletteService();
+
+    _nowPlayingAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    _nowPlayingCurvedAnim = CurvedAnimation(
+      parent: _nowPlayingAnimController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    _nowPlayingSlideAnim = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end: Offset.zero,
+    ).animate(_nowPlayingCurvedAnim);
+    _nowPlayingAnimController.addStatusListener(_onNowPlayingAnimStatus);
 
     _ownsNavController = widget.navHistoryController == null;
     _navController = widget.navHistoryController ?? NavHistoryController();
@@ -405,6 +441,11 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void dispose() {
+    _nowPlayingAnimController.removeStatusListener(_onNowPlayingAnimStatus);
+    _nowPlayingAnimController.dispose();
+    if (_ownsNowPlayingController) {
+      _nowPlayingController.dispose();
+    }
     _stickyTitleFadeController.dispose();
     _libraryCache.removeListener(_onLibraryCacheChanged);
     _navController.removeListener(_onNavChanged);
@@ -427,12 +468,33 @@ class _HomeScreenState extends State<HomeScreen>
 
   bool _isSettingsTab(HomeTab tab) => tab.isSettings;
 
+  void _onNowPlayingAnimStatus(AnimationStatus status) {
+    if (!mounted) return;
+    if (status == AnimationStatus.dismissed ||
+        status == AnimationStatus.completed) {
+      setState(() {});
+    }
+  }
+
+  void _setNowPlayingExpanded(bool expanded) {
+    if (_isNowPlayingExpanded == expanded) return;
+    setState(() {
+      _isNowPlayingExpanded = expanded;
+      if (expanded) {
+        _hasEverExpandedNowPlaying = true;
+        _nowPlayingAnimController.forward();
+      } else {
+        _nowPlayingAnimController.reverse();
+      }
+    });
+  }
+
   void _pushEntry(NavEntry entry) {
     if (entry.isSameRoute(_navController.current) && !_isNowPlayingExpanded) {
       return;
     }
+    _setNowPlayingExpanded(false);
     setState(() {
-      _isNowPlayingExpanded = false;
       _syncStateFromEntry(entry);
     });
     _navController.push(entry);
@@ -493,17 +555,13 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _goBack() {
     if (!_navController.canGoBack) return;
-    setState(() {
-      _isNowPlayingExpanded = false;
-    });
+    _setNowPlayingExpanded(false);
     _navController.goBack();
   }
 
   void _goForward() {
     if (!_navController.canGoForward) return;
-    setState(() {
-      _isNowPlayingExpanded = false;
-    });
+    _setNowPlayingExpanded(false);
     _navController.goForward();
   }
 
@@ -516,9 +574,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _toggleNowPlaying() {
-    setState(() {
-      _isNowPlayingExpanded = !_isNowPlayingExpanded;
-    });
+    _setNowPlayingExpanded(!_isNowPlayingExpanded);
   }
 
   bool _isTextEditingFocused() {
@@ -536,9 +592,7 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     if (_isNowPlayingExpanded) {
-      setState(() {
-        _isNowPlayingExpanded = false;
-      });
+      _setNowPlayingExpanded(false);
       return;
     }
     FocusManager.instance.primaryFocus?.unfocus();
@@ -590,71 +644,98 @@ class _HomeScreenState extends State<HomeScreen>
                   return Column(
                     children: [
                       Expanded(
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 220),
-                          switchInCurve: Curves.easeOutCubic,
-                          switchOutCurve: Curves.easeInCubic,
-                          transitionBuilder: (child, anim) {
-                            final isOverlay = child.key ==
-                                const ValueKey('now_playing_stage');
-                            if (isOverlay) {
-                              final slide = Tween<Offset>(
-                                begin: const Offset(0, 0.06),
-                                end: Offset.zero,
-                              ).animate(anim);
-                              return FadeTransition(
-                                opacity: anim,
-                                child: SlideTransition(
-                                  position: slide,
-                                  child: child,
-                                ),
-                              );
-                            }
-                            return FadeTransition(opacity: anim, child: child);
-                          },
-                          child: _isNowPlayingExpanded
-                              ? NowPlayingOverlay(
-                                  key: const ValueKey('now_playing_stage'),
-                                  audioService: widget.audioService,
-                                  onCollapse: () {
-                                    setState(
-                                        () => _isNowPlayingExpanded = false);
-                                  },
-                                )
-                              : KeyedSubtree(
-                                  key: const ValueKey('workspace_stage'),
-                                  child: isDesktop
-                                      ? Row(
-                                          children: [
-                                            ClipRect(
-                                              child: AnimatedAlign(
-                                                duration: const Duration(
-                                                  milliseconds: 220,
-                                                ),
-                                                curve: Curves.easeOutCubic,
-                                                alignment:
-                                                    Alignment.centerRight,
-                                                widthFactor: _sidebarCollapsed
-                                                    ? 0.0
-                                                    : 1.0,
-                                                child: _buildSidebar(
-                                                  width: sidebarWidth,
-                                                ),
-                                              ),
-                                            ),
-                                            Expanded(
-                                              child: _buildMainColumn(
-                                                isDesktop: true,
-                                                availWidth: availWidth,
-                                              ),
-                                            ),
-                                          ],
-                                        )
-                                      : _buildMainColumn(
-                                          isDesktop: false,
-                                          availWidth: availWidth,
+                        child: Builder(
+                          builder: (context) {
+                            final showOverlay = _hasEverExpandedNowPlaying &&
+                                (_isNowPlayingExpanded ||
+                                    !_nowPlayingAnimController.isDismissed);
+                            final showWorkspace = !_isNowPlayingExpanded ||
+                                !_nowPlayingAnimController.isCompleted;
+                            return Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Offstage(
+                                  offstage: !showWorkspace,
+                                  child: TickerMode(
+                                    enabled: showWorkspace,
+                                    child: IgnorePointer(
+                                      ignoring: _isNowPlayingExpanded,
+                                      child: FadeTransition(
+                                        opacity: ReverseAnimation(
+                                          _nowPlayingCurvedAnim,
                                         ),
+                                        child: KeyedSubtree(
+                                          key: const ValueKey('workspace_stage'),
+                                          child: isDesktop
+                                              ? Row(
+                                                  children: [
+                                                    ClipRect(
+                                                      child: AnimatedAlign(
+                                                        duration: const Duration(
+                                                          milliseconds: 220,
+                                                        ),
+                                                        curve: Curves.easeOutCubic,
+                                                        alignment: Alignment
+                                                            .centerRight,
+                                                        widthFactor:
+                                                            _sidebarCollapsed
+                                                                ? 0.0
+                                                                : 1.0,
+                                                        child: _buildSidebar(
+                                                          width: sidebarWidth,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    Expanded(
+                                                      child: _buildMainColumn(
+                                                        isDesktop: true,
+                                                        availWidth: availWidth,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                )
+                                              : _buildMainColumn(
+                                                  isDesktop: false,
+                                                  availWidth: availWidth,
+                                                ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                 ),
+                                if (_hasEverExpandedNowPlaying)
+                                  Offstage(
+                                    offstage: !showOverlay,
+                                    child: TickerMode(
+                                      enabled: showOverlay,
+                                      child: IgnorePointer(
+                                        ignoring: !_isNowPlayingExpanded,
+                                        child: FadeTransition(
+                                          opacity: _nowPlayingCurvedAnim,
+                                          child: SlideTransition(
+                                            position: _nowPlayingSlideAnim,
+                                            child: NowPlayingOverlay(
+                                              key: const ValueKey(
+                                                'now_playing_stage',
+                                              ),
+                                              audioService: widget.audioService,
+                                              libraryCache: _libraryCache,
+                                              controller: _nowPlayingController,
+                                              paletteService: _paletteService,
+                                              meshFluidProgram:
+                                                  _shaders.meshFluidProgram,
+                                              isVisible: showOverlay,
+                                              onCollapse: () =>
+                                                  _setNowPlayingExpanded(false),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            );
+                          },
                         ),
                       ),
                       FloatingCapsuleMiniPlayer(
