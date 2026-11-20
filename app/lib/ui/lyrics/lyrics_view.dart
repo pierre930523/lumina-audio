@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:material_ui/material_ui.dart';
@@ -71,6 +72,8 @@ class _LyricsViewState extends State<LyricsView> {
   Duration _displayOffset = Duration.zero;
   bool _showSettings = false;
   bool _pendingTrackScrollRestore = false;
+  Timer? _autoCollapseTimer;
+  bool _toolbarHovered = false;
 
   static bool _lyricsStructurallyEqual(List<LyricLine> a, List<LyricLine> b) {
     if (identical(a, b)) return true;
@@ -123,6 +126,13 @@ class _LyricsViewState extends State<LyricsView> {
     if ((nextFont - _fontScale).abs() > 0.001 ||
         nextOffset != _displayOffset ||
         nextSettings != _showSettings) {
+      if (nextSettings != _showSettings) {
+        if (nextSettings) {
+          _startAutoCollapseTimer();
+        } else {
+          _cancelAutoCollapseTimer();
+        }
+      }
       setState(() {
         _fontScale = nextFont;
         _displayOffset = nextOffset;
@@ -133,6 +143,7 @@ class _LyricsViewState extends State<LyricsView> {
 
   @override
   void dispose() {
+    _cancelAutoCollapseTimer();
     widget.viewController?.removeListener(_onViewControllerChanged);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -212,7 +223,27 @@ class _LyricsViewState extends State<LyricsView> {
     }
   }
 
+  void _startAutoCollapseTimer() {
+    _autoCollapseTimer?.cancel();
+    if (_toolbarHovered) return;
+    _autoCollapseTimer = Timer(const Duration(milliseconds: 4500), () {
+      if (!mounted || !_showSettings || _toolbarHovered) return;
+      _setSettingsExpanded(false);
+    });
+  }
+
+  void _cancelAutoCollapseTimer() {
+    _autoCollapseTimer?.cancel();
+    _autoCollapseTimer = null;
+  }
+
+  void _resetAutoCollapseTimer() {
+    _cancelAutoCollapseTimer();
+    _startAutoCollapseTimer();
+  }
+
   void _updateFontScale(double next) {
+    _resetAutoCollapseTimer();
     final clamped = next.clamp(0.7, 1.6).toDouble();
     if (widget.viewController != null) {
       widget.viewController!.setLyricsFontScale(clamped);
@@ -224,6 +255,7 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   void _updateDisplayOffset(Duration next) {
+    _resetAutoCollapseTimer();
     if (widget.viewController != null) {
       widget.viewController!.setLyricsDisplayOffset(widget.trackId, next);
     } else {
@@ -234,6 +266,11 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   void _setSettingsExpanded(bool expanded) {
+    if (expanded) {
+      _startAutoCollapseTimer();
+    } else {
+      _cancelAutoCollapseTimer();
+    }
     if (widget.viewController != null) {
       widget.viewController!.setLyricsSettingsExpanded(expanded);
     } else {
@@ -243,14 +280,17 @@ class _LyricsViewState extends State<LyricsView> {
     }
   }
 
-  void _autoScrollTo(int index) {
+  void _autoScrollTo(int index, {double? viewportHeight}) {
     if (!_scrollController.hasClients || widget.lyrics.isEmpty) return;
     final itemExtent = 56.0 * _fontScale;
-    final viewportH = _scrollController.position.hasViewportDimension
-        ? _scrollController.position.viewportDimension
-        : 360.0;
-    final centerOffset = (viewportH * 0.34).clamp(48.0, 260.0);
-    final targetOffset = (index * itemExtent - centerOffset).clamp(
+    final viewportH = viewportHeight ??
+        (_scrollController.position.hasViewportDimension
+            ? _scrollController.position.viewportDimension
+            : 360.0);
+    final verticalPad = math.max(60.0, viewportH * 0.42);
+    final targetCenter = viewportH * 0.47;
+    final targetOffset =
+        ((index * itemExtent + verticalPad) - targetCenter).clamp(
       0.0,
       _scrollController.position.maxScrollExtent,
     );
@@ -382,111 +422,143 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   Widget _buildToolbar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: LuminaTokens.spaceSm,
-        vertical: LuminaTokens.space2xs,
-      ),
-      decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg.withValues(alpha: 0.94),
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-        border: Border.all(
-          color: LuminaTokens.borderControl.withValues(alpha: 0.7),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: LuminaTokens.spaceSm + 2,
+            vertical: LuminaTokens.space2xs,
+          ),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.18),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                key: const Key('btn_lyrics_font_down'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white70),
+                tooltip: '縮小歌詞字體',
+                icon: const Icon(Icons.text_decrease_rounded, size: 17),
+                onPressed: () => _updateFontScale(_fontScale - 0.1),
+              ),
+              Text(
+                '${(_fontScale * 100).round()}%',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+              IconButton(
+                key: const Key('btn_lyrics_font_up'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white70),
+                tooltip: '放大歌詞字體',
+                icon: const Icon(Icons.text_increase_rounded, size: 17),
+                onPressed: () => _updateFontScale(_fontScale + 0.1),
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              const SizedBox(
+                height: 16,
+                child: VerticalDivider(
+                  color: Colors.white24,
+                  width: 1,
+                ),
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              IconButton(
+                key: const Key('btn_lyrics_offset_minus'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white70),
+                tooltip: '歌詞提前 0.5 秒',
+                icon: const Icon(Icons.fast_rewind_rounded, size: 17),
+                onPressed: () => _updateDisplayOffset(
+                  _displayOffset - const Duration(milliseconds: 500),
+                ),
+              ),
+              Text(
+                _displayOffset == Duration.zero
+                    ? '0.0s'
+                    : '${_displayOffset.inMilliseconds > 0 ? '+' : ''}${(_displayOffset.inMilliseconds / 1000).toStringAsFixed(1)}s',
+                key: const Key('lyrics_offset_label'),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+              IconButton(
+                key: const Key('btn_lyrics_offset_plus'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white70),
+                tooltip: '歌詞延後 0.5 秒',
+                icon: const Icon(Icons.fast_forward_rounded, size: 17),
+                onPressed: () => _updateDisplayOffset(
+                  _displayOffset + const Duration(milliseconds: 500),
+                ),
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              const SizedBox(
+                height: 16,
+                child: VerticalDivider(
+                  color: Colors.white24,
+                  width: 1,
+                ),
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              IconButton(
+                key: const Key('btn_load_lyrics_file'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(LuminaTokens.accentBlue),
+                tooltip: '載入自訂 .lrc / .txt 歌詞',
+                icon: const Icon(Icons.file_open_outlined, size: 17),
+                onPressed: _promptManualLyrics,
+              ),
+              IconButton(
+                key: const Key('btn_clear_lyrics_file'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white54),
+                tooltip: '清除自訂歌詞',
+                icon: const Icon(Icons.delete_sweep_outlined, size: 17),
+                onPressed: _clearManualLyrics,
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              const SizedBox(
+                height: 16,
+                child: VerticalDivider(
+                  color: Colors.white24,
+                  width: 1,
+                ),
+              ),
+              const SizedBox(width: LuminaTokens.spaceXs),
+              IconButton(
+                key: const Key('btn_lyrics_toolbar_close'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                style: _toolbarIconStyle(Colors.white60),
+                tooltip: '收合歌詞設定',
+                icon: const Icon(Icons.close_rounded, size: 16),
+                onPressed: () => _setSettingsExpanded(false),
+              ),
+            ],
+          ),
         ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            key: const Key('btn_lyrics_font_down'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.textSecondary),
-            tooltip: '縮小歌詞字體',
-            icon: const Icon(Icons.text_decrease_rounded, size: 17),
-            onPressed: () => _updateFontScale(_fontScale - 0.1),
-          ),
-          Text(
-            '${(_fontScale * 100).round()}%',
-            style: const TextStyle(
-              color: LuminaTokens.textSecondary,
-              fontSize: 11.5,
-              fontFeatures: [ui.FontFeature.tabularFigures()],
-            ),
-          ),
-          IconButton(
-            key: const Key('btn_lyrics_font_up'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.textSecondary),
-            tooltip: '放大歌詞字體',
-            icon: const Icon(Icons.text_increase_rounded, size: 17),
-            onPressed: () => _updateFontScale(_fontScale + 0.1),
-          ),
-          const SizedBox(width: LuminaTokens.spaceXs),
-          const SizedBox(
-            height: 16,
-            child: VerticalDivider(color: LuminaTokens.borderSubtle, width: 1),
-          ),
-          const SizedBox(width: LuminaTokens.spaceXs),
-          IconButton(
-            key: const Key('btn_lyrics_offset_minus'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.textSecondary),
-            tooltip: '歌詞提前 0.5 秒',
-            icon: const Icon(Icons.fast_rewind_rounded, size: 17),
-            onPressed: () => _updateDisplayOffset(
-              _displayOffset - const Duration(milliseconds: 500),
-            ),
-          ),
-          Text(
-            _displayOffset == Duration.zero
-                ? '0.0s'
-                : '${_displayOffset.inMilliseconds > 0 ? '+' : ''}${(_displayOffset.inMilliseconds / 1000).toStringAsFixed(1)}s',
-            key: const Key('lyrics_offset_label'),
-            style: const TextStyle(
-              color: LuminaTokens.textPrimary,
-              fontSize: 11.5,
-              fontFeatures: [ui.FontFeature.tabularFigures()],
-            ),
-          ),
-          IconButton(
-            key: const Key('btn_lyrics_offset_plus'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.textSecondary),
-            tooltip: '歌詞延後 0.5 秒',
-            icon: const Icon(Icons.fast_forward_rounded, size: 17),
-            onPressed: () => _updateDisplayOffset(
-              _displayOffset + const Duration(milliseconds: 500),
-            ),
-          ),
-          const SizedBox(width: LuminaTokens.spaceXs),
-          const SizedBox(
-            height: 16,
-            child: VerticalDivider(color: LuminaTokens.borderSubtle, width: 1),
-          ),
-          const SizedBox(width: LuminaTokens.spaceXs),
-          IconButton(
-            key: const Key('btn_load_lyrics_file'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.accentBlue),
-            tooltip: '載入自訂 .lrc / .txt 歌詞',
-            icon: const Icon(Icons.file_open_outlined, size: 17),
-            onPressed: _promptManualLyrics,
-          ),
-          IconButton(
-            key: const Key('btn_clear_lyrics_file'),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.textMuted),
-            tooltip: '清除自訂歌詞',
-            icon: const Icon(Icons.delete_sweep_outlined, size: 17),
-            onPressed: _clearManualLyrics,
-          ),
-        ],
       ),
     );
   }
@@ -570,112 +642,136 @@ class _LyricsViewState extends State<LyricsView> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final topPad = constraints.maxHeight > 200
-            ? constraints.maxHeight * 0.35
-            : 28.0;
-        final bottomPad = math.max(
-          56.0,
-          constraints.maxHeight > 200 ? constraints.maxHeight * 0.35 : 56.0,
-        );
+        final verticalPad = math.max(60.0, constraints.maxHeight * 0.42);
         return Stack(
           alignment: Alignment.center,
           children: [
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxWidth: 840,
-                  maxHeight: constraints.maxHeight,
-                ),
-                child: KeyedSubtree(
-                  key: const Key('lyrics_list_view'),
-                  child: ListView.builder(
-                    key: PageStorageKey<String>(
-                      'lyrics_scroll_${widget.trackId ?? 'default'}',
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () {
+                  if (_showSettings) _setSettingsExpanded(false);
+                },
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: 840,
+                      maxHeight: constraints.maxHeight,
                     ),
-                    controller: _scrollController,
-                    padding: EdgeInsets.fromLTRB(28, topPad, 28, bottomPad),
-                  itemCount: widget.lyrics.length,
-                  itemBuilder: (context, index) {
-                    final line = widget.lyrics[index];
-                    final distance = (index - activeIndex).abs();
-                    final sigma = isSynced
-                        ? LyricsView.blurSigmaForDistance(distance)
-                        : 0.0;
-                    final opacity = isSynced
-                        ? LyricsView.opacityForDistance(distance)
-                        : 0.85;
-                    final isActive = isSynced && index == activeIndex;
+                    child: KeyedSubtree(
+                      key: const Key('lyrics_list_view'),
+                      child: ShaderMask(
+                        shaderCallback: (Rect bounds) {
+                          return const LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.transparent,
+                              Colors.white,
+                              Colors.white,
+                              Colors.transparent,
+                            ],
+                            stops: [0.0, 0.12, 0.84, 1.0],
+                          ).createShader(bounds);
+                        },
+                        blendMode: BlendMode.dstIn,
+                        child: ListView.builder(
+                          key: PageStorageKey<String>(
+                            'lyrics_scroll_${widget.trackId ?? 'default'}',
+                          ),
+                          controller: _scrollController,
+                          padding: EdgeInsets.fromLTRB(
+                            28,
+                            verticalPad,
+                            28,
+                            verticalPad,
+                          ),
+                          itemCount: widget.lyrics.length,
+                          itemBuilder: (context, index) {
+                            final line = widget.lyrics[index];
+                            final distance = (index - activeIndex).abs();
+                            final sigma = isSynced
+                                ? LyricsView.blurSigmaForDistance(distance)
+                                : 0.0;
+                            final opacity = isSynced
+                                ? LyricsView.opacityForDistance(distance)
+                                : 0.85;
+                            final isActive = isSynced && index == activeIndex;
 
-                    Widget content;
-                    if (isSynced && line.words.isNotEmpty) {
-                      content = WordByWordText(
-                        line: line,
-                        currentPosition: effectivePos,
-                        isActiveLine: isActive,
-                        textAlign: align,
-                      );
-                    } else {
-                      content = Text(
-                        line.text,
-                        textAlign: align,
-                        style: TextStyle(
-                          color: isActive
-                              ? LuminaTokens.textPrimary
-                              : LuminaTokens.textSecondary,
-                          fontSize: (isActive ? 26.0 : 19.0) * _fontScale,
-                          fontWeight: isActive
-                              ? FontWeight.w800
-                              : FontWeight.w600,
-                          height: 1.45,
-                        ),
-                      );
-                    }
+                            Widget content;
+                            if (isSynced && line.words.isNotEmpty) {
+                              content = WordByWordText(
+                                line: line,
+                                currentPosition: effectivePos,
+                                isActiveLine: isActive,
+                                textAlign: align,
+                              );
+                            } else {
+                              content = Text(
+                                line.text,
+                                textAlign: align,
+                                style: TextStyle(
+                                  color: isActive
+                                      ? LuminaTokens.textPrimary
+                                      : LuminaTokens.textSecondary,
+                                  fontSize: (isActive ? 26.0 : 19.0) * _fontScale,
+                                  fontWeight: isActive
+                                      ? FontWeight.w800
+                                      : FontWeight.w600,
+                                  height: 1.45,
+                                ),
+                              );
+                            }
 
-                    if (sigma > 0) {
-                      content = ImageFiltered(
-                        imageFilter: ui.ImageFilter.blur(
-                          sigmaX: sigma,
-                          sigmaY: sigma,
-                        ),
-                        child: content,
-                      );
-                    }
+                            if (sigma > 0) {
+                              content = ImageFiltered(
+                                imageFilter: ui.ImageFilter.blur(
+                                  sigmaX: sigma,
+                                  sigmaY: sigma,
+                                ),
+                                child: content,
+                              );
+                            }
 
-                    final seekable = widget.onSeek != null && line.isSynced;
-                    return Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8 * _fontScale),
-                      child: Opacity(
-                        opacity: opacity,
-                        child: InkWell(
-                          key: Key('lyric_line_$index'),
-                          borderRadius: BorderRadius.circular(
-                            LuminaTokens.radiusMd,
-                          ),
-                          mouseCursor: seekable
-                              ? SystemMouseCursors.click
-                              : SystemMouseCursors.basic,
-                          hoverColor: LuminaTokens.cardHoverBg.withValues(
-                            alpha: 0.38,
-                          ),
-                          focusColor: LuminaTokens.focusRing.withValues(
-                            alpha: 0.2,
-                          ),
-                          onTap: seekable
-                              ? () => widget.onSeek!(line.start)
-                              : null,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 6,
-                              horizontal: 12,
-                            ),
-                            child: widget.centered
-                                ? Center(child: content)
-                                : content,
-                          ),
+                            final seekable =
+                                widget.onSeek != null && line.isSynced;
+                            return Padding(
+                              padding: EdgeInsets.symmetric(
+                                vertical: 8 * _fontScale,
+                              ),
+                              child: Opacity(
+                                opacity: opacity,
+                                child: InkWell(
+                                  key: Key('lyric_line_$index'),
+                                  borderRadius: BorderRadius.circular(
+                                    LuminaTokens.radiusMd,
+                                  ),
+                                  mouseCursor: seekable
+                                      ? SystemMouseCursors.click
+                                      : SystemMouseCursors.basic,
+                                  hoverColor: LuminaTokens.cardHoverBg
+                                      .withValues(alpha: 0.38),
+                                  focusColor: LuminaTokens.focusRing
+                                      .withValues(alpha: 0.2),
+                                  onTap: seekable
+                                      ? () => widget.onSeek!(line.start)
+                                      : null,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 6,
+                                      horizontal: 12,
+                                    ),
+                                    child: widget.centered
+                                        ? Center(child: content)
+                                        : content,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
                         ),
                       ),
-                      );
-                    },
+                    ),
                   ),
                 ),
               ),
@@ -683,22 +779,45 @@ class _LyricsViewState extends State<LyricsView> {
             // Floating control toolbar toggle
             Positioned(
               bottom: LuminaTokens.spaceSm,
-              left: LuminaTokens.spaceSm,
+              left: _showSettings ? LuminaTokens.spaceSm : null,
               right: LuminaTokens.spaceSm,
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: AnimatedCrossFade(
-                    duration: const Duration(milliseconds: 200),
-                    crossFadeState: _showSettings
-                        ? CrossFadeState.showFirst
-                        : CrossFadeState.showSecond,
-                    firstChild: _buildToolbar(),
-                    secondChild: _LyricsToolbarToggleButton(
-                      onTap: () => _setSettingsExpanded(true),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 240),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) {
+                  return FadeTransition(
+                    opacity: animation,
+                    child: ScaleTransition(
+                      scale: Tween<double>(begin: 0.94, end: 1.0).animate(
+                        animation,
+                      ),
+                      child: child,
                     ),
-                  ),
-                ),
+                  );
+                },
+                child: _showSettings
+                    ? Center(
+                        key: const ValueKey('lyrics_toolbar_expanded'),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: MouseRegion(
+                            onEnter: (_) {
+                              _toolbarHovered = true;
+                              _cancelAutoCollapseTimer();
+                            },
+                            onExit: (_) {
+                              _toolbarHovered = false;
+                              _startAutoCollapseTimer();
+                            },
+                            child: _buildToolbar(),
+                          ),
+                        ),
+                      )
+                    : _LyricsToolbarToggleButton(
+                        key: const ValueKey('lyrics_toolbar_collapsed'),
+                        onTap: () => _setSettingsExpanded(true),
+                      ),
               ),
             ),
           ],
@@ -711,7 +830,7 @@ class _LyricsViewState extends State<LyricsView> {
 class _LyricsToolbarToggleButton extends StatefulWidget {
   final VoidCallback onTap;
 
-  const _LyricsToolbarToggleButton({required this.onTap});
+  const _LyricsToolbarToggleButton({super.key, required this.onTap});
 
   @override
   State<_LyricsToolbarToggleButton> createState() =>
@@ -745,44 +864,53 @@ class _LyricsToolbarToggleButtonState
             hoverColor: Colors.transparent,
             focusColor: Colors.transparent,
             borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            child: AnimatedContainer(
-              duration: LuminaTokens.focusDuration,
-              curve: LuminaTokens.motionCurve,
-              constraints: const BoxConstraints(minHeight: 36),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 6,
-              ),
-              decoration: BoxDecoration(
-                color: _hovered
-                    ? LuminaTokens.cardHoverBg
-                    : LuminaTokens.cardElevatedBg.withValues(alpha: 0.9),
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-                border: Border.all(
-                  color: _focused
-                      ? LuminaTokens.focusRing
-                      : LuminaTokens.borderControl.withValues(alpha: 0.8),
-                  width: 1,
-                ),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.tune_rounded,
-                    size: 15,
-                    color: LuminaTokens.textSecondary,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                child: AnimatedContainer(
+                  duration: LuminaTokens.focusDuration,
+                  curve: LuminaTokens.motionCurve,
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 7,
                   ),
-                  SizedBox(width: 6),
-                  Text(
-                    '歌詞設定',
-                    style: TextStyle(
-                      color: LuminaTokens.textSecondary,
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w500,
+                  decoration: BoxDecoration(
+                    color: _hovered
+                        ? Colors.white.withValues(alpha: 0.22)
+                        : Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+                    border: Border.all(
+                      color: _focused
+                          ? LuminaTokens.focusRing
+                          : Colors.white.withValues(
+                              alpha: _hovered ? 0.35 : 0.16,
+                            ),
+                      width: 1,
                     ),
                   ),
-                ],
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.tune_rounded,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                      SizedBox(width: 7),
+                      Text(
+                        'Aa',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),

@@ -301,7 +301,11 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                           ],
                         ),
                 ),
-                Expanded(child: _buildTrackTitles(track)),
+                Expanded(
+                  child: widget.isNowPlayingExpanded
+                      ? const SizedBox.shrink()
+                      : _buildTrackTitles(track),
+                ),
               ],
             ),
           ),
@@ -744,6 +748,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   );
                 }
 
+                final isExpanded = widget.isNowPlayingExpanded;
                 return Container(
                   key: const Key('liquid_glass_capsule'),
                   width: double.infinity,
@@ -751,14 +756,18 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                     horizontal: isWide ? 20.0 : 14.0,
                     vertical: LuminaTokens.spaceXs,
                   ),
-                  decoration: const BoxDecoration(
-                    color: LuminaTokens.cardElevatedBg,
-                    border: Border(
-                      top: BorderSide(
-                        color: LuminaTokens.borderSubtle,
-                        width: 1,
-                      ),
-                    ),
+                  decoration: BoxDecoration(
+                    color: isExpanded
+                        ? Colors.transparent
+                        : LuminaTokens.cardElevatedBg,
+                    border: isExpanded
+                        ? null
+                        : const Border(
+                            top: BorderSide(
+                              color: LuminaTokens.borderSubtle,
+                              width: 1,
+                            ),
+                          ),
                   ),
                   child: content,
                 );

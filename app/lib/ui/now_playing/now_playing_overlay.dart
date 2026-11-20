@@ -355,41 +355,69 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                 widget.audioService.currentLyrics,
               );
               final mode = _controller.mode;
+              final palette = _currentPalette;
+              final lum = palette.colorA.computeLuminance();
+              final scrimAlphaTop = (0.24 + lum * 0.40).clamp(0.24, 0.42);
+              final scrimAlphaBottom = (0.32 + lum * 0.45).clamp(0.32, 0.52);
 
-              return Material(
-                type: MaterialType.transparency,
-                child: Column(
-                  children: [
-                    _buildTopBar(mode),
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final metrics = NowPlayingLayoutMetrics.compute(
-                            width: constraints.maxWidth,
-                            height: constraints.maxHeight,
-                            mode: mode,
-                          );
-                          return AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 240),
-                            switchInCurve: Curves.easeOutCubic,
-                            switchOutCurve: Curves.easeInCubic,
-                            child: _buildStage(
-                              key: ValueKey(
-                                '${mode.name}-${metrics.arrangement.name}',
-                              ),
-                              metrics: metrics,
-                              maxWidth: constraints.maxWidth,
-                              maxHeight: constraints.maxHeight,
-                              state: state,
-                              track: track,
-                              lyrics: lyrics,
-                            ),
-                          );
-                        },
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  // Layer 2: Translucent modern glass highlight & subtle depth
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.04),
+                              Colors.transparent,
+                              Colors.black.withValues(alpha: 0.16),
+                            ],
+                            stops: const [0.0, 0.35, 1.0],
+                          ),
+                        ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  Material(
+                    type: MaterialType.transparency,
+                    child: Column(
+                      children: [
+                        _buildTopBar(mode),
+                        Expanded(
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final metrics = NowPlayingLayoutMetrics.compute(
+                                width: constraints.maxWidth,
+                                height: constraints.maxHeight,
+                                mode: mode,
+                              );
+                              return AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 240),
+                                switchInCurve: Curves.easeOutCubic,
+                                switchOutCurve: Curves.easeInCubic,
+                                child: _buildStage(
+                                  key: ValueKey(
+                                    '${mode.name}-${metrics.arrangement.name}',
+                                  ),
+                                  metrics: metrics,
+                                  maxWidth: constraints.maxWidth,
+                                  maxHeight: constraints.maxHeight,
+                                  state: state,
+                                  track: track,
+                                  lyrics: lyrics,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               );
             },
           ),
@@ -408,34 +436,40 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
       ),
       child: Row(
         children: [
-          IconButton(
-            key: const Key('btn_collapse_now_playing'),
-            tooltip: '收合播放畫面',
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            style: IconButton.styleFrom(
-              foregroundColor: LuminaTokens.textSecondary,
-              hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
-              focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.28),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                    width: 1.2,
+                  ),
+                ),
+                child: IconButton(
+                  key: const Key('btn_collapse_now_playing'),
+                  tooltip: '收合播放畫面',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                  style: IconButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    hoverColor: Colors.white.withValues(alpha: 0.12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  onPressed: widget.onCollapse,
+                  icon: const Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    size: 26,
+                  ),
+                ),
               ),
-            ).copyWith(
-              mouseCursor: const WidgetStatePropertyAll(
-                SystemMouseCursors.click,
-              ),
-              side: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.focused)
-                    ? const BorderSide(
-                        color: LuminaTokens.focusRing,
-                        width: 1.5,
-                      )
-                    : const BorderSide(color: Colors.transparent, width: 1.5),
-              ),
-            ),
-            onPressed: widget.onCollapse,
-            icon: const Icon(
-              Icons.keyboard_arrow_down_rounded,
-              size: 26,
             ),
           ),
           const Spacer(),
@@ -1072,33 +1106,41 @@ class _ModeIconButtonState extends State<_ModeIconButton> {
             hoverColor: Colors.transparent,
             focusColor: Colors.transparent,
             borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-            child: AnimatedContainer(
-              duration: LuminaTokens.focusDuration,
-              curve: LuminaTokens.motionCurve,
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: widget.selected
-                    ? LuminaTokens.cardElevatedBg.withValues(alpha: 0.92)
-                    : (_hovered
-                          ? LuminaTokens.cardHoverBg.withValues(alpha: 0.72)
-                          : Colors.transparent),
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                border: Border.all(
-                  color: _focused
-                      ? LuminaTokens.focusRing
-                      : (widget.selected
-                            ? LuminaTokens.borderControl
-                            : Colors.transparent),
-                  width: 1.5,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                child: AnimatedContainer(
+                  duration: LuminaTokens.focusDuration,
+                  curve: LuminaTokens.motionCurve,
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: widget.selected
+                        ? Colors.white.withValues(alpha: 0.22)
+                        : (_hovered
+                            ? Colors.white.withValues(alpha: 0.14)
+                            : Colors.black.withValues(alpha: 0.28)),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: _focused
+                          ? LuminaTokens.focusRing
+                          : (widget.selected
+                              ? Colors.white.withValues(alpha: 0.38)
+                              : Colors.white.withValues(
+                                  alpha: _hovered ? 0.24 : 0.12,
+                                )),
+                      width: 1.2,
+                    ),
+                  ),
+                  child: Icon(
+                    widget.icon,
+                    size: 19,
+                    color: widget.selected
+                        ? Colors.white
+                        : LuminaTokens.textSecondary,
+                  ),
                 ),
-              ),
-              child: Icon(
-                widget.icon,
-                size: 19,
-                color: widget.selected
-                    ? LuminaTokens.textPrimary
-                    : LuminaTokens.textSecondary,
               ),
             ),
           ),

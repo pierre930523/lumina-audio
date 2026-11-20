@@ -13,6 +13,8 @@ import 'package:lumina_app/services/now_playing_view_controller.dart';
 import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/shaders/mesh_fluid_painter.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
+import 'package:lumina_app/ui/lyrics/lyrics_view.dart';
+import 'package:lumina_app/ui/mini_player/floating_capsule.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_layout.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
 import 'package:lumina_app/ui/signal_path/quality_badge.dart';
@@ -826,6 +828,153 @@ void main() {
         tester.view.physicalSize = const Size(1440, 900);
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
+      },
+    );
+  });
+
+  group('Fullscreen Now Playing & Lyrics UI/UX Enhancements', () {
+    testWidgets(
+      'FloatingCapsuleMiniPlayer hides track info and removes top border when isNowPlayingExpanded is true',
+      (tester) async {
+        final mockService = MockAudioService();
+
+        // 1. Collapsed state: track title is visible, container has elevated background & top border
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: FloatingCapsuleMiniPlayer(
+                audioService: mockService,
+                showLyrics: false,
+                isNowPlayingExpanded: false,
+                onToggleLyrics: () {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('capsule_track_title')), findsOneWidget);
+        expect(find.text('Time'), findsOneWidget);
+        var capsuleContainer = tester.widget<Container>(
+          find.byKey(const Key('liquid_glass_capsule')),
+        );
+        var decor = capsuleContainer.decoration as BoxDecoration;
+        expect(decor.color, isNot(equals(Colors.transparent)));
+        expect(decor.border, isNotNull);
+
+        // 2. Expanded state: track info hidden, transparent background, no top border
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: FloatingCapsuleMiniPlayer(
+                audioService: mockService,
+                showLyrics: false,
+                isNowPlayingExpanded: true,
+                onToggleLyrics: () {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('capsule_track_title')), findsNothing);
+        expect(find.text('Time'), findsNothing);
+        capsuleContainer = tester.widget<Container>(
+          find.byKey(const Key('liquid_glass_capsule')),
+        );
+        decor = capsuleContainer.decoration as BoxDecoration;
+        expect(decor.color, equals(Colors.transparent));
+        expect(decor.border, isNull);
+      },
+    );
+
+    testWidgets(
+      'LyricsView renders ShaderMask, collapses settings pill by default, toggles on click, and auto-collapses',
+      (tester) async {
+        final lyrics = [
+          const LyricLine(
+            start: Duration(seconds: 0),
+            end: Duration(seconds: 4),
+            text: 'First line of the song',
+          ),
+          const LyricLine(
+            start: Duration(seconds: 4),
+            end: Duration(seconds: 8),
+            text: 'Second line of the song',
+          ),
+          const LyricLine(
+            start: Duration(seconds: 8),
+            end: Duration(seconds: 12),
+            text: 'Third line of the song',
+          ),
+        ];
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 800,
+                height: 600,
+                child: LyricsView(
+                  lyrics: lyrics,
+                  currentPosition: const Duration(seconds: 5),
+                  centered: true,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // 1. Verifies ShaderMask with BlendMode.dstIn wraps the lyrics list
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('lyrics_list_view')),
+            matching: find.byWidgetPredicate(
+              (w) => w is ShaderMask && w.blendMode == BlendMode.dstIn,
+            ),
+          ),
+          findsOneWidget,
+        );
+
+        // 2. Default state: collapsed pill toggle button
+        expect(
+          find.byKey(const Key('btn_lyrics_toolbar_toggle')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('btn_lyrics_font_down')), findsNothing);
+
+        // 3. Tapping the pill toggle expands the toolbar
+        await tester.tap(find.byKey(const Key('btn_lyrics_toolbar_toggle')));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('btn_lyrics_font_down')), findsOneWidget);
+        expect(find.byKey(const Key('btn_lyrics_toolbar_close')), findsOneWidget);
+
+        // 4. Tapping the close button collapses it back
+        await tester.tap(find.byKey(const Key('btn_lyrics_toolbar_close')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('btn_lyrics_toolbar_toggle')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('btn_lyrics_font_down')), findsNothing);
+
+        // 5. Expand again and verify auto-collapse after 4.5 seconds
+        await tester.tap(find.byKey(const Key('btn_lyrics_toolbar_toggle')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('btn_lyrics_font_down')), findsOneWidget);
+
+        // Advance timer past 4.5s
+        await tester.pump(const Duration(milliseconds: 4600));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('btn_lyrics_toolbar_toggle')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('btn_lyrics_font_down')), findsNothing);
       },
     );
   });
