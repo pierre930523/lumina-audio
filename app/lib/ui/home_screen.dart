@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -11,9 +12,11 @@ import '../models/studio_models.dart';
 import '../services/album_layout_settings_controller.dart';
 import '../services/artwork_palette_service.dart';
 import '../services/audio_service.dart';
+import '../services/desktop_window_controller.dart';
 import '../services/library_index_cache.dart';
 import '../services/library_settings_controller.dart';
 import '../services/now_playing_view_controller.dart';
+import '../services/playback_persistence_service.dart';
 import '../services/smart_playlist_service.dart';
 import '../services/ui_scale_controller.dart';
 import '../shaders/shader_loader.dart';
@@ -22,6 +25,7 @@ import 'albums/albums_and_credits_view.dart';
 import 'artists/artist_detail_page.dart';
 import 'artists/artists_view.dart';
 import 'audiobooks/audiobooks_view.dart';
+import 'common/desktop_window_caption.dart';
 import 'dsp/dsp_control_panel.dart';
 import 'home/home_dashboard_view.dart';
 import 'library/library_browser_view.dart';
@@ -241,6 +245,8 @@ class _HomeScreenState extends State<HomeScreen>
   late final SmartPlaylistService _playlistService;
   late final LibrarySettingsController _librarySettingsController;
   late final AlbumLayoutSettingsController _albumLayoutController;
+  late final PlaybackPersistenceService _playbackPersistenceService;
+  StreamSubscription<PlaybackState>? _playbackStateSub;
 
   HomeTab get _activeTab => _navController.current.tab;
 
@@ -299,6 +305,20 @@ class _HomeScreenState extends State<HomeScreen>
     _syncStateFromEntry(_navController.current);
     _refreshProviders();
     _initShaders();
+
+    _playbackPersistenceService = PlaybackPersistenceService();
+    _playbackPersistenceService.restoreSession(widget.audioService);
+    _playbackStateSub = widget.audioService.stateStream.listen((state) {
+      final snapshot = _playbackPersistenceService.buildSnapshot(
+        state: state,
+        queue: widget.audioService.queue,
+      );
+      if (state.status == PlaybackStatus.playing) {
+        _playbackPersistenceService.saveThrottled(snapshot);
+      } else {
+        _playbackPersistenceService.saveImmediate(snapshot);
+      }
+    });
   }
 
   void _onNavChanged() {
@@ -461,6 +481,9 @@ class _HomeScreenState extends State<HomeScreen>
     _playlistService.dispose();
     _librarySettingsController.dispose();
     _albumLayoutController.dispose();
+    _playbackStateSub?.cancel();
+    _playbackPersistenceService.flush();
+    _playbackPersistenceService.dispose();
     _glassShader?.dispose();
     _shaders.backdropImage?.dispose();
     super.dispose();
@@ -651,6 +674,7 @@ class _HomeScreenState extends State<HomeScreen>
                                     !_nowPlayingAnimController.isDismissed);
                             final showWorkspace = !_isNowPlayingExpanded ||
                                 !_nowPlayingAnimController.isCompleted;
+
                             return Stack(
                               fit: StackFit.expand,
                               children: [
@@ -675,8 +699,8 @@ class _HomeScreenState extends State<HomeScreen>
                                                           milliseconds: 220,
                                                         ),
                                                         curve: Curves.easeOutCubic,
-                                                        alignment: Alignment
-                                                            .centerRight,
+                                                        alignment:
+                                                            Alignment.centerRight,
                                                         widthFactor:
                                                             _sidebarCollapsed
                                                                 ? 0.0
@@ -689,7 +713,10 @@ class _HomeScreenState extends State<HomeScreen>
                                                     Expanded(
                                                       child: _buildMainColumn(
                                                         isDesktop: true,
-                                                        availWidth: availWidth,
+                                                        availWidth: availWidth -
+                                                            (_sidebarCollapsed
+                                                                ? 0.0
+                                                                : sidebarWidth),
                                                       ),
                                                     ),
                                                   ],
@@ -1149,7 +1176,7 @@ class _HomeScreenState extends State<HomeScreen>
     final canGoForward = _navController.canGoForward;
     final inSettings = _isSettingsTab(_activeTab);
     final isCompactTopBar = availWidth < 480;
-    final isCompactProfile = availWidth < 520;
+    final isCompactProfile = availWidth < (isDesktop ? 720 : 520);
 
     return Container(
       decoration: BoxDecoration(
@@ -1220,7 +1247,7 @@ class _HomeScreenState extends State<HomeScreen>
             isDesktop: isDesktop,
             isCompactTopBar: isCompactTopBar,
           ),
-          if (isDesktop && availWidth >= 600) ...[
+          if (isDesktop && availWidth >= 760) ...[
             _buildQuickScaleMenu(),
             const SizedBox(width: 6),
             IconButton(
@@ -1280,11 +1307,17 @@ class _HomeScreenState extends State<HomeScreen>
               onPressed: () => _selectTab(_lastSettingsTab),
             ),
           ),
-          SizedBox(width: isCompactTopBar ? 2 : 6),
-          ProfileSwitcherBar(
-            audioService: widget.audioService,
-            compact: isCompactProfile,
-          ),
+          if (availWidth >= 380) ...[
+            SizedBox(width: isCompactTopBar ? 2 : 6),
+            ProfileSwitcherBar(
+              audioService: widget.audioService,
+              compact: isCompactProfile,
+            ),
+          ],
+          if (isDesktop) ...[
+            const SizedBox(width: 8),
+            const DesktopWindowCaptionButtons(),
+          ],
         ],
       ),
     );
@@ -1300,9 +1333,13 @@ class _HomeScreenState extends State<HomeScreen>
     final stickyTitle = isDetailTab ? _resolveStickyTitle() : '';
 
     return Expanded(
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
-        child: AnimatedBuilder(
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onPanStart: (_) => DesktopWindowController.instance.startDragging(),
+        onDoubleTap: () => DesktopWindowController.instance.toggleMaximize(),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: isCompactTopBar ? 4 : 8),
+          child: AnimatedBuilder(
           animation: _stickyTitleFadeAnimation,
           builder: (context, _) {
             final t = _stickyTitleFadeAnimation.value;
@@ -1346,6 +1383,7 @@ class _HomeScreenState extends State<HomeScreen>
             );
           },
         ),
+      ),
       ),
     );
   }

@@ -15,6 +15,7 @@ import 'package:lumina_app/shaders/mesh_fluid_painter.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
 import 'package:lumina_app/ui/lyrics/lyrics_view.dart';
 import 'package:lumina_app/ui/mini_player/floating_capsule.dart';
+import 'package:lumina_app/ui/now_playing/dynamic_waveform_bar.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_layout.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
 import 'package:lumina_app/ui/signal_path/quality_badge.dart';
@@ -975,6 +976,48 @@ void main() {
           findsOneWidget,
         );
         expect(find.byKey(const Key('btn_lyrics_font_down')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'NowPlayingOverlay mounts DynamicWaveformBar, desktop window captions, and toggles mode on cover tap',
+      (tester) async {
+        final mockService = MockAudioService();
+        final controller = NowPlayingViewController();
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: NowPlayingOverlay(
+                audioService: mockService,
+                controller: controller,
+                onCollapse: () {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // 1. DynamicWaveformBar is mounted
+        expect(find.byType(DynamicWaveformBar), findsOneWidget);
+
+        // 2. Desktop window caption buttons are mounted
+        expect(find.byKey(const Key('btn_window_minimize')), findsOneWidget);
+        expect(find.byKey(const Key('btn_window_maximize')), findsOneWidget);
+        expect(find.byKey(const Key('btn_window_close')), findsOneWidget);
+
+        // 3. Switch to Cover mode -> tap cover toggles to Split mode
+        controller.setMode(NowPlayingViewMode.cover);
+        await tester.pumpAndSettle();
+        expect(controller.mode, NowPlayingViewMode.cover);
+        await tester.tap(find.byType(AlbumArtworkView));
+        await tester.pumpAndSettle();
+        expect(controller.mode, NowPlayingViewMode.split);
+
+        // 4. Tap cover in Split mode toggles back to Cover mode
+        await tester.tap(find.byType(AlbumArtworkView));
+        await tester.pumpAndSettle();
+        expect(controller.mode, NowPlayingViewMode.cover);
       },
     );
   });

@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
 import 'package:material_ui/material_ui.dart';
 import '../../models/lyric.dart';
 import '../../services/audio_service.dart';
 import '../../services/now_playing_view_controller.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
 import 'word_by_word_text.dart';
 
 class LyricsView extends StatefulWidget {
@@ -74,6 +76,8 @@ class _LyricsViewState extends State<LyricsView> {
   bool _pendingTrackScrollRestore = false;
   Timer? _autoCollapseTimer;
   bool _toolbarHovered = false;
+  Timer? _userScrollTimer;
+  bool _userIsScrolling = false;
 
   static bool _lyricsStructurallyEqual(List<LyricLine> a, List<LyricLine> b) {
     if (identical(a, b)) return true;
@@ -144,6 +148,7 @@ class _LyricsViewState extends State<LyricsView> {
   @override
   void dispose() {
     _cancelAutoCollapseTimer();
+    _userScrollTimer?.cancel();
     widget.viewController?.removeListener(_onViewControllerChanged);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -281,16 +286,18 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   void _autoScrollTo(int index, {double? viewportHeight}) {
+    if (_userIsScrolling) return;
     if (!_scrollController.hasClients || widget.lyrics.isEmpty) return;
     final itemExtent = 56.0 * _fontScale;
     final viewportH = viewportHeight ??
         (_scrollController.position.hasViewportDimension
             ? _scrollController.position.viewportDimension
             : 360.0);
-    final verticalPad = math.max(60.0, viewportH * 0.42);
-    final targetCenter = viewportH * 0.47;
+    final verticalPad = math.max(60.0, viewportH * 0.50);
+    final targetCenter = viewportH * 0.50;
     final targetOffset =
-        ((index * itemExtent + verticalPad) - targetCenter).clamp(
+        ((index * itemExtent + verticalPad) - targetCenter + (itemExtent * 0.5))
+            .clamp(
       0.0,
       _scrollController.position.maxScrollExtent,
     );
@@ -642,7 +649,7 @@ class _LyricsViewState extends State<LyricsView> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final verticalPad = math.max(60.0, constraints.maxHeight * 0.42);
+        final verticalPad = math.max(60.0, constraints.maxHeight * 0.50);
         return Stack(
           alignment: Alignment.center,
           children: [
@@ -675,17 +682,37 @@ class _LyricsViewState extends State<LyricsView> {
                           ).createShader(bounds);
                         },
                         blendMode: BlendMode.dstIn,
-                        child: ListView.builder(
-                          key: PageStorageKey<String>(
-                            'lyrics_scroll_${widget.trackId ?? 'default'}',
-                          ),
-                          controller: _scrollController,
-                          padding: EdgeInsets.fromLTRB(
-                            28,
-                            verticalPad,
-                            28,
-                            verticalPad,
-                          ),
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is UserScrollNotification) {
+                              if (notification.direction !=
+                                  ScrollDirection.idle) {
+                                _userIsScrolling = true;
+                                _userScrollTimer?.cancel();
+                                _userScrollTimer =
+                                    Timer(const Duration(seconds: 4), () {
+                                  if (mounted) {
+                                    setState(() => _userIsScrolling = false);
+                                    _autoScrollTo(_lastActiveIndex);
+                                  }
+                                });
+                              }
+                            }
+                            return false;
+                          },
+                          child: SmoothScrollWrapper(
+                            controller: _scrollController,
+                            child: ListView.builder(
+                              key: PageStorageKey<String>(
+                                'lyrics_scroll_${widget.trackId ?? 'default'}',
+                              ),
+                              controller: _scrollController,
+                              padding: EdgeInsets.fromLTRB(
+                                28,
+                                verticalPad,
+                                28,
+                                verticalPad,
+                              ),
                           itemCount: widget.lyrics.length,
                           itemBuilder: (context, index) {
                             final line = widget.lyrics[index];
@@ -776,6 +803,8 @@ class _LyricsViewState extends State<LyricsView> {
                 ),
               ),
             ),
+          ),
+        ),
             // Floating control toolbar toggle
             Positioned(
               bottom: LuminaTokens.spaceSm,

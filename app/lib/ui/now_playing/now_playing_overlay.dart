@@ -10,14 +10,17 @@ import '../../models/playback_state.dart';
 import '../../models/signal_path.dart';
 import '../../services/artwork_palette_service.dart';
 import '../../services/audio_service.dart';
+import '../../services/desktop_window_controller.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/now_playing_view_controller.dart';
 import '../../shaders/mesh_fluid_painter.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/desktop_window_caption.dart';
 import '../lyrics/lyrics_view.dart';
 import '../signal_path/quality_badge.dart';
 import '../signal_path/signal_path_modal.dart';
 import '../theme/lumina_tokens.dart';
+import 'dynamic_waveform_bar.dart';
 import 'now_playing_layout.dart';
 
 class NowPlayingOverlay extends StatefulWidget {
@@ -70,6 +73,27 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
     _toPalette,
     _paletteCurvedAnim.value,
   );
+
+  AmbientPalette get _displayPalette {
+    final p = _currentPalette;
+    return AmbientPalette(
+      colorA: _boostColor(p.colorA, satBoost: 1.35, lightBoost: 1.45),
+      colorB: _boostColor(p.colorB, satBoost: 1.30, lightBoost: 1.40),
+      colorC: _boostColor(p.colorC, satBoost: 1.25, lightBoost: 1.35),
+      colorD: _boostColor(p.colorD, satBoost: 1.20, lightBoost: 1.25),
+    );
+  }
+
+  static Color _boostColor(
+    Color c, {
+    double satBoost = 1.3,
+    double lightBoost = 1.4,
+  }) {
+    final hsl = HSLColor.fromColor(c);
+    final sat = (hsl.saturation * satBoost).clamp(0.25, 0.90).toDouble();
+    final light = (hsl.lightness * lightBoost).clamp(0.18, 0.48).toDouble();
+    return hsl.withSaturation(sat).withLightness(light).toColor();
+  }
 
   bool get _shouldAnimateFluid {
     final motionEnabled =
@@ -355,10 +379,7 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                 widget.audioService.currentLyrics,
               );
               final mode = _controller.mode;
-              final palette = _currentPalette;
-              final lum = palette.colorA.computeLuminance();
-              final scrimAlphaTop = (0.24 + lum * 0.40).clamp(0.24, 0.42);
-              final scrimAlphaBottom = (0.32 + lum * 0.45).clamp(0.32, 0.52);
+              final palette = _displayPalette;
 
               return Stack(
                 fit: StackFit.expand,
@@ -372,9 +393,9 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                             begin: Alignment.topCenter,
                             end: Alignment.bottomCenter,
                             colors: [
-                              Colors.white.withValues(alpha: 0.04),
+                              Colors.white.withValues(alpha: 0.05),
                               Colors.transparent,
-                              Colors.black.withValues(alpha: 0.16),
+                              Colors.black.withValues(alpha: 0.08),
                             ],
                             stops: const [0.0, 0.35, 1.0],
                           ),
@@ -396,9 +417,26 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                                 mode: mode,
                               );
                               return AnimatedSwitcher(
-                                duration: const Duration(milliseconds: 240),
+                                duration: const Duration(milliseconds: 360),
                                 switchInCurve: Curves.easeOutCubic,
                                 switchOutCurve: Curves.easeInCubic,
+                                transitionBuilder: (child, animation) {
+                                  return FadeTransition(
+                                    opacity: animation,
+                                    child: SlideTransition(
+                                      position: Tween<Offset>(
+                                        begin: const Offset(0.03, 0.0),
+                                        end: Offset.zero,
+                                      ).animate(
+                                        CurvedAnimation(
+                                          parent: animation,
+                                          curve: Curves.easeOutCubic,
+                                        ),
+                                      ),
+                                      child: child,
+                                    ),
+                                  );
+                                },
                                 child: _buildStage(
                                   key: ValueKey(
                                     '${mode.name}-${metrics.arrangement.name}',
@@ -415,6 +453,19 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
                           ),
                         ),
                       ],
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      child: DynamicWaveformBar(
+                        isPlaying: state.status == PlaybackStatus.playing,
+                        primaryColor: palette.colorA,
+                        secondaryColor: palette.colorB,
+                        height: 48,
+                      ),
                     ),
                   ),
                 ],
@@ -472,7 +523,16 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
               ),
             ),
           ),
-          const Spacer(),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onPanStart: (_) =>
+                  DesktopWindowController.instance.startDragging(),
+              onDoubleTap: () =>
+                  DesktopWindowController.instance.toggleMaximize(),
+              child: const SizedBox(height: 40),
+            ),
+          ),
           _ModeIconButton(
             key: const Key('btn_now_playing_mode_split'),
             icon: Icons.vertical_split_rounded,
@@ -495,6 +555,10 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
             tooltip: '純封面檢視',
             selected: mode == NowPlayingViewMode.cover,
             onTap: () => _controller.setMode(NowPlayingViewMode.cover),
+          ),
+          const SizedBox(width: LuminaTokens.spaceSm),
+          const DesktopWindowCaptionButtons(
+            color: Colors.white70,
           ),
         ],
       ),
@@ -931,7 +995,7 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
     double shadowSpread = 2,
     double shadowOffsetY = 14,
   }) {
-    return ConstrainedBox(
+    Widget card = ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxSide, maxHeight: maxSide),
       child: AspectRatio(
         aspectRatio: 1,
@@ -942,12 +1006,12 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
           libraryCache: widget.libraryCache,
           onArtworkResolved: (cachePath, coverUrl) =>
               _handleArtworkResolved(track, cachePath, coverUrl),
-          borderRadius: BorderRadius.circular(compact ? 6 : 12),
+          borderRadius: BorderRadius.circular(compact ? 6 : 14),
           boxShadow: compact
               ? null
               : [
                   BoxShadow(
-                    color: const Color(0x88000000),
+                    color: const Color(0x66000000),
                     blurRadius: shadowBlur,
                     spreadRadius: shadowSpread,
                     offset: Offset(0, shadowOffsetY),
@@ -956,6 +1020,23 @@ class _NowPlayingOverlayState extends State<NowPlayingOverlay>
         ),
       ),
     );
+
+    if (!compact) {
+      card = MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () {
+            if (_controller.mode == NowPlayingViewMode.cover) {
+              _controller.setMode(NowPlayingViewMode.split);
+            } else if (_controller.mode == NowPlayingViewMode.split) {
+              _controller.setMode(NowPlayingViewMode.cover);
+            }
+          },
+          child: card,
+        ),
+      );
+    }
+    return card;
   }
 
   Widget _buildTrackMetadata(

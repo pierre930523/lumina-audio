@@ -1,41 +1,49 @@
-# Lumina Audio — 全螢幕播放頁與歌詞頁交互修正與毛玻璃背景升級接續進度
+# Lumina Audio — 全視窗無縫一體化、毛玻璃視覺升級、播放狀態持久化與 Windows Release 交付
 
 ## 1. 任務目標 (Task Goal)
-修正 Lumina Audio Flutter 桌面端（`app/lib/`）全螢幕「正在播放」與「歌詞」頁面的 4 項 UI 排版、交互與視覺問題，並確保跨解析度與 100%/150% DPI 縮放自適應：
-1. **移除全螢幕播放頁重複顯示的歌名與專輯資訊**：全螢幕開啟時，隱藏底部迷你播放控制列左下角的迷你封面、歌名與歌手區塊，僅保留畫面主體區的曲目資訊；返回主頁時自動恢復。
-2. **歌詞設定工具列自動收合交互**：預設收合為精簡半透明毛玻璃圖示按鈕（`Aa` / `tune`，放置於右下角不干擾歌詞閱讀）；點擊展開完整工具列，支援收合按鈕、點擊外部空白、或無操作 4.5 秒後自動平滑收合，Hover 或調整字體/秒數期間不提前收合。
-3. **歌詞垂直動態置中與消除硬切痕**：
-   - 上下動態計算 `viewportHeight * 0.42` 留白，自動平滑滾動至 47% 視覺黃金中心。
-   - 套用 `ShaderMask`（`BlendMode.dstIn`）讓頂部 0%~12% 與底部 84%~100% 平滑淡出至透明，消除文字硬切斷。
-   - 全螢幕下底部播放控制列（`FloatingCapsuleMiniPlayer`）改為完全透明背景並移除頂部邊框，消除橫切硬線。
-4. **全幅通透毛玻璃動態背景（Glassmorphism）升級**：
-   - 底層結合 4 點動態流體光斑（`MeshFluidBgPainter`）與高半徑毛玻璃模糊。
-   - 頂層加入通透高光與層次深度微調漸層，徹底擺脫死黑沉悶感。
-   - 頂部收合按鈕（`btn_collapse_now_playing`）、模式切換膠囊（`_ModeIconButton`）與歌詞設定工具列全面採用半透明毛玻璃質感。
+針對 Lumina Audio Flutter 桌面端（`app/`）完成 7 大項功能新增與視覺交互升級，並支援 100% / 150% DPI 縮放倍率、多種螢幕長寬比與視窗尺寸，解決截圖中反饋的問題：
+1. **全視窗「無縫一體化」設計**：
+   - 移除 Windows 原生深色系統標題列（去除 `lumina_app` 系統條）。
+   - 將最小化、最大化/還原、關閉按鈕整合進 App 頂部透明覆蓋層右側，頂部空白區支援滑鼠拖曳移動視窗與雙擊最大化。
+   - 全螢幕播放頁與主介面無縫融合，消除實心深色橫切切痕，讓動態流光光影從視窗最頂端無縫延展至最底端。
+2. **整體介面與播放背景「提亮」與通透質感優化**：
+   - 大幅降低播放頁底層黑色壓暗遮罩，調升專輯封面提取色彩的明度與飽和度（1.25x~1.45x boost），營造通透呼吸感。
+3. **播放狀態持久化（關閉重開記住上次曲目與進度）**：
+   - 本地 JSON 持久化，記錄上次曲目、進度 ms、佇列與 index、音量。
+   - 切歌/暫停/seek 即時存、播放期間每 3.5 秒節流存、關閉視窗強制存。
+   - 啟動自動恢復曲目與進度，維持暫停狀態，避免突發爆音。
+4. **封面 ↔ 歌詞「絲滑水平滑移」切換動畫與音訊律動**：
+   - 純封面模式在視窗正中央；點擊封面或歌詞按鈕時，封面由中央滑移至左側，歌詞淡入；點擊封面可切換回中央。
+   - 視窗底邊增加柔和、低透明度、隨播放起伏的動態波形頻譜裝飾條（不干擾 Bit-Perfect 輸出）。
+5. **跨螢幕與不同視窗比例下封面強制置中**：
+   - 純封面模式下完全居中，消除偏左邏輯。
+6. **跨螢幕歌詞自適應精準居中與工具列交互優化**：
+   - 上下留白設為 `viewportHeight * 0.5`，唱到的歌詞行永遠精準垂直置中於 50%。
+   - 使用者手動滾動歌詞時暫停自動滾動 4 秒後平滑恢復。
+   - 歌詞設定工具列預設收合為單一精簡按鈕（`Aa`），點擊展開，4.5 秒無操作或點擊外部自動收合，不再遮擋歌詞。
+7. **全站滑鼠滾輪平滑阻尼動畫（Smooth Scroll Physics）**：
+   - 桌面端自訂平滑滾輪控制器（`SmoothScrollWrapper`），消除階梯跳格感。
 
 ## 2. 修改檔案清單 (Modified Files)
-- `app/lib/ui/mini_player/floating_capsule.dart`:
-  - `_buildNowPlayingTrigger`: `widget.isNowPlayingExpanded` 時將左側迷你封面與曲目文字收合/隱藏，寬螢幕維持佔位寬度以保持中央控制項居中。
-  - `liquid_glass_capsule`: `isExpanded` 時背景改為 `Colors.transparent`，移除頂部硬邊切痕 `border: null`。
-- `app/lib/ui/lyrics/lyrics_view.dart`:
-  - 新增 `Timer? _autoCollapseTimer` 與 `bool _toolbarHovered`，展開後滑鼠離開 4.5 秒無操作自動收合，互動或 hover 時重置/暫停。
-  - 預設收合為右下角精簡半透明毛玻璃圖示膠囊（`Aa` + `tune`，`Key('btn_lyrics_toolbar_toggle')`）。
-  - 展開工具列新增獨立收合按鈕（`Key('btn_lyrics_toolbar_close')`），背景新增全幅點擊監聽以支援點擊外部立即收合。
-  - 外層套用 `ShaderMask(BlendMode.dstIn)` 頂底漸變淡出遮罩。
-  - 上下動態內距 `viewportHeight * 0.42`，`_autoScrollTo` 滾動目標對齊至 47% 視覺黃金中心。
-- `app/lib/ui/now_playing/now_playing_overlay.dart`:
-  - 頂部收合按鈕與模式切換膠囊升級為半透明通透毛玻璃樣式（`BackdropFilter`、微弱白邊與半透明底色）。
-  - 背景加入輕透玻璃高光與深淺自適應漸層遮罩，避免死黑沉悶。
-- `app/test/now_playing_enhancement_test.dart`:
-  - 新增 2 項完整 Widget 測試，驗證全螢幕下底部資訊隱藏、無硬邊框、歌詞 `ShaderMask`、單一膠囊按鈕、展開與收合、以及 4.5 秒自動收合邏輯。
+- `app/windows/runner/flutter_window.h` & `flutter_window.cpp`: 實現 `lumina/window` 原生視窗控制 MethodChannel。
+- `app/windows/runner/win32_window.cpp`: 攔截 `WM_NCCALCSIZE` 去除 Windows 系統原生標題欄，保留 DWM 視窗陰影與 Aero Snap 邊界。
+- `app/lib/services/desktop_window_controller.dart`: 封裝 Windows 視窗操作，Web/Test/非 Windows 平台安全降級為 no-op。
+- `app/lib/ui/common/desktop_window_caption.dart`: 實現 Windows 11 風格之最小化、最大化/向下還原、關閉按鈕。
+- `app/lib/services/playback_persistence_service.dart`: 支援曲目、進度、音量、佇列之快照序列化、節流儲存、即時儲存、錯誤容錯與恢復。
+- `app/lib/ui/theme/smooth_scroll.dart`: 實現 `SmoothScrollWrapper`，桌面端平滑阻尼曲線插值滾動。
+- `app/lib/ui/now_playing/dynamic_waveform_bar.dart`: 底部多諧波低透明度動態波形律動條。
+- `app/lib/ui/lyrics/lyrics_view.dart`: 50% 垂直中心自動滾動、手動滾動 4 秒阻斷恢復、平滑滾動阻尼。
+- `app/lib/ui/now_playing/now_playing_overlay.dart`: 整合無邊框標題欄、封面點擊切換、動態波形、色彩提亮。
+- `app/lib/ui/home_screen.dart`: 修正主欄寬度自適應計算，整合標題欄按鈕與播放狀態自動儲存/恢復。
+- `app/test/playback_persistence_service_test.dart`: 播放狀態持久化單元測試。
+- `app/test/now_playing_enhancement_test.dart`: 播放介面增強功能 Widget 測試。
 
-## 3. 驗證現況 (Verification Status)
-- `cd app; flutter analyze`: **0 issues found**。
-- `cd app; flutter test test/now_playing_enhancement_test.dart`: **9 / 9 passed**。
-- `cd app; flutter test test/lyrics_test.dart`: **2 / 2 passed**。
-- `cd app; flutter test test/player_layout_fix_test.dart`: **10 / 10 passed**。
+## 3. 驗證結果 (Verification Status)
+- `cd app; flutter analyze`: **No issues found!** (0 errors, 0 warnings)。
+- `cd app; flutter test -j 1`: **154 / 154 tests passed** (100% 通過率)。
+- `cd app; flutter build windows --release`: **成功產出 Release 執行檔**：
+  `app/build/windows/x64/runner/Release/lumina_app.exe`
 
-## 4. 下一步 (Next Steps)
-1. 等候完整測試套件執行完畢（150 / 150 通過）。
-2. 執行 Windows Release 建置產出最新執行檔：`cd app; flutter build windows --release`。
-3. 驗證新版二進位檔可正常啟動無報錯，回報完整執行成果給使用者。
+## 4. 執行與測試方式 (How to Run)
+在終端機執行或雙擊開啟：
+`C:\Users\pierre\.gemini\antigravity\scratch\lumina-audio\app\build\windows\x64\runner\Release\lumina_app.exe`
