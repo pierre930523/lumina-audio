@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -8,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/lyric.dart';
 import '../../models/playback_state.dart';
 import '../../models/signal_path.dart';
+import '../../models/streaming_provider_meta.dart';
 import '../../services/artwork_palette_service.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
@@ -20,7 +20,6 @@ import '../lyrics/lyrics_view.dart';
 import '../signal_path/quality_badge.dart';
 import '../signal_path/signal_path_modal.dart';
 import '../theme/lumina_tokens.dart';
-import 'dynamic_waveform_bar.dart';
 import 'now_playing_layout.dart';
 
 class NowPlayingOverlay extends StatefulWidget {
@@ -31,6 +30,7 @@ class NowPlayingOverlay extends StatefulWidget {
   final ArtworkPaletteService? paletteService;
   final ui.FragmentProgram? meshFluidProgram;
   final bool isVisible;
+  final bool isTransitionSettled;
   final bool? enableAmbientMotion;
   final double bottomClearance;
 
@@ -43,6 +43,7 @@ class NowPlayingOverlay extends StatefulWidget {
     this.paletteService,
     this.meshFluidProgram,
     this.isVisible = true,
+    this.isTransitionSettled = true,
     this.enableAmbientMotion,
     this.bottomClearance = 0.0,
   });
@@ -61,7 +62,6 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
 
   late final AnimationController _paletteAnimController;
   late final Animation<double> _paletteCurvedAnim;
-  late final AnimationController _fluidAnimController;
   late final AnimationController _modeAnimController;
   late final Animation<double> _modeAnim;
 
@@ -147,34 +147,6 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     _paletteCurvedAnim.value,
   );
 
-  AmbientPalette get _displayPalette {
-    final p = _currentPalette;
-    return AmbientPalette(
-      colorA: _boostColor(p.colorA, satBoost: 1.40, lightBoost: 1.65),
-      colorB: _boostColor(p.colorB, satBoost: 1.35, lightBoost: 1.55),
-      colorC: _boostColor(p.colorC, satBoost: 1.30, lightBoost: 1.45),
-      colorD: _boostColor(p.colorD, satBoost: 1.25, lightBoost: 1.40),
-    );
-  }
-
-  static Color _boostColor(
-    Color c, {
-    double satBoost = 1.3,
-    double lightBoost = 1.4,
-  }) {
-    final hsl = HSLColor.fromColor(c);
-    final sat = (hsl.saturation * satBoost).clamp(0.35, 0.88).toDouble();
-    final light = (hsl.lightness * lightBoost).clamp(0.32, 0.72).toDouble();
-    return hsl.withSaturation(sat).withLightness(light).toColor();
-  }
-
-  bool get _shouldAnimateFluid {
-    final motionEnabled =
-        widget.enableAmbientMotion ??
-        !Platform.environment.containsKey('FLUTTER_TEST');
-    return widget.isVisible && motionEnabled && _lastIsPlaying;
-  }
-
   static String _trackIdentityKey(TrackInfo? track) {
     if (track == null) return 'none';
     return '${track.id}|'
@@ -183,7 +155,9 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
         '${track.albumArtUrl ?? ''}|'
         '${track.filePath ?? ''}|'
         '${track.album}|'
-        '${track.title}';
+        '${track.title}|'
+        '${track.providerName}|'
+        '${track.format.label}';
   }
 
   @override
@@ -210,7 +184,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
 
     _paletteAnimController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 650),
+      duration: const Duration(milliseconds: 400),
       value: 1.0,
     );
     _paletteCurvedAnim = CurvedAnimation(
@@ -218,11 +192,9 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
       curve: Curves.easeInOutCubic,
     );
 
-    _fluidAnimController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 24),
+    widget.audioService.setNowPlayingVisible(
+      widget.isVisible && widget.isTransitionSettled,
     );
-    _syncAmbientMotion();
 
     _modeAnimController = AnimationController(
       vsync: this,
@@ -271,26 +243,35 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
       _onPlaybackState(widget.audioService.currentState);
     }
 
-    if (oldWidget.isVisible != widget.isVisible ||
-        oldWidget.enableAmbientMotion != widget.enableAmbientMotion) {
-      if (!widget.isVisible && _paletteAnimController.isAnimating) {
-        _paletteAnimController.stop();
-        _fromPalette = _toPalette;
-        _paletteAnimController.value = 1.0;
+    final wasVisiblySettled =
+        oldWidget.isVisible && oldWidget.isTransitionSettled;
+    final isVisiblySettled = widget.isVisible && widget.isTransitionSettled;
+    if (wasVisiblySettled != isVisiblySettled ||
+        oldWidget.audioService != widget.audioService) {
+      if (oldWidget.audioService != widget.audioService) {
+        oldWidget.audioService.setNowPlayingVisible(false);
       }
-      _syncAmbientMotion();
+      widget.audioService.setNowPlayingVisible(isVisiblySettled);
+    }
+
+    if (oldWidget.isVisible != widget.isVisible &&
+        !widget.isVisible &&
+        _paletteAnimController.isAnimating) {
+      _paletteAnimController.stop();
+      _fromPalette = _toPalette;
+      _paletteAnimController.value = 1.0;
     }
   }
 
   @override
   void dispose() {
+    widget.audioService.setNowPlayingVisible(false);
     _stateSub?.cancel();
     _controller.removeListener(_onControllerChanged);
     if (_ownsController) {
       _controller.dispose();
     }
     _paletteAnimController.dispose();
-    _fluidAnimController.dispose();
     _modeAnimController.dispose();
     _meshShader?.dispose();
     super.dispose();
@@ -319,18 +300,6 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     } else {
       _modeAnimController.forward();
       _controller.setMode(NowPlayingViewMode.split);
-    }
-  }
-
-  void _syncAmbientMotion() {
-    if (_shouldAnimateFluid) {
-      if (!_fluidAnimController.isAnimating) {
-        _fluidAnimController.repeat();
-      }
-    } else {
-      if (_fluidAnimController.isAnimating) {
-        _fluidAnimController.stop();
-      }
     }
   }
 
@@ -373,7 +342,6 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     final nextPlaying = state.status == PlaybackStatus.playing;
     if (nextPlaying != _lastIsPlaying) {
       _lastIsPlaying = nextPlaying;
-      _syncAmbientMotion();
     }
 
     final nextKey = _trackIdentityKey(state.track);
@@ -443,24 +411,23 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox.expand(
-      child: Stack(
+    return TickerMode(
+      enabled: widget.isVisible,
+      child: SizedBox.expand(
+        child: Stack(
         fit: StackFit.expand,
         children: [
           RepaintBoundary(
             key: const Key('now_playing_bg_repaint_boundary'),
             child: AnimatedBuilder(
-              animation: Listenable.merge([
-                _paletteAnimController,
-                _fluidAnimController,
-              ]),
+              animation: _paletteAnimController,
               builder: (context, _) {
                 final palette = _currentPalette;
                 return CustomPaint(
                   key: const Key('now_playing_ambient_bg'),
                   painter: MeshFluidBgPainter(
                     shader: _meshShader,
-                    time: _fluidAnimController.value * 24.0,
+                    time: 0.0,
                     colorA: palette.colorA,
                     colorB: palette.colorB,
                     colorC: palette.colorC,
@@ -481,7 +448,6 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                 widget.audioService.currentLyrics,
               );
               final mode = _controller.mode;
-              final palette = _displayPalette;
 
               return Stack(
                 fit: StackFit.expand,
@@ -525,7 +491,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                                   height: constraints.maxHeight,
                                   mode: mode,
                                 );
-                                return _buildStage(
+                                final stageWidget = _buildStage(
                                   key: const Key('now_playing_stage_content'),
                                   metrics: metrics,
                                   maxWidth: constraints.maxWidth,
@@ -534,23 +500,28 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                                   track: track,
                                   lyrics: lyrics,
                                 );
+                                final stageKey = mode == NowPlayingViewMode.lyrics
+                                    ? 'lyrics'
+                                    : 'main';
+                                return AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 350),
+                                  switchInCurve: Curves.easeInOutCubic,
+                                  switchOutCurve: Curves.easeInOutCubic,
+                                  transitionBuilder: (child, animation) {
+                                    return FadeTransition(
+                                      opacity: animation,
+                                      child: child,
+                                    );
+                                  },
+                                  child: KeyedSubtree(
+                                    key: ValueKey('stage_$stageKey'),
+                                    child: stageWidget,
+                                  ),
+                                );
                               },
                             ),
                           ),
                         ],
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: IgnorePointer(
-                      child: DynamicWaveformBar(
-                        isPlaying: state.status == PlaybackStatus.playing,
-                        primaryColor: palette.colorA,
-                        secondaryColor: palette.colorB,
-                        height: 48,
                       ),
                     ),
                   ),
@@ -560,6 +531,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
           ),
         ],
       ),
+    ),
     );
   }
 
@@ -569,39 +541,33 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
       padding: const EdgeInsets.symmetric(horizontal: LuminaTokens.spaceMd),
       child: Row(
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-              child: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.28),
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.36),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.16),
+                width: 1.2,
+              ),
+            ),
+            child: IconButton(
+              key: const Key('btn_collapse_now_playing'),
+              tooltip: '收合播放畫面',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              style: IconButton.styleFrom(
+                foregroundColor: Colors.white,
+                hoverColor: Colors.white.withValues(alpha: 0.12),
+                shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.14),
-                    width: 1.2,
-                  ),
                 ),
-                child: IconButton(
-                  key: const Key('btn_collapse_now_playing'),
-                  tooltip: '收合播放畫面',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                  style: IconButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    hoverColor: Colors.white.withValues(alpha: 0.12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  onPressed: widget.onCollapse,
-                  icon: const Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    size: 26,
-                  ),
-                ),
+              ),
+              onPressed: widget.onCollapse,
+              icon: const Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 26,
               ),
             ),
           ),
@@ -636,9 +602,10 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
             },
           ),
           const SizedBox(width: LuminaTokens.spaceSm),
-          const DesktopWindowCaptionButtons(
+          DesktopWindowCaptionButtons(
             color: Colors.white70,
             height: 48.0,
+            audioService: widget.audioService,
           ),
         ],
       ),
@@ -715,11 +682,16 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     required TrackInfo? track,
     required List<LyricLine> lyrics,
   }) {
-    final coverMetrics = NowPlayingLayoutMetrics.compute(
+    final rawCoverMetrics = NowPlayingLayoutMetrics.compute(
       width: maxWidth,
       height: maxHeight,
       mode: NowPlayingViewMode.cover,
     );
+    final coverMetrics =
+        rawCoverMetrics.arrangement ==
+            NowPlayingStageArrangement.coverLandscapeRow
+        ? metrics
+        : rawCoverMetrics;
     final baseCoverSide = coverMetrics.coverSide;
     final gap = coverMetrics.gap;
     final titleFontSize = coverMetrics.titleFontSize;
@@ -768,10 +740,11 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                 currentPosition: state.position,
                 onSeek: widget.audioService.seek,
                 centered: true,
-                isPlaying: state.status == PlaybackStatus.playing,
+                isPlaying: state.status == PlaybackStatus.playing && widget.isVisible,
                 trackId: track?.id,
                 audioService: widget.audioService,
                 viewController: _controller,
+                isTransitionSettled: widget.isTransitionSettled,
               ),
               builder: (context, lyricsChild) {
                 final t = _modeAnimController.value;
@@ -916,10 +889,11 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
             currentPosition: state.position,
             onSeek: widget.audioService.seek,
             centered: true,
-            isPlaying: state.status == PlaybackStatus.playing,
+            isPlaying: state.status == PlaybackStatus.playing && widget.isVisible,
             trackId: track?.id,
             audioService: widget.audioService,
             viewController: _controller,
+            isTransitionSettled: widget.isTransitionSettled,
           ),
         ),
       ),
@@ -974,10 +948,11 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                   currentPosition: state.position,
                   onSeek: widget.audioService.seek,
                   centered: true,
-                  isPlaying: state.status == PlaybackStatus.playing,
+                  isPlaying: state.status == PlaybackStatus.playing && widget.isVisible,
                   trackId: track?.id,
                   audioService: widget.audioService,
                   viewController: _controller,
+                  isTransitionSettled: widget.isTransitionSettled,
                 ),
               ),
             ),
@@ -1095,10 +1070,11 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                   currentPosition: state.position,
                   onSeek: widget.audioService.seek,
                   centered: true,
-                  isPlaying: state.status == PlaybackStatus.playing,
+                  isPlaying: state.status == PlaybackStatus.playing && widget.isVisible,
                   trackId: track?.id,
                   audioService: widget.audioService,
                   viewController: _controller,
+                  isTransitionSettled: widget.isTransitionSettled,
                 ),
               ),
             ),
@@ -1155,6 +1131,16 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     return card;
   }
 
+  StreamingProviderMeta? _resolveStreamingMeta(TrackInfo? track) {
+    if (track == null || track.providerName.trim().isEmpty) return null;
+    for (final meta in StreamingProviderMeta.streamingServices) {
+      if (meta.matchesTrackProvider(track.providerName)) {
+        return meta;
+      }
+    }
+    return null;
+  }
+
   Widget _buildTrackMetadata(
     TrackInfo? track, {
     required bool centered,
@@ -1171,6 +1157,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
         : (track.hasDistinctAlbumArtist
             ? '${track.artist} (專輯演出者: ${track.albumArtist})  •  ${track.album}'
             : '${track.artist}  •  ${track.album}');
+    final streamingMeta = _resolveStreamingMeta(track);
 
     return Column(
       key: const ValueKey('now_playing_hero_metadata'),
@@ -1189,16 +1176,48 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
           ),
         ),
         SizedBox(height: compact ? 2 : LuminaTokens.space2xs),
-        Text(
-          metaSubtitle,
-          textAlign: align,
-          maxLines: compact ? 1 : 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: LuminaTokens.textSecondary,
-            fontSize: compact ? 12.5 : 13.5,
+        if (streamingMeta != null)
+          Row(
+            mainAxisSize: centered ? MainAxisSize.min : MainAxisSize.max,
+            mainAxisAlignment:
+                centered ? MainAxisAlignment.center : MainAxisAlignment.start,
+            children: [
+              Tooltip(
+                message: streamingMeta.name,
+                child: KeyedSubtree(
+                  key: Key('now_playing_provider_badge_${streamingMeta.kind}'),
+                  child: streamingMeta.buildBadge(
+                    boxSize: 16,
+                    borderRadius: 4,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  metaSubtitle,
+                  textAlign: align,
+                  maxLines: compact ? 1 : 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: LuminaTokens.textSecondary,
+                    fontSize: compact ? 12.5 : 13.5,
+                  ),
+                ),
+              ),
+            ],
+          )
+        else
+          Text(
+            metaSubtitle,
+            textAlign: align,
+            maxLines: compact ? 1 : 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: LuminaTokens.textSecondary,
+              fontSize: compact ? 12.5 : 13.5,
+            ),
           ),
-        ),
         if (showPills && track != null) ...[
           SizedBox(height: compact ? 6 : LuminaTokens.spaceSm),
           StreamBuilder<SignalPath>(
@@ -1304,41 +1323,35 @@ class _ModeIconButtonState extends State<_ModeIconButton> {
             hoverColor: Colors.transparent,
             focusColor: Colors.transparent,
             borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                child: AnimatedContainer(
-                  duration: LuminaTokens.focusDuration,
-                  curve: LuminaTokens.motionCurve,
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: widget.selected
-                        ? Colors.white.withValues(alpha: 0.22)
-                        : (_hovered
-                            ? Colors.white.withValues(alpha: 0.14)
-                            : Colors.black.withValues(alpha: 0.28)),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: _focused
-                          ? LuminaTokens.focusRing
-                          : (widget.selected
-                              ? Colors.white.withValues(alpha: 0.38)
-                              : Colors.white.withValues(
-                                  alpha: _hovered ? 0.24 : 0.12,
-                                )),
-                      width: 1.2,
-                    ),
-                  ),
-                  child: Icon(
-                    widget.icon,
-                    size: 19,
-                    color: widget.selected
-                        ? Colors.white
-                        : LuminaTokens.textSecondary,
-                  ),
+            child: AnimatedContainer(
+              duration: LuminaTokens.focusDuration,
+              curve: LuminaTokens.motionCurve,
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: widget.selected
+                    ? Colors.white.withValues(alpha: 0.22)
+                    : (_hovered
+                        ? Colors.white.withValues(alpha: 0.14)
+                        : Colors.black.withValues(alpha: 0.36)),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: _focused
+                      ? LuminaTokens.focusRing
+                      : (widget.selected
+                          ? Colors.white.withValues(alpha: 0.38)
+                          : Colors.white.withValues(
+                              alpha: _hovered ? 0.24 : 0.14,
+                            )),
+                  width: 1.2,
                 ),
+              ),
+              child: Icon(
+                widget.icon,
+                size: 19,
+                color: widget.selected
+                    ? Colors.white
+                    : LuminaTokens.textSecondary,
               ),
             ),
           ),

@@ -930,6 +930,12 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
             spec.channels,
             spec.sample_rate,
         );
+        crate::visualizer::global_tap().feed_wire(
+            &scratch[..aligned_read],
+            spec.wire_format,
+            spec.channels,
+            spec.sample_rate,
+        );
         ctrl.frames_rendered.fetch_add(frames, Ordering::Relaxed);
         if wasapi_chunk_has_nonzero(&scratch[..aligned_read], spec.wire_format) {
             ctrl.nonzero_frames.fetch_add(frames, Ordering::Relaxed);
@@ -1245,6 +1251,12 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     }
                     let frames = (aligned_bytes / bytes_per_frame) as u64;
                     verification.record_backend_input_wire(
+                        &scratch[..aligned_bytes],
+                        spec.wire_format,
+                        spec.channels,
+                        spec.sample_rate,
+                    );
+                    crate::visualizer::global_tap().feed_wire(
                         &scratch[..aligned_bytes],
                         spec.wire_format,
                         spec.channels,

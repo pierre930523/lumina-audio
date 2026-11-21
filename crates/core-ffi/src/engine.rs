@@ -3,15 +3,21 @@ use core_db::{FallbackCredentialStore, MemoryCredentialStore, SqlitePool};
 use core_providers::ProviderManager;
 use core_server::zones::ZoneManager;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
 pub struct EngineState {
     pub runtime: Runtime,
     pub initialized: AtomicBool,
-    pub playback_state: AtomicI32, // 0=Uninit, 1=Stopped, 2=Playing, 3=Paused, 4=Error
+    pub playback_state: AtomicI32, // 0=Uninit, 1=Stopped, 2=Playing, 3=Paused, 4=Error, 5=Loading
     pub has_real_stream: AtomicBool,
+    pub play_request_id: AtomicU64,
+    pub loaded_request_id: AtomicU64,
+    pub async_generation: AtomicU64,
+    pub async_commit_lock: Mutex<()>,
+    pub active_play_cancel: RwLock<Option<Arc<AtomicBool>>>,
+    pub async_last_error: RwLock<Option<String>>,
     pub volume_bits: AtomicU64, // f32 stored in atomic
     pub position_ms: AtomicU64,
     pub duration_ms: AtomicU64,
@@ -46,6 +52,12 @@ impl EngineState {
             initialized: AtomicBool::new(false),
             playback_state: AtomicI32::new(0),
             has_real_stream: AtomicBool::new(false),
+            play_request_id: AtomicU64::new(0),
+            loaded_request_id: AtomicU64::new(0),
+            async_generation: AtomicU64::new(0),
+            async_commit_lock: Mutex::new(()),
+            active_play_cancel: RwLock::new(None),
+            async_last_error: RwLock::new(None),
             volume_bits: AtomicU64::new((1.0f32).to_bits() as u64),
             position_ms: AtomicU64::new(0),
             duration_ms: AtomicU64::new(245_000), // Default demo track 4:05
@@ -115,6 +127,17 @@ impl EngineState {
     }
 
     pub fn reset(&self) {
+        if let Ok(mut lock) = self.active_play_cancel.write()
+            && let Some(flag) = lock.take()
+        {
+            flag.store(true, Ordering::SeqCst);
+        }
+        if let Ok(mut lock) = self.async_last_error.write() {
+            *lock = None;
+        }
+        self.async_generation.fetch_add(1, Ordering::SeqCst);
+        self.play_request_id.store(0, Ordering::SeqCst);
+        self.loaded_request_id.store(0, Ordering::SeqCst);
         self.initialized.store(false, Ordering::SeqCst);
         self.playback_state.store(0, Ordering::SeqCst);
         self.has_real_stream.store(false, Ordering::SeqCst);

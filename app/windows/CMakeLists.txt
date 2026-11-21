@@ -87,6 +87,12 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+if(LUMINA_WEBVIEW2_LOADER_DLL AND EXISTS "${LUMINA_WEBVIEW2_LOADER_DLL}")
+  install(FILES "${LUMINA_WEBVIEW2_LOADER_DLL}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 # Copy the native assets provided by the hook/build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

@@ -5,7 +5,10 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../models/playback_state.dart';
 import '../../models/signal_path.dart';
+import '../../models/streaming_provider_meta.dart';
 import '../../services/audio_service.dart';
+import '../../services/escape_dismiss_registry.dart';
+import '../../services/library_index_cache.dart';
 import '../../services/ui_scale_controller.dart';
 import '../artwork/album_artwork_view.dart';
 import '../signal_path/quality_badge.dart';
@@ -20,6 +23,7 @@ import 'volume_control.dart';
 
 class FloatingCapsuleMiniPlayer extends StatefulWidget {
   final AudioService audioService;
+  final LibraryIndexCache? libraryCache;
   final bool showLyrics;
   final bool isNowPlayingExpanded;
   final VoidCallback onToggleLyrics;
@@ -33,6 +37,7 @@ class FloatingCapsuleMiniPlayer extends StatefulWidget {
   const FloatingCapsuleMiniPlayer({
     super.key,
     required this.audioService,
+    this.libraryCache,
     required this.showLyrics,
     required this.onToggleLyrics,
     this.isNowPlayingExpanded = false,
@@ -58,6 +63,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
   OverlayEntry? _outputOverlay;
   OverlayEntry? _queueOverlay;
   bool _metricsUpdateScheduled = false;
+  late final bool Function() _escapeDismissHandler = _handleEscapeDismiss;
 
   @override
   void initState() {
@@ -96,7 +102,17 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
     super.dispose();
   }
 
+  bool _handleEscapeDismiss() {
+    if (_outputOverlay == null && _queueOverlay == null) {
+      EscapeDismissRegistry.instance.unregister(_escapeDismissHandler);
+      return false;
+    }
+    _closeAllOverlays();
+    return true;
+  }
+
   void _closeAllOverlays({bool markState = true}) {
+    EscapeDismissRegistry.instance.unregister(_escapeDismissHandler);
     var changed = false;
     if (_outputOverlay != null) {
       _outputOverlay!.remove();
@@ -198,6 +214,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
     );
     overlay.insert(entry);
     setState(() => _outputOverlay = entry);
+    EscapeDismissRegistry.instance.register(_escapeDismissHandler);
   }
 
   void _toggleQueuePopover() {
@@ -226,6 +243,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
     );
     overlay.insert(entry);
     setState(() => _queueOverlay = entry);
+    EscapeDismissRegistry.instance.register(_escapeDismissHandler);
   }
 
   Widget _buildAlbumArt(TrackInfo? track, double size, double iconSize) {
@@ -239,6 +257,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
             track: track,
             size: size,
             audioService: widget.audioService,
+            libraryCache: widget.libraryCache,
             borderRadius: BorderRadius.circular(LuminaTokens.space2xs),
           ),
           Positioned(
@@ -314,12 +333,23 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
     );
   }
 
+  StreamingProviderMeta? _resolveStreamingMeta(TrackInfo? track) {
+    if (track == null || track.providerName.trim().isEmpty) return null;
+    for (final meta in StreamingProviderMeta.streamingServices) {
+      if (meta.matchesTrackProvider(track.providerName)) {
+        return meta;
+      }
+    }
+    return null;
+  }
+
   Widget _buildTrackTitles(TrackInfo? track) {
     final artistSubtitle = track == null
         ? ''
         : (track.hasDistinctAlbumArtist
             ? '${track.artist} (${track.albumArtist})'
             : track.artist);
+    final streamingMeta = _resolveStreamingMeta(track);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -336,16 +366,45 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
             fontSize: 13.5,
           ),
         ),
-        Text(
-          artistSubtitle,
-          key: const Key('capsule_track_artist'),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: LuminaTokens.textSecondary,
-            fontSize: 11.5,
+        if (streamingMeta != null)
+          Row(
+            children: [
+              Tooltip(
+                message: streamingMeta.name,
+                child: KeyedSubtree(
+                  key: Key('capsule_provider_badge_${streamingMeta.kind}'),
+                  child: streamingMeta.buildBadge(
+                    boxSize: 16,
+                    borderRadius: 4,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  artistSubtitle,
+                  key: const Key('capsule_track_artist'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: LuminaTokens.textSecondary,
+                    fontSize: 11.5,
+                  ),
+                ),
+              ),
+            ],
+          )
+        else
+          Text(
+            artistSubtitle,
+            key: const Key('capsule_track_artist'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: LuminaTokens.textSecondary,
+              fontSize: 11.5,
+            ),
           ),
-        ),
       ],
     );
   }

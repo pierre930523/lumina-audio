@@ -9,11 +9,13 @@ pub mod profiles;
 pub mod providers;
 pub mod server;
 pub mod signal_path;
+pub mod visualizer;
 pub mod zones;
 
 pub use library::*;
 pub use lyrics::*;
 pub use playback::*;
+pub use visualizer::*;
 
 use engine::get_engine;
 use error::{catch_unwind_ffi, string_to_c_char, take_last_error, LUMINA_OK};

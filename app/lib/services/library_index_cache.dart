@@ -272,6 +272,11 @@ class LibraryIndexCache extends ChangeNotifier {
     return tracks.first;
   }
 
+  /// Stores or updates a [CanonicalAlbumSummary] synchronously in cache.
+  void putAlbumSummarySync(CanonicalAlbumSummary summary) {
+    _albumsById[summary.id] = summary;
+  }
+
   /// Stores or updates a [CanonicalAlbumDetail] synchronously in cache.
   void putAlbumDetailSync(CanonicalAlbumDetail detail) {
     _albumDetailsById[detail.id] = detail;

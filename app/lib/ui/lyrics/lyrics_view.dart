@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:material_ui/material_ui.dart';
@@ -20,6 +19,7 @@ class LyricsView extends StatefulWidget {
   final AudioService? audioService;
   final NowPlayingViewController? viewController;
   final void Function(String filePath)? onManualLyricsLoaded;
+  final bool isTransitionSettled;
 
   const LyricsView({
     super.key,
@@ -32,6 +32,7 @@ class LyricsView extends StatefulWidget {
     this.audioService,
     this.viewController,
     this.onManualLyricsLoaded,
+    this.isTransitionSettled = true,
   });
 
   static int activeIndexForPosition(List<LyricLine> lines, Duration pos) {
@@ -67,7 +68,9 @@ class LyricsView extends StatefulWidget {
   State<LyricsView> createState() => _LyricsViewState();
 }
 
-class _LyricsViewState extends State<LyricsView> {
+class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
+  final GlobalKey _viewportKey = GlobalKey();
+  final Map<int, GlobalKey> _lineKeys = <int, GlobalKey>{};
   late final ScrollController _scrollController;
   int _lastActiveIndex = -1;
   double _fontScale = 1.0;
@@ -78,6 +81,9 @@ class _LyricsViewState extends State<LyricsView> {
   bool _toolbarHovered = false;
   Timer? _userScrollTimer;
   bool _userIsScrolling = false;
+  Timer? _refinementTimer;
+  double? _lastConstraintsHeight;
+  bool _needsSettleSnap = false;
 
   static bool _lyricsStructurallyEqual(List<LyricLine> a, List<LyricLine> b) {
     if (identical(a, b)) return true;
@@ -96,6 +102,7 @@ class _LyricsViewState extends State<LyricsView> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final vc = widget.viewController;
     if (vc != null) {
       _fontScale = vc.lyricsFontScale;
@@ -111,6 +118,17 @@ class _LyricsViewState extends State<LyricsView> {
       widget.lyrics,
       widget.currentPosition + _displayOffset,
     );
+    if (_lastActiveIndex >= 0 && widget.isPlaying) {
+      if (widget.isTransitionSettled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && widget.isTransitionSettled) {
+            _autoScrollTo(_lastActiveIndex, animate: false);
+          }
+        });
+      } else {
+        _needsSettleSnap = true;
+      }
+    }
   }
 
   void _onScroll() {
@@ -130,6 +148,7 @@ class _LyricsViewState extends State<LyricsView> {
     if ((nextFont - _fontScale).abs() > 0.001 ||
         nextOffset != _displayOffset ||
         nextSettings != _showSettings) {
+      final fontChanged = (nextFont - _fontScale).abs() > 0.001;
       if (nextSettings != _showSettings) {
         if (nextSettings) {
           _startAutoCollapseTimer();
@@ -142,13 +161,33 @@ class _LyricsViewState extends State<LyricsView> {
         _displayOffset = nextOffset;
         _showSettings = nextSettings;
       });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _lastActiveIndex >= 0) {
+          _autoScrollTo(_lastActiveIndex, animate: false);
+          if (fontChanged) {
+            _scheduleRefinementPass(_lastActiveIndex);
+          }
+        }
+      });
     }
   }
 
   @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _lastActiveIndex >= 0) {
+        _autoScrollTo(_lastActiveIndex, animate: false);
+      }
+    });
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cancelAutoCollapseTimer();
     _userScrollTimer?.cancel();
+    _refinementTimer?.cancel();
     widget.viewController?.removeListener(_onViewControllerChanged);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -158,6 +197,10 @@ class _LyricsViewState extends State<LyricsView> {
   @override
   void didUpdateWidget(covariant LyricsView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.isTransitionSettled) {
+      _refinementTimer?.cancel();
+    }
+
     if (oldWidget.viewController != widget.viewController) {
       oldWidget.viewController?.removeListener(_onViewControllerChanged);
       widget.viewController?.addListener(_onViewControllerChanged);
@@ -175,6 +218,7 @@ class _LyricsViewState extends State<LyricsView> {
 
     if (trackChanged || lyricsChanged) {
       _lastActiveIndex = -1;
+      _lineKeys.clear();
     }
 
     if (trackChanged && widget.viewController != null) {
@@ -199,16 +243,16 @@ class _LyricsViewState extends State<LyricsView> {
           if ((_scrollController.offset - clamped).abs() > 0.5) {
             _scrollController.jumpTo(clamped);
           }
-        } else {
+        } else if (widget.isTransitionSettled) {
           final active = LyricsView.activeIndexForPosition(
             widget.lyrics,
             widget.currentPosition + _displayOffset,
           );
-          if (active > 0) {
-            _autoScrollTo(active);
-          } else if (_scrollController.offset > 0.5) {
-            _scrollController.jumpTo(0.0);
+          if (active >= 0) {
+            _autoScrollTo(active, animate: false);
           }
+        } else {
+          _needsSettleSnap = true;
         }
       });
     }
@@ -223,7 +267,31 @@ class _LyricsViewState extends State<LyricsView> {
       _lastActiveIndex = newActiveIndex;
       if (widget.isPlaying &&
           (!trackChanged || widget.viewController == null)) {
-        _autoScrollTo(newActiveIndex);
+        if (widget.isTransitionSettled) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted &&
+                widget.isTransitionSettled &&
+                _lastActiveIndex == newActiveIndex) {
+              _autoScrollTo(newActiveIndex);
+            }
+          });
+        } else {
+          _needsSettleSnap = true;
+        }
+      }
+    }
+
+    if (!oldWidget.isTransitionSettled && widget.isTransitionSettled) {
+      if (_needsSettleSnap && _lastActiveIndex >= 0 && !_userIsScrolling) {
+        _needsSettleSnap = false;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              widget.isTransitionSettled &&
+              _lastActiveIndex >= 0 &&
+              !_userIsScrolling) {
+            _autoScrollTo(_lastActiveIndex, animate: false);
+          }
+        });
       }
     }
   }
@@ -253,8 +321,17 @@ class _LyricsViewState extends State<LyricsView> {
     if (widget.viewController != null) {
       widget.viewController!.setLyricsFontScale(clamped);
     } else {
+      final fontChanged = (clamped - _fontScale).abs() > 0.001;
       setState(() {
         _fontScale = clamped;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _lastActiveIndex >= 0) {
+          _autoScrollTo(_lastActiveIndex, animate: false);
+          if (fontChanged) {
+            _scheduleRefinementPass(_lastActiveIndex);
+          }
+        }
       });
     }
   }
@@ -285,28 +362,81 @@ class _LyricsViewState extends State<LyricsView> {
     }
   }
 
-  void _autoScrollTo(int index, {double? viewportHeight}) {
-    if (_userIsScrolling) return;
+  void _scheduleRefinementPass(
+    int index, {
+    Duration delay = const Duration(milliseconds: 330),
+  }) {
+    _refinementTimer?.cancel();
+    if (!widget.isTransitionSettled) return;
+    _refinementTimer = Timer(delay, () {
+      if (mounted &&
+          widget.isTransitionSettled &&
+          _lastActiveIndex == index &&
+          !_userIsScrolling) {
+        _autoScrollTo(index, animate: false, isRefinement: true);
+      }
+    });
+  }
+
+  void _autoScrollTo(
+    int index, {
+    bool animate = true,
+    bool isRefinement = false,
+  }) {
+    if (!widget.isTransitionSettled || _userIsScrolling) return;
     if (!_scrollController.hasClients || widget.lyrics.isEmpty) return;
-    final itemExtent = 56.0 * _fontScale;
-    final viewportH = viewportHeight ??
-        (_scrollController.position.hasViewportDimension
-            ? _scrollController.position.viewportDimension
-            : 360.0);
-    final verticalPad = math.max(60.0, viewportH * 0.50);
-    final targetCenter = viewportH * 0.50;
-    final targetOffset =
-        ((index * itemExtent + verticalPad) - targetCenter + (itemExtent * 0.5))
-            .clamp(
+    if (index < 0 || index >= widget.lyrics.length) return;
+
+    final viewportBox =
+        _viewportKey.currentContext?.findRenderObject() as RenderBox?;
+    final itemBox =
+        _lineKeys[index]?.currentContext?.findRenderObject() as RenderBox?;
+    if (viewportBox != null &&
+        itemBox != null &&
+        viewportBox.hasSize &&
+        itemBox.hasSize) {
+      final offsetInViewport =
+          itemBox.localToGlobal(Offset.zero, ancestor: viewportBox);
+      final itemCenterY = offsetInViewport.dy + (itemBox.size.height * 0.5);
+      final targetCenterY = viewportBox.size.height * 0.5;
+      final delta = itemCenterY - targetCenterY;
+      final targetOffset = (_scrollController.offset + delta).clamp(
+        0.0,
+        _scrollController.position.maxScrollExtent,
+      );
+      if ((targetOffset - _scrollController.offset).abs() > 0.01) {
+        if (animate) {
+          _scrollController.animateTo(
+            targetOffset,
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+          );
+        } else {
+          _scrollController.jumpTo(targetOffset);
+        }
+      }
+      if (animate && !isRefinement) {
+        _scheduleRefinementPass(index);
+      }
+      return;
+    }
+
+    // Fallback if unrendered: jump to approximate offset, and refine post-frame
+    final estimatedLineHeight = 56.0 * _fontScale;
+    final estimatedOffset = (index * estimatedLineHeight).clamp(
       0.0,
       _scrollController.position.maxScrollExtent,
     );
-
-    _scrollController.animateTo(
-      targetOffset,
-      duration: const Duration(milliseconds: 320),
-      curve: Curves.easeOutCubic,
-    );
+    _scrollController.jumpTo(estimatedOffset);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _autoScrollTo(
+          index,
+          animate: animate,
+          isRefinement: isRefinement,
+        );
+      }
+    });
   }
 
   Future<void> _promptManualLyrics() async {
@@ -429,143 +559,137 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   Widget _buildToolbar() {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: LuminaTokens.spaceSm + 2,
-            vertical: LuminaTokens.space2xs,
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: LuminaTokens.spaceSm + 2,
+        vertical: LuminaTokens.space2xs,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.18),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            key: const Key('btn_lyrics_font_down'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white70),
+            tooltip: '縮小歌詞字體',
+            icon: const Icon(Icons.text_decrease_rounded, size: 17),
+            onPressed: () => _updateFontScale(_fontScale - 0.1),
           ),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.45),
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.18),
+          Text(
+            '${(_fontScale * 100).round()}%',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              fontFeatures: [ui.FontFeature.tabularFigures()],
             ),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                key: const Key('btn_lyrics_font_down'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white70),
-                tooltip: '縮小歌詞字體',
-                icon: const Icon(Icons.text_decrease_rounded, size: 17),
-                onPressed: () => _updateFontScale(_fontScale - 0.1),
-              ),
-              Text(
-                '${(_fontScale * 100).round()}%',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: [ui.FontFeature.tabularFigures()],
-                ),
-              ),
-              IconButton(
-                key: const Key('btn_lyrics_font_up'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white70),
-                tooltip: '放大歌詞字體',
-                icon: const Icon(Icons.text_increase_rounded, size: 17),
-                onPressed: () => _updateFontScale(_fontScale + 0.1),
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              const SizedBox(
-                height: 16,
-                child: VerticalDivider(
-                  color: Colors.white24,
-                  width: 1,
-                ),
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              IconButton(
-                key: const Key('btn_lyrics_offset_minus'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white70),
-                tooltip: '歌詞提前 0.5 秒',
-                icon: const Icon(Icons.fast_rewind_rounded, size: 17),
-                onPressed: () => _updateDisplayOffset(
-                  _displayOffset - const Duration(milliseconds: 500),
-                ),
-              ),
-              Text(
-                _displayOffset == Duration.zero
-                    ? '0.0s'
-                    : '${_displayOffset.inMilliseconds > 0 ? '+' : ''}${(_displayOffset.inMilliseconds / 1000).toStringAsFixed(1)}s',
-                key: const Key('lyrics_offset_label'),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: [ui.FontFeature.tabularFigures()],
-                ),
-              ),
-              IconButton(
-                key: const Key('btn_lyrics_offset_plus'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white70),
-                tooltip: '歌詞延後 0.5 秒',
-                icon: const Icon(Icons.fast_forward_rounded, size: 17),
-                onPressed: () => _updateDisplayOffset(
-                  _displayOffset + const Duration(milliseconds: 500),
-                ),
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              const SizedBox(
-                height: 16,
-                child: VerticalDivider(
-                  color: Colors.white24,
-                  width: 1,
-                ),
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              IconButton(
-                key: const Key('btn_load_lyrics_file'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(LuminaTokens.accentBlue),
-                tooltip: '載入自訂 .lrc / .txt 歌詞',
-                icon: const Icon(Icons.file_open_outlined, size: 17),
-                onPressed: _promptManualLyrics,
-              ),
-              IconButton(
-                key: const Key('btn_clear_lyrics_file'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white54),
-                tooltip: '清除自訂歌詞',
-                icon: const Icon(Icons.delete_sweep_outlined, size: 17),
-                onPressed: _clearManualLyrics,
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              const SizedBox(
-                height: 16,
-                child: VerticalDivider(
-                  color: Colors.white24,
-                  width: 1,
-                ),
-              ),
-              const SizedBox(width: LuminaTokens.spaceXs),
-              IconButton(
-                key: const Key('btn_lyrics_toolbar_close'),
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                style: _toolbarIconStyle(Colors.white60),
-                tooltip: '收合歌詞設定',
-                icon: const Icon(Icons.close_rounded, size: 16),
-                onPressed: () => _setSettingsExpanded(false),
-              ),
-            ],
+          IconButton(
+            key: const Key('btn_lyrics_font_up'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white70),
+            tooltip: '放大歌詞字體',
+            icon: const Icon(Icons.text_increase_rounded, size: 17),
+            onPressed: () => _updateFontScale(_fontScale + 0.1),
           ),
-        ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          const SizedBox(
+            height: 16,
+            child: VerticalDivider(
+              color: Colors.white24,
+              width: 1,
+            ),
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          IconButton(
+            key: const Key('btn_lyrics_offset_minus'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white70),
+            tooltip: '歌詞提前 0.5 秒',
+            icon: const Icon(Icons.fast_rewind_rounded, size: 17),
+            onPressed: () => _updateDisplayOffset(
+              _displayOffset - const Duration(milliseconds: 500),
+            ),
+          ),
+          Text(
+            _displayOffset == Duration.zero
+                ? '0.0s'
+                : '${_displayOffset.inMilliseconds > 0 ? '+' : ''}${(_displayOffset.inMilliseconds / 1000).toStringAsFixed(1)}s',
+            key: const Key('lyrics_offset_label'),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              fontFeatures: [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+          IconButton(
+            key: const Key('btn_lyrics_offset_plus'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white70),
+            tooltip: '歌詞延後 0.5 秒',
+            icon: const Icon(Icons.fast_forward_rounded, size: 17),
+            onPressed: () => _updateDisplayOffset(
+              _displayOffset + const Duration(milliseconds: 500),
+            ),
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          const SizedBox(
+            height: 16,
+            child: VerticalDivider(
+              color: Colors.white24,
+              width: 1,
+            ),
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          IconButton(
+            key: const Key('btn_load_lyrics_file'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(LuminaTokens.accentBlue),
+            tooltip: '載入自訂 .lrc / .txt 歌詞',
+            icon: const Icon(Icons.file_open_outlined, size: 17),
+            onPressed: _promptManualLyrics,
+          ),
+          IconButton(
+            key: const Key('btn_clear_lyrics_file'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white54),
+            tooltip: '清除自訂歌詞',
+            icon: const Icon(Icons.delete_sweep_outlined, size: 17),
+            onPressed: _clearManualLyrics,
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          const SizedBox(
+            height: 16,
+            child: VerticalDivider(
+              color: Colors.white24,
+              width: 1,
+            ),
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          IconButton(
+            key: const Key('btn_lyrics_toolbar_close'),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            style: _toolbarIconStyle(Colors.white60),
+            tooltip: '收合歌詞設定',
+            icon: const Icon(Icons.close_rounded, size: 16),
+            onPressed: () => _setSettingsExpanded(false),
+          ),
+        ],
       ),
     );
   }
@@ -649,7 +773,16 @@ class _LyricsViewState extends State<LyricsView> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final verticalPad = math.max(60.0, constraints.maxHeight * 0.50);
+        if (_lastConstraintsHeight != null &&
+            (_lastConstraintsHeight! - constraints.maxHeight).abs() > 1.0 &&
+            _lastActiveIndex >= 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _autoScrollTo(_lastActiveIndex, animate: false);
+          });
+        }
+        _lastConstraintsHeight = constraints.maxHeight;
+
+        final verticalPad = constraints.maxHeight * 0.50;
         return Stack(
           alignment: Alignment.center,
           children: [
@@ -667,135 +800,166 @@ class _LyricsViewState extends State<LyricsView> {
                     ),
                     child: KeyedSubtree(
                       key: const Key('lyrics_list_view'),
-                      child: ShaderMask(
-                        shaderCallback: (Rect bounds) {
-                          return const LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              Colors.transparent,
-                              Colors.white,
-                              Colors.white,
-                              Colors.transparent,
-                            ],
-                            stops: [0.0, 0.12, 0.84, 1.0],
-                          ).createShader(bounds);
-                        },
-                        blendMode: BlendMode.dstIn,
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is UserScrollNotification) {
-                              if (notification.direction !=
-                                  ScrollDirection.idle) {
-                                _userIsScrolling = true;
-                                _userScrollTimer?.cancel();
-                                _userScrollTimer =
-                                    Timer(const Duration(seconds: 4), () {
-                                  if (mounted) {
-                                    setState(() => _userIsScrolling = false);
-                                    _autoScrollTo(_lastActiveIndex);
-                                  }
-                                });
+                      child: KeyedSubtree(
+                        key: _viewportKey,
+                        child: ShaderMask(
+                          shaderCallback: (Rect bounds) {
+                            return const LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.transparent,
+                                Colors.white,
+                                Colors.white,
+                                Colors.transparent,
+                              ],
+                              stops: [0.0, 0.12, 0.84, 1.0],
+                            ).createShader(bounds);
+                          },
+                          blendMode: BlendMode.dstIn,
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: (notification) {
+                              if (notification is UserScrollNotification) {
+                                if (notification.direction !=
+                                    ScrollDirection.idle) {
+                                  _userIsScrolling = true;
+                                  _userScrollTimer?.cancel();
+                                  _userScrollTimer =
+                                      Timer(const Duration(seconds: 4), () {
+                                    if (mounted) {
+                                      setState(() => _userIsScrolling = false);
+                                      _autoScrollTo(_lastActiveIndex);
+                                    }
+                                  });
+                                }
                               }
-                            }
-                            return false;
-                          },
-                          child: SmoothScrollWrapper(
-                            controller: _scrollController,
-                            child: ListView.builder(
-                              key: PageStorageKey<String>(
-                                'lyrics_scroll_${widget.trackId ?? 'default'}',
-                              ),
+                              return false;
+                            },
+                            child: SmoothScrollWrapper(
                               controller: _scrollController,
-                              padding: EdgeInsets.fromLTRB(
-                                28,
-                                verticalPad,
-                                28,
-                                verticalPad,
-                              ),
-                          itemCount: widget.lyrics.length,
-                          itemBuilder: (context, index) {
-                            final line = widget.lyrics[index];
-                            final distance = (index - activeIndex).abs();
-                            final sigma = isSynced
-                                ? LyricsView.blurSigmaForDistance(distance)
-                                : 0.0;
-                            final opacity = isSynced
-                                ? LyricsView.opacityForDistance(distance)
-                                : 0.85;
-                            final isActive = isSynced && index == activeIndex;
-
-                            Widget content;
-                            if (isSynced && line.words.isNotEmpty) {
-                              content = WordByWordText(
-                                line: line,
-                                currentPosition: effectivePos,
-                                isActiveLine: isActive,
-                                textAlign: align,
-                              );
-                            } else {
-                              content = Text(
-                                line.text,
-                                textAlign: align,
-                                style: TextStyle(
-                                  color: isActive
-                                      ? LuminaTokens.textPrimary
-                                      : LuminaTokens.textSecondary,
-                                  fontSize: (isActive ? 26.0 : 19.0) * _fontScale,
-                                  fontWeight: isActive
-                                      ? FontWeight.w800
-                                      : FontWeight.w600,
-                                  height: 1.45,
+                              child: ListView.builder(
+                                key: PageStorageKey<String>(
+                                  'lyrics_scroll_${widget.trackId ?? 'default'}',
                                 ),
-                              );
-                            }
-
-                            if (sigma > 0) {
-                              content = ImageFiltered(
-                                imageFilter: ui.ImageFilter.blur(
-                                  sigmaX: sigma,
-                                  sigmaY: sigma,
+                                controller: _scrollController,
+                                padding: EdgeInsets.fromLTRB(
+                                  28,
+                                  verticalPad,
+                                  28,
+                                  verticalPad,
                                 ),
-                                child: content,
-                              );
-                            }
+                                // ignore: deprecated_member_use
+                                cacheExtent: 400.0,
+                                itemCount: widget.lyrics.length,
+                                itemBuilder: (context, index) {
+                                  final line = widget.lyrics[index];
+                                  final distance = (index - activeIndex).abs();
+                                  final sigma = isSynced
+                                      ? LyricsView.blurSigmaForDistance(distance)
+                                      : 0.0;
+                                  final opacity = isSynced
+                                      ? LyricsView.opacityForDistance(distance)
+                                      : 0.85;
+                                  final isActive = isSynced && index == activeIndex;
 
-                            final seekable =
-                                widget.onSeek != null && line.isSynced;
-                            return Padding(
-                              padding: EdgeInsets.symmetric(
-                                vertical: 8 * _fontScale,
-                              ),
-                              child: Opacity(
-                                opacity: opacity,
-                                child: InkWell(
-                                  key: Key('lyric_line_$index'),
-                                  borderRadius: BorderRadius.circular(
-                                    LuminaTokens.radiusMd,
-                                  ),
-                                  mouseCursor: seekable
-                                      ? SystemMouseCursors.click
-                                      : SystemMouseCursors.basic,
-                                  hoverColor: LuminaTokens.cardHoverBg
-                                      .withValues(alpha: 0.38),
-                                  focusColor: LuminaTokens.focusRing
-                                      .withValues(alpha: 0.2),
-                                  onTap: seekable
-                                      ? () => widget.onSeek!(line.start)
-                                      : null,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 6,
-                                      horizontal: 12,
+                                  Widget content;
+                                  if (isSynced && line.words.isNotEmpty) {
+                                    content = WordByWordText(
+                                      line: line,
+                                      currentPosition: effectivePos,
+                                      isActiveLine: isActive,
+                                      textAlign: align,
+                                      fontScale: _fontScale,
+                                    );
+                                  } else {
+                                    content = AnimatedDefaultTextStyle(
+                                      duration: const Duration(milliseconds: 320),
+                                      curve: Curves.easeOutCubic,
+                                      style: TextStyle(
+                                        color: isActive
+                                            ? LuminaTokens.textPrimary
+                                            : LuminaTokens.textSecondary,
+                                        fontSize: (isActive ? 26.0 : 19.0) * _fontScale,
+                                        fontWeight: isActive
+                                            ? FontWeight.w800
+                                            : FontWeight.w600,
+                                        height: 1.45,
+                                      ),
+                                      child: Text(
+                                        line.text,
+                                        textAlign: align,
+                                      ),
+                                    );
+                                  }
+
+                                  if (widget.isTransitionSettled) {
+                                    content = TweenAnimationBuilder<double>(
+                                      tween: Tween<double>(begin: sigma, end: sigma),
+                                      duration: const Duration(milliseconds: 320),
+                                      curve: Curves.easeOutCubic,
+                                      builder: (context, val, child) {
+                                        if (!widget.isTransitionSettled ||
+                                            val <= 0.05) {
+                                          return child!;
+                                        }
+                                        return ImageFiltered(
+                                          imageFilter: ui.ImageFilter.blur(
+                                            sigmaX: val,
+                                            sigmaY: val,
+                                          ),
+                                          child: child,
+                                        );
+                                      },
+                                      child: content,
+                                    );
+                                  }
+
+                                  final seekable =
+                                      widget.onSeek != null && line.isSynced;
+                                  final lineKey = _lineKeys.putIfAbsent(
+                                    index,
+                                    () => GlobalKey(),
+                                  );
+                                  return Padding(
+                                    key: lineKey,
+                                    padding: EdgeInsets.symmetric(
+                                      vertical: 8 * _fontScale,
                                     ),
-                                    child: widget.centered
-                                        ? Center(child: content)
-                                        : content,
-                                  ),
-                                ),
+                                    child: AnimatedOpacity(
+                                      opacity: opacity,
+                                      duration: const Duration(milliseconds: 320),
+                                      curve: Curves.easeOutCubic,
+                                      child: InkWell(
+                                        key: Key('lyric_line_$index'),
+                                        borderRadius: BorderRadius.circular(
+                                          LuminaTokens.radiusMd,
+                                        ),
+                                        mouseCursor: seekable
+                                            ? SystemMouseCursors.click
+                                            : SystemMouseCursors.basic,
+                                        hoverColor: LuminaTokens.cardHoverBg
+                                            .withValues(alpha: 0.38),
+                                        focusColor: LuminaTokens.focusRing
+                                            .withValues(alpha: 0.2),
+                                        onTap: seekable
+                                            ? () => widget.onSeek!(line.start)
+                                            : null,
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 6,
+                                            horizontal: 12,
+                                          ),
+                                          child: widget.centered
+                                              ? Center(child: content)
+                                              : content,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
-                            );
-                          },
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -803,8 +967,6 @@ class _LyricsViewState extends State<LyricsView> {
                 ),
               ),
             ),
-          ),
-        ),
             // Floating control toolbar toggle
             Positioned(
               bottom: LuminaTokens.spaceSm,
@@ -893,53 +1055,47 @@ class _LyricsToolbarToggleButtonState
             hoverColor: Colors.transparent,
             focusColor: Colors.transparent,
             borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                child: AnimatedContainer(
-                  duration: LuminaTokens.focusDuration,
-                  curve: LuminaTokens.motionCurve,
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 7,
+            child: AnimatedContainer(
+              duration: LuminaTokens.focusDuration,
+              curve: LuminaTokens.motionCurve,
+              height: 38,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 7,
+              ),
+              decoration: BoxDecoration(
+                color: _hovered
+                    ? Colors.white.withValues(alpha: 0.22)
+                    : Colors.black.withValues(alpha: 0.48),
+                borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+                border: Border.all(
+                  color: _focused
+                      ? LuminaTokens.focusRing
+                      : Colors.white.withValues(
+                          alpha: _hovered ? 0.35 : 0.18,
+                        ),
+                  width: 1,
+                ),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.tune_rounded,
+                    size: 16,
+                    color: Colors.white,
                   ),
-                  decoration: BoxDecoration(
-                    color: _hovered
-                        ? Colors.white.withValues(alpha: 0.22)
-                        : Colors.black.withValues(alpha: 0.35),
-                    borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-                    border: Border.all(
-                      color: _focused
-                          ? LuminaTokens.focusRing
-                          : Colors.white.withValues(
-                              alpha: _hovered ? 0.35 : 0.16,
-                            ),
-                      width: 1,
+                  SizedBox(width: 7),
+                  Text(
+                    'Aa',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
                     ),
                   ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.tune_rounded,
-                        size: 16,
-                        color: Colors.white,
-                      ),
-                      SizedBox(width: 7),
-                      Text(
-                        'Aa',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.3,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                ],
               ),
             ),
           ),

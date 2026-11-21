@@ -28,8 +28,8 @@ use crate::error::{BackendError, CoreAudioError, DspError};
 use crate::pcm::{AudioChunk, AudioDecoder, DecodedTrackMetadata, SymphoniaDecoder, SynthAudioDecoder};
 use crate::signal_path::{SignalPathContext, SignalPathEngine};
 use crate::stream::{
-    is_playlist_extension, looks_like_playlist_magic, resolve_playlist_url, HttpRangeMediaSource,
-    StreamOrigin, StreamSource,
+    is_playlist_extension, looks_like_playlist_magic, resolve_playlist_url_with_cancel,
+    HttpRangeMediaSource, StreamOrigin, StreamSource,
 };
 use crate::verification::{
     pack_chunk_to_wire_bytes, AudioVerificationEngine, VerificationConfig, WireSampleFormat,
@@ -291,6 +291,16 @@ impl AudioPlayer {
         source_label: &str,
     ) -> Result<(), CoreAudioError> {
         let decoder = open_decoder_for_stream(&stream)?;
+        self.start_opened_decoder(&stream, decoder, source_label)
+    }
+
+    /// Commits a pre-opened `decoder` into active playback without doing any network/probe I/O.
+    pub fn start_opened_decoder(
+        &self,
+        stream: &StreamSource,
+        decoder: Box<dyn AudioDecoder>,
+        source_label: &str,
+    ) -> Result<(), CoreAudioError> {
         let label = if source_label.trim().is_empty() {
             "Stream".to_string()
         } else {
@@ -307,7 +317,7 @@ impl AudioPlayer {
             *q = None;
         }
         if let Ok(mut rg_lock) = self.inner.track_replay_gain.write() {
-            *rg_lock = TrackReplayGainTags::from_stream(&stream);
+            *rg_lock = TrackReplayGainTags::from_stream(stream);
         }
         self.inner.dsp_generation.fetch_add(1, Ordering::SeqCst);
 
@@ -1353,15 +1363,60 @@ pub fn infer_extension_from_magic(magic: &[u8]) -> Option<&'static str> {
 }
 
 pub fn open_decoder_for_stream(stream: &StreamSource) -> Result<Box<dyn AudioDecoder>, CoreAudioError> {
+    open_decoder_for_stream_cancellable(stream, None, Duration::from_secs(10))
+}
+
+pub fn open_decoder_for_stream_cancellable(
+    stream: &StreamSource,
+    cancel: Option<Arc<AtomicBool>>,
+    timeout: Duration,
+) -> Result<Box<dyn AudioDecoder>, CoreAudioError> {
+    let check_cancelled = || -> Result<(), CoreAudioError> {
+        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Stream open cancelled").into())
+        } else {
+            Ok(())
+        }
+    };
+    check_cancelled()?;
     match &stream.origin {
         StreamOrigin::LocalFile(path) => open_decoder_for_path(path),
         StreamOrigin::Http { url, headers } => {
-            let mut media = HttpRangeMediaSource::open(url, headers)?;
+            let deadline = Instant::now() + timeout;
+            let remaining = || {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    Duration::from_millis(1)
+                } else {
+                    rem
+                }
+            };
+            let mut media = HttpRangeMediaSource::open_with_cancel(
+                url,
+                headers,
+                cancel.clone(),
+                remaining(),
+            )?;
+            check_cancelled()?;
             let mut magic = media.read_magic_prefix(32)?;
+            check_cancelled()?;
             if looks_like_playlist_magic(&magic) {
-                let resolved = resolve_playlist_url(media.resolved_url(), headers)?;
-                media = HttpRangeMediaSource::open(&resolved, headers)?;
+                let resolved = resolve_playlist_url_with_cancel(
+                    media.resolved_url(),
+                    headers,
+                    cancel.clone(),
+                    remaining(),
+                )?;
+                check_cancelled()?;
+                media = HttpRangeMediaSource::open_with_cancel(
+                    &resolved,
+                    headers,
+                    cancel.clone(),
+                    remaining(),
+                )?;
+                check_cancelled()?;
                 magic = media.read_magic_prefix(32)?;
+                check_cancelled()?;
             }
 
             let ext_hint = stream
@@ -3057,6 +3112,12 @@ fn spawn_virtual_wire_consumer(
                             out_channels,
                             out_rate,
                         );
+                        crate::visualizer::global_tap().feed_wire(
+                            &scratch[..aligned],
+                            wire,
+                            out_channels,
+                            out_rate,
+                        );
                         let rendered_frames = if matches!(wire, WireSampleFormat::NativeDsd { .. }) {
                             ((aligned / bpf) * 8) as u64
                         } else {
@@ -3146,6 +3207,20 @@ fn spawn_virtual_consumer(
                         if let Some(ref v) = verification {
                             v.record_backend_input_wire(
                                 &wire_bytes,
+                                WireSampleFormat::Float32Le,
+                                out_channels,
+                                out_rate,
+                            );
+                        }
+                        if aligned > 0 {
+                            let f32_bytes = unsafe {
+                                std::slice::from_raw_parts(
+                                    drain_buf.as_ptr() as *const u8,
+                                    aligned * std::mem::size_of::<f32>(),
+                                )
+                            };
+                            crate::visualizer::global_tap().feed_wire(
+                                f32_bytes,
                                 WireSampleFormat::Float32Le,
                                 out_channels,
                                 out_rate,
@@ -3666,6 +3741,20 @@ where
             {
                 v.record_backend_input_wire(
                     &temp_wire,
+                    WireSampleFormat::Float32Le,
+                    ch as u16,
+                    out_rate,
+                );
+            }
+            if aligned > 0 {
+                let f32_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        temp_f32.as_ptr() as *const u8,
+                        aligned * std::mem::size_of::<f32>(),
+                    )
+                };
+                crate::visualizer::global_tap().feed_wire(
+                    f32_bytes,
                     WireSampleFormat::Float32Le,
                     ch as u16,
                     out_rate,

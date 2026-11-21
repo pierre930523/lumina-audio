@@ -1,11 +1,27 @@
-﻿import '../models/audio_output_info.dart';
+﻿import 'package:flutter/foundation.dart';
+
+import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
 import '../models/studio_models.dart';
 
+typedef StreamingTrackHandler = Future<void> Function(
+  TrackInfo track, {
+  List<TrackInfo>? queueContext,
+  bool debounce,
+});
+
 abstract class AudioService {
   static const String systemOutputId = '__system_output__';
+
+  static bool isStreamingTrackId(String id) {
+    return id.startsWith('apple:') ||
+        id.startsWith('ytm:') ||
+        id.startsWith('qobuz:') ||
+        id.startsWith('tidal:') ||
+        id.startsWith('deezer:');
+  }
 
   Stream<PlaybackState> get stateStream;
   Stream<SignalPath> get signalPathStream;
@@ -34,6 +50,36 @@ abstract class AudioService {
   Future<int> scanDirectory(String path);
   Future<List<TrackInfo>> searchLibrary(String query);
   Future<void> play({TrackInfo? track});
+  Future<void> playStreamUrl({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) => play(track: track);
+  Future<void> playStreamUrlAsync({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+    required int requestId,
+  }) => playStreamUrl(
+    track: track,
+    streamUrl: streamUrl,
+    headers: headers,
+    hintExtension: hintExtension,
+  );
+  void setStreamingTrackHandler(StreamingTrackHandler? handler) {}
+  void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {}
+  void failOptimisticTrackLoad(TrackInfo track, String message) {}
+  Future<void> cancelPendingPlayback() async {}
+  Future<void> restorePlaybackSession({
+    required TrackInfo track,
+    required Duration position,
+    List<TrackInfo>? queue,
+    int? queueIndex,
+    double? volume,
+    bool? isMuted,
+  });
   Future<void> pause();
   Future<void> resume();
   Future<void> togglePlayPause();
@@ -173,5 +219,43 @@ abstract class AudioService {
   Future<void> switchToLocalMode();
 
   void dispose();
+}
+
+/// Real-time 64-band audio spectrum extension for [AudioService].
+/// Provides seamless access across all audio service implementations
+/// without breaking mock or server service contracts.
+extension AudioServiceVisualizerExt on AudioService {
+  static final Float32List zeroBands64 = Float32List(64);
+  static final ValueNotifier<Float32List> defaultVisualizerNotifier =
+      ValueNotifier<Float32List>(zeroBands64);
+
+  ValueListenable<Float32List> get visualizerBandsNotifier {
+    try {
+      final dynamic self = this;
+      final notifier = self.visualizerBandsNotifier;
+      if (notifier is ValueListenable<Float32List>) {
+        return notifier;
+      }
+    } catch (_) {}
+    return defaultVisualizerNotifier;
+  }
+
+  void setVisualizerSettingEnabled(bool enabled) {
+    try {
+      (this as dynamic).setVisualizerSettingEnabled(enabled);
+    } catch (_) {}
+  }
+
+  void setNowPlayingVisible(bool visible) {
+    try {
+      (this as dynamic).setNowPlayingVisible(visible);
+    } catch (_) {}
+  }
+
+  void setWindowMinimized(bool minimized) {
+    try {
+      (this as dynamic).setWindowMinimized(minimized);
+    } catch (_) {}
+  }
 }
 

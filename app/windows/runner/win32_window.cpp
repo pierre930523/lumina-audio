@@ -193,6 +193,28 @@ bool Win32Window::Show() {
   return ShowWindow(window_handle_, SW_SHOWNORMAL);
 }
 
+void Win32Window::Hide() {
+  if (window_handle_) {
+    ShowWindow(window_handle_, SW_HIDE);
+  }
+}
+
+void Win32Window::ShowAndFocus() {
+  if (!window_handle_) {
+    return;
+  }
+  if (IsIconic(window_handle_)) {
+    ShowWindow(window_handle_, SW_RESTORE);
+  } else {
+    ShowWindow(window_handle_, SW_SHOW);
+  }
+  SetForegroundWindow(window_handle_);
+  SetActiveWindow(window_handle_);
+  if (child_content_ != nullptr) {
+    SetFocus(child_content_);
+  }
+}
+
 // static
 LRESULT CALLBACK Win32Window::WndProc(HWND const window,
                                       UINT const message,
@@ -221,6 +243,9 @@ Win32Window::MessageHandler(HWND hwnd,
   switch (message) {
     case WM_NCCALCSIZE: {
       if (wparam == TRUE) {
+        if (is_fullscreen_) {
+          return 0;
+        }
         auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
         if (IsZoomed(hwnd)) {
           HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -234,6 +259,12 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
     }
+
+    case WM_CLOSE:
+      if (prevent_close_ && OnWindowCloseRequested()) {
+        return 0;
+      }
+      break;
 
     case WM_DESTROY:
       window_handle_ = nullptr;
@@ -261,7 +292,15 @@ Win32Window::MessageHandler(HWND hwnd,
       last_monitor_ = target_monitor;
       last_dpi_ = new_dpi;
 
-      if (!IsZoomed(hwnd)) {
+      if (is_fullscreen_) {
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfo(target_monitor, &mi)) {
+          SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                       mi.rcMonitor.right - mi.rcMonitor.left,
+                       mi.rcMonitor.bottom - mi.rcMonitor.top,
+                       SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        }
+      } else if (!IsZoomed(hwnd)) {
         LONG new_left = suggested->left;
         LONG new_top = suggested->top;
         LONG new_width = suggested->right - suggested->left;
@@ -344,6 +383,15 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       last_monitor_ = monitor;
       last_dpi_ = dpi;
+      if (is_fullscreen_) {
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfo(monitor, &mi)) {
+          SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                       mi.rcMonitor.right - mi.rcMonitor.left,
+                       mi.rcMonitor.bottom - mi.rcMonitor.top,
+                       SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        }
+      }
       SyncChildContentBounds();
       OnDisplayOrDpiChanged();
       return DefWindowProc(hwnd, message, wparam, lparam);
@@ -358,16 +406,29 @@ Win32Window::MessageHandler(HWND hwnd,
         if (dpi == 0) {
           dpi = 96;
         }
-        const double scale_factor = dpi / 96.0;
-        LONG min_w = static_cast<LONG>(Scale(480, scale_factor));
-        LONG min_h = static_cast<LONG>(Scale(380, scale_factor));
-
         MONITORINFO monitor_info{};
         monitor_info.cbSize = sizeof(monitor_info);
         if (GetMonitorInfo(monitor, &monitor_info)) {
+          if (is_fullscreen_) {
+            const RECT& mon = monitor_info.rcMonitor;
+            const LONG mon_w = mon.right - mon.left;
+            const LONG mon_h = mon.bottom - mon.top;
+            min_max->ptMaxSize.x = mon_w;
+            min_max->ptMaxSize.y = mon_h;
+            min_max->ptMaxPosition.x = mon.left;
+            min_max->ptMaxPosition.y = mon.top;
+            min_max->ptMaxTrackSize.x = mon_w;
+            min_max->ptMaxTrackSize.y = mon_h;
+            min_max->ptMinTrackSize.x = mon_w;
+            min_max->ptMinTrackSize.y = mon_h;
+            return 0;
+          }
           const RECT& work = monitor_info.rcWork;
           const LONG work_w = std::max<LONG>(1, work.right - work.left);
           const LONG work_h = std::max<LONG>(1, work.bottom - work.top);
+          const double scale_factor = dpi / 96.0;
+          LONG min_w = static_cast<LONG>(Scale(480, scale_factor));
+          LONG min_h = static_cast<LONG>(Scale(380, scale_factor));
           min_w = std::clamp<LONG>(min_w, 1, work_w);
           min_h = std::clamp<LONG>(min_h, 1, work_h);
           min_max->ptMinTrackSize.x =
@@ -375,6 +436,9 @@ Win32Window::MessageHandler(HWND hwnd,
           min_max->ptMinTrackSize.y =
               std::min(std::max(min_max->ptMinTrackSize.y, min_h), work_h);
         } else {
+          const double scale_factor = dpi / 96.0;
+          LONG min_w = static_cast<LONG>(Scale(480, scale_factor));
+          LONG min_h = static_cast<LONG>(Scale(380, scale_factor));
           min_max->ptMinTrackSize.x =
               std::max(min_max->ptMinTrackSize.x, min_w);
           min_max->ptMinTrackSize.y =
@@ -453,6 +517,22 @@ void Win32Window::SetQuitOnClose(bool quit_on_close) {
   quit_on_close_ = quit_on_close;
 }
 
+void Win32Window::SetPreventClose(bool prevent) {
+  prevent_close_ = prevent;
+}
+
+bool Win32Window::PreventClose() const {
+  return prevent_close_;
+}
+
+void Win32Window::ForceDestroy() {
+  prevent_close_ = false;
+  quit_on_close_ = true;
+  if (window_handle_) {
+    DestroyWindow(window_handle_);
+  }
+}
+
 bool Win32Window::OnCreate() {
   // No-op; provided for subclasses.
   return true;
@@ -464,6 +544,10 @@ void Win32Window::OnDestroy() {
 
 void Win32Window::OnDisplayOrDpiChanged() {
   // No-op; provided for subclasses.
+}
+
+bool Win32Window::OnWindowCloseRequested() {
+  return false;
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
@@ -479,4 +563,67 @@ void Win32Window::UpdateTheme(HWND const window) {
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &enable_dark_mode, sizeof(enable_dark_mode));
   }
+}
+
+void Win32Window::SetFullScreen(bool fullscreen) {
+  if (fullscreen == is_fullscreen_) {
+    return;
+  }
+  HWND hwnd = window_handle_;
+  if (!hwnd) {
+    return;
+  }
+
+  if (fullscreen) {
+    saved_placement_.length = sizeof(saved_placement_);
+    GetWindowPlacement(hwnd, &saved_placement_);
+    saved_style_ = GetWindowLong(hwnd, GWL_STYLE);
+    saved_ex_style_ = GetWindowLong(hwnd, GWL_EXSTYLE);
+
+    // If window is currently maximized, restore to clear WS_MAXIMIZE style
+    // so Windows allows covering the full screen and taskbar without snapping to work area.
+    if (IsZoomed(hwnd)) {
+      ShowWindow(hwnd, SW_RESTORE);
+    }
+
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfo(hMon, &mi);
+
+    is_fullscreen_ = true;
+
+    // Clear standard overlapping/caption styles (WS_OVERLAPPEDWINDOW), frame styles,
+    // and maximization/minimization states (WS_MAXIMIZE / WS_MINIMIZE) so the window
+    // covers the entire monitor and taskbar without Windows treating it as maximized.
+    SetWindowLong(hwnd, GWL_STYLE,
+                  saved_style_ & ~(WS_OVERLAPPEDWINDOW | WS_CAPTION | WS_THICKFRAME |
+                                   WS_MAXIMIZE | WS_MINIMIZE));
+    SetWindowLong(hwnd, GWL_EXSTYLE,
+                  saved_ex_style_ & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+                                     WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+
+    SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                 mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+
+    SyncChildContentBounds();
+    OnDisplayOrDpiChanged();
+  } else {
+    is_fullscreen_ = false;
+
+    SetWindowLong(hwnd, GWL_STYLE, saved_style_);
+    SetWindowLong(hwnd, GWL_EXSTYLE, saved_ex_style_);
+    SetWindowPlacement(hwnd, &saved_placement_);
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+
+    SyncChildContentBounds();
+    OnDisplayOrDpiChanged();
+  }
+}
+
+bool Win32Window::IsFullScreen() const {
+  return is_fullscreen_;
 }

@@ -39,30 +39,40 @@ class WindowDragBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final effectiveController = controller ?? DesktopWindowController.instance;
 
-    return Container(
-      height: height,
-      decoration: BoxDecoration(
-        color: backgroundColor,
-        border: border,
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          // Layer 0: Full-coverage drag & double-tap maximize interceptor
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onPanStart: (_) => effectiveController.startDragging(),
-            onDoubleTap: () => effectiveController.toggleMaximize(),
-            child: const ColoredBox(color: Colors.transparent),
+    return ValueListenableBuilder<bool>(
+      valueListenable: effectiveController.isFullScreenNotifier,
+      builder: (context, isFullScreen, _) {
+        return Container(
+          height: height,
+          decoration: BoxDecoration(
+            color: backgroundColor,
+            border: border,
           ),
-          // Layer 1: Interactive controls and widgets
-          if (child != null)
-            Padding(
-              padding: padding,
-              child: child!,
-            ),
-        ],
-      ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Layer 0: Full-coverage drag & double-tap maximize interceptor
+              // Disabled in fullscreen mode.
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onPanStart: isFullScreen
+                    ? null
+                    : (_) => effectiveController.startDragging(),
+                onDoubleTap: isFullScreen
+                    ? null
+                    : () => effectiveController.toggleMaximize(),
+                child: const ColoredBox(color: Colors.transparent),
+              ),
+              // Layer 1: Interactive controls and widgets
+              if (child != null)
+                Padding(
+                  padding: padding,
+                  child: child!,
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -11,6 +11,7 @@ import '../models/signal_path.dart';
 import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'per_device_playback_tracker.dart';
+import 'playback_persistence_service.dart';
 
 class _DirectHttpOverrides extends HttpOverrides {}
 
@@ -251,6 +252,9 @@ class ServerAudioService implements AudioService {
     dspBypassed: true,
   );
   List<TrackInfo> _queue = [];
+  StreamingTrackHandler? _streamingTrackHandler;
+  String? _lastError;
+  bool _needsLoadOnResume = false;
 
   ServerAudioService({
     String baseUrl = 'http://127.0.0.1:9888',
@@ -602,18 +606,169 @@ class ServerAudioService implements AudioService {
   }
 
   @override
+  void setStreamingTrackHandler(StreamingTrackHandler? handler) {
+    _streamingTrackHandler = handler;
+  }
+
+  @override
+  void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {
+    if (queue != null && queue.isNotEmpty) {
+      _queue = List<TrackInfo>.from(queue);
+    } else if (PlaybackPersistenceService.findTrackIndex(_queue, track) < 0) {
+      _queue = [track, ..._queue];
+    }
+    _needsLoadOnResume = false;
+    _lastError = null;
+    _state = _state.copyWith(
+      status: PlaybackStatus.loading,
+      track: track,
+      position: Duration.zero,
+      clearLastError: true,
+    );
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    _tracker.updateActiveDeviceState(_state, queueIndex: idx >= 0 ? idx : 0);
+    if (!_stateController.isClosed) _stateController.add(_state);
+    if (!_positionController.isClosed) _positionController.add(Duration.zero);
+  }
+
+  @override
+  void failOptimisticTrackLoad(TrackInfo track, String message) {
+    _lastError = message;
+    _state = _state.copyWith(
+      status: PlaybackStatus.error,
+      track: track,
+      position: Duration.zero,
+      lastError: message,
+    );
+    if (!_stateController.isClosed) _stateController.add(_state);
+  }
+
+  @override
+  Future<void> cancelPendingPlayback() async {
+    if (_state.status == PlaybackStatus.loading) {
+      _state = _state.copyWith(
+        status: PlaybackStatus.stopped,
+        position: Duration.zero,
+      );
+      if (!_stateController.isClosed) _stateController.add(_state);
+    }
+  }
+
+  @override
   Future<void> play({TrackInfo? track}) async {
+    if (_streamingTrackHandler != null) {
+      final candidate =
+          track ?? _state.track ?? (_queue.isNotEmpty ? _queue.first : null);
+      final needsFreshLoad = track != null ||
+          _needsLoadOnResume ||
+          _state.status == PlaybackStatus.stopped ||
+          _state.status == PlaybackStatus.error ||
+          _state.status == PlaybackStatus.ended;
+      if (candidate != null &&
+          needsFreshLoad &&
+          AudioService.isStreamingTrackId(candidate.id)) {
+        await _streamingTrackHandler!(
+          candidate,
+          queueContext: null,
+          debounce: false,
+        );
+        return;
+      }
+    }
+    _needsLoadOnResume = false;
     _currentLyrics = const [];
     final body = <String, dynamic>{};
     if (track != null) {
       body['track_id'] = track.id;
       if (track.filePath != null) body['file_path'] = track.filePath;
-      _state = _state.copyWith(track: track);
+      _needsLoadOnResume = false;
+    _state = _state.copyWith(track: track, clearLastError: true);
       unawaited(_fetchLyrics(track.id, path: track.filePath));
     }
     await _requestJson('POST', '/api/v1/playback/play', body: body);
-    _state = _state.copyWith(status: PlaybackStatus.playing);
+    _lastError = null;
+    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
     if (!_stateController.isClosed) _stateController.add(_state);
+  }
+
+  @override
+  Future<void> playStreamUrl({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) async {
+    _currentLyrics = const [];
+    final body = <String, dynamic>{
+      'track_id': track.id,
+      'stream_url': streamUrl,
+      if (track.filePath != null) 'file_path': track.filePath,
+      if (headers.isNotEmpty) 'headers': headers,
+      if (hintExtension != null && hintExtension.isNotEmpty)
+        'hint_extension': hintExtension,
+      'source': track.providerName,
+    };
+    _needsLoadOnResume = false;
+    _state = _state.copyWith(track: track, clearLastError: true);
+    unawaited(_fetchLyrics(track.id, path: track.filePath));
+    await _requestJson('POST', '/api/v1/playback/play', body: body);
+    _lastError = null;
+    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
+    if (!_stateController.isClosed) _stateController.add(_state);
+  }
+
+  @override
+  Future<void> playStreamUrlAsync({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+    required int requestId,
+  }) => playStreamUrl(
+    track: track,
+    streamUrl: streamUrl,
+    headers: headers,
+    hintExtension: hintExtension,
+  );
+
+  @override
+  Future<void> restorePlaybackSession({
+    required TrackInfo track,
+    required Duration position,
+    List<TrackInfo>? queue,
+    int? queueIndex,
+    double? volume,
+    bool? isMuted,
+  }) async {
+    if (queue != null && queue.isNotEmpty) {
+      _queue = List<TrackInfo>.from(queue);
+    } else if (PlaybackPersistenceService.findTrackIndex(_queue, track) < 0) {
+      _queue = [track, ..._queue];
+    }
+    final maxDur = track.duration > Duration.zero
+        ? track.duration
+        : const Duration(hours: 24);
+    final clampedPos = position < Duration.zero
+        ? Duration.zero
+        : (position > maxDur ? maxDur : position);
+    final effVol = (volume ?? _state.volume).clamp(0.0, 1.0);
+    final muted = isMuted ?? (effVol == 0.0);
+    _needsLoadOnResume = true;
+    _state = PlaybackState(
+      status: PlaybackStatus.paused,
+      track: track,
+      position: clampedPos,
+      volume: effVol,
+      isMuted: muted,
+      seekEpoch: _state.seekEpoch,
+      isSeeking: false,
+      lastError: null,
+      deviceLost: _state.deviceLost,
+      clockSource: _state.clockSource,
+    );
+    _tracker.updateActiveDeviceState(_state, queueIndex: queueIndex);
+    if (!_stateController.isClosed) _stateController.add(_state);
+    if (!_positionController.isClosed) _positionController.add(_state.position);
   }
 
   @override
@@ -625,6 +780,10 @@ class ServerAudioService implements AudioService {
 
   @override
   Future<void> resume() async {
+    if (_needsLoadOnResume && _state.track != null) {
+      await play(track: null);
+      return;
+    }
     await _requestJson('POST', '/api/v1/playback/resume');
     _state = _state.copyWith(status: PlaybackStatus.playing);
     if (!_stateController.isClosed) _stateController.add(_state);
@@ -635,7 +794,11 @@ class ServerAudioService implements AudioService {
     if (_state.status == PlaybackStatus.playing) {
       await pause();
     } else if (_state.status == PlaybackStatus.paused) {
-      await resume();
+      if (_needsLoadOnResume && _state.track != null) {
+        await play(track: null);
+      } else {
+        await resume();
+      }
     } else {
       await play();
     }
@@ -1308,7 +1471,7 @@ class ServerAudioService implements AudioService {
   bool get isSystemOutputActive => false;
 
   @override
-  String? get lastError => null;
+  String? get lastError => _lastError ?? _state.lastError;
 
   @override
   int get preferredBufferFrames => 512;

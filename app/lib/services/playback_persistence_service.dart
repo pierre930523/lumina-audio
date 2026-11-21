@@ -19,7 +19,11 @@ class PlaybackPersistenceService {
   bool _hasPendingSave = false;
   Map<String, dynamic>? _lastSavedData;
   bool _isSaving = false;
+  bool _isRestoring = false;
   Map<String, dynamic>? _pendingSnapshot;
+  int _pendingSnapshotSeq = 0;
+  int _snapshotSeq = 0;
+  int _lastWrittenSeq = 0;
   Completer<void>? _activeSaveCompleter;
   bool _disposed = false;
 
@@ -27,10 +31,54 @@ class PlaybackPersistenceService {
   int _cachedQueueLength = -1;
   String _cachedQueueSignature = '';
 
+  bool get isRestoring => _isRestoring;
+
   PlaybackPersistenceService({
     this.prefsFileOverride,
     this.throttleDuration = const Duration(milliseconds: 3500),
   });
+
+  /// Normalizes a file path or URI for deterministic matching across library rescans and restarts.
+  static String? normalizeTrackPath(String? raw) {
+    if (raw == null) return null;
+    var p = raw.trim();
+    if (p.isEmpty) return null;
+    if (Platform.isWindows) {
+      p = p.replaceAll('/', '\\').toLowerCase();
+      final isUnc = p.startsWith('\\\\');
+      p = p.replaceAll(RegExp(r'\\{2,}'), '\\');
+      if (isUnc && !p.startsWith('\\\\')) {
+        p = '\\$p';
+      }
+    }
+    return p;
+  }
+
+  /// Returns true when [a] and [b] refer to the same track (normalized path first, then id).
+  static bool tracksMatch(TrackInfo a, TrackInfo b) {
+    final pathA = normalizeTrackPath(a.filePath);
+    final pathB = normalizeTrackPath(b.filePath);
+    if (pathA != null && pathB != null) {
+      return pathA == pathB;
+    }
+    return a.id.isNotEmpty && a.id == b.id;
+  }
+
+  /// Finds the index of [target] in [tracks] using normalized filePath first, then track id.
+  static int findTrackIndex(List<TrackInfo> tracks, TrackInfo target) {
+    final normTarget = normalizeTrackPath(target.filePath);
+    if (normTarget != null) {
+      final byPath = tracks.indexWhere(
+        (t) => normalizeTrackPath(t.filePath) == normTarget,
+      );
+      if (byPath >= 0) return byPath;
+    }
+    if (target.id.isNotEmpty) {
+      final byId = tracks.indexWhere((t) => t.id == target.id);
+      if (byId >= 0) return byId;
+    }
+    return -1;
+  }
 
   File? _resolveFile() {
     if (prefsFileOverride != null) return prefsFileOverride;
@@ -75,39 +123,44 @@ class PlaybackPersistenceService {
   }
 
   TrackInfo? _deserializeTrack(dynamic raw) {
-    if (raw is! Map<String, dynamic>) return null;
-    final durMs = (raw['duration_ms'] as num?)?.toInt() ?? 0;
-    final codecName = raw['codec']?.toString() ?? 'flac';
-    final codec = AudioCodec.values.firstWhere(
-      (c) => c.name.toLowerCase() == codecName.toLowerCase(),
-      orElse: () => AudioCodec.flac,
-    );
+    if (raw is! Map) return null;
+    final map = Map<String, dynamic>.from(raw);
+    final id = map['id']?.toString() ?? '';
+    final title = map['title']?.toString() ?? '';
+    final filePath = map['file_path']?.toString();
+    if (id.isEmpty && title.isEmpty && (filePath == null || filePath.isEmpty)) {
+      return null;
+    }
+
+    final durMs = (map['duration_ms'] as num?)?.toInt() ?? 0;
+    final codecName = map['codec']?.toString() ?? 'flac';
+    final codec = AudioCodec.fromString(codecName);
 
     return TrackInfo(
-      id: raw['id']?.toString() ?? '',
-      title: raw['title']?.toString() ?? '未知曲目',
-      artist: raw['artist']?.toString() ?? '未知歌手',
-      album: raw['album']?.toString() ?? '未知專輯',
-      duration: Duration(milliseconds: durMs),
-      coverUrl: raw['cover_url']?.toString(),
-      albumArtUrl: raw['album_art_url']?.toString(),
-      filePath: raw['file_path']?.toString(),
-      albumArtist: raw['album_artist']?.toString(),
-      genre: raw['genre']?.toString(),
-      year: (raw['year'] as num?)?.toInt(),
-      trackNumber: (raw['track_number'] as num?)?.toInt(),
-      discNumber: (raw['disc_number'] as num?)?.toInt(),
-      composer: raw['composer']?.toString(),
-      artworkCacheKey: raw['artwork_cache_key']?.toString(),
-      hasLyrics: raw['has_lyrics'] == true,
+      id: id,
+      title: title.isNotEmpty ? title : '未知曲目',
+      artist: map['artist']?.toString() ?? '未知歌手',
+      album: map['album']?.toString() ?? '未知專輯',
+      duration: Duration(milliseconds: durMs < 0 ? 0 : durMs),
+      coverUrl: map['cover_url']?.toString(),
+      albumArtUrl: map['album_art_url']?.toString(),
+      filePath: filePath,
+      albumArtist: map['album_artist']?.toString(),
+      genre: map['genre']?.toString(),
+      year: (map['year'] as num?)?.toInt(),
+      trackNumber: (map['track_number'] as num?)?.toInt(),
+      discNumber: (map['disc_number'] as num?)?.toInt(),
+      composer: map['composer']?.toString(),
+      artworkCacheKey: map['artwork_cache_key']?.toString(),
+      hasLyrics: map['has_lyrics'] == true,
       format: AudioFormat(
         codec: codec,
-        sampleRateHz: (raw['sample_rate_hz'] as num?)?.toInt() ?? 44100,
-        bitDepth: (raw['bit_depth'] as num?)?.toInt() ?? 16,
-        channels: (raw['channels'] as num?)?.toInt() ?? 2,
-        isDsd: raw['is_dsd'] == true,
+        sampleRateHz: (map['sample_rate_hz'] as num?)?.toInt() ?? 44100,
+        bitDepth: (map['bit_depth'] as num?)?.toInt() ?? 16,
+        channels: (map['channels'] as num?)?.toInt() ?? 2,
+        isDsd: map['is_dsd'] == true,
       ),
-      providerName: raw['provider_name']?.toString() ?? 'local',
+      providerName: map['provider_name']?.toString() ?? 'local',
     );
   }
 
@@ -117,11 +170,12 @@ class PlaybackPersistenceService {
     int? queueIndex,
   }) {
     final track = state.track;
-    final resolvedQueueIndex = queueIndex ??
-        (track != null ? queue.indexWhere((t) => t.id == track.id) : 0);
+    final resolvedQueueIndex =
+        queueIndex ?? (track != null ? findTrackIndex(queue, track) : 0);
 
-    final queueSig =
-        '${queue.length}_${queue.firstOrNull?.id}_${queue.lastOrNull?.id}';
+    final queueSig = queue.isEmpty
+        ? '0'
+        : '${queue.length}_${queue.first.id}_${queue.first.filePath}_${queue[queue.length ~/ 2].id}_${queue.last.id}_${queue.last.filePath}';
     if (_cachedQueueTracks == null ||
         _cachedQueueLength != queue.length ||
         _cachedQueueSignature != queueSig) {
@@ -131,7 +185,7 @@ class PlaybackPersistenceService {
     }
 
     return {
-      'version': 1,
+      'version': 2,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
       'position_ms': state.position.inMilliseconds,
       'volume': state.volume,
@@ -142,9 +196,42 @@ class PlaybackPersistenceService {
     };
   }
 
+  bool _hasExistingValidSession() {
+    if (_lastSavedData?['track'] != null) return true;
+    final file = _resolveFile();
+    if (file == null) return false;
+    try {
+      if (!file.existsSync()) return false;
+      final raw = file.readAsStringSync();
+      if (raw.trim().isEmpty) return false;
+      final decoded = jsonDecode(raw);
+      return decoded is Map && decoded['track'] != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _shouldSkipEmptySnapshot(
+    Map<String, dynamic> snapshot, {
+    required bool allowEmptyTrack,
+  }) {
+    if (allowEmptyTrack) return false;
+    if (snapshot['track'] != null) return false;
+    return _hasExistingValidSession();
+  }
+
   /// Saves snapshot immediately to disk using a single-flight worker to prevent unbounded Future queues.
-  Future<void> saveImmediate(Map<String, dynamic> snapshot) async {
-    if (_disposed) return;
+  Future<void> saveImmediate(
+    Map<String, dynamic> snapshot, {
+    bool allowEmptyTrack = false,
+    bool syncFlush = false,
+  }) async {
+    if (_disposed || _isRestoring) return;
+    if (_shouldSkipEmptySnapshot(snapshot, allowEmptyTrack: allowEmptyTrack)) {
+      return;
+    }
+
+    final seq = ++_snapshotSeq;
     _lastSavedData = snapshot;
     _hasPendingSave = false;
     _throttleTimer?.cancel();
@@ -152,7 +239,23 @@ class PlaybackPersistenceService {
 
     if (_isSaving) {
       _pendingSnapshot = snapshot;
+      _pendingSnapshotSeq = seq;
+      if (syncFlush) {
+        await _activeSaveCompleter?.future;
+        if (_pendingSnapshot != null) {
+          final latest = _pendingSnapshot!;
+          final latestSeq = _pendingSnapshotSeq;
+          _pendingSnapshot = null;
+          await _performSave(latest, syncFlush: true, seq: latestSeq);
+        }
+        return;
+      }
       return _activeSaveCompleter?.future ?? Future.value();
+    }
+
+    if (syncFlush) {
+      await _performSave(snapshot, syncFlush: true, seq: seq);
+      return;
     }
 
     _isSaving = true;
@@ -160,44 +263,132 @@ class PlaybackPersistenceService {
 
     try {
       Map<String, dynamic>? nextSnapshot = snapshot;
-      while (nextSnapshot != null && !_disposed) {
+      var nextSeq = seq;
+      while (nextSnapshot != null) {
         final currentToSave = nextSnapshot;
+        final currentSeq = nextSeq;
         _pendingSnapshot = null;
-        await _performSave(currentToSave);
+        await _performSave(
+          currentToSave,
+          syncFlush: syncFlush,
+          seq: currentSeq,
+        );
+        if (_disposed) {
+          if (_pendingSnapshot != null) {
+            final finalSnap = _pendingSnapshot!;
+            final finalSeq = _pendingSnapshotSeq;
+            _pendingSnapshot = null;
+            await _performSave(finalSnap, syncFlush: true, seq: finalSeq);
+          }
+          break;
+        }
         nextSnapshot = _pendingSnapshot;
+        nextSeq = _pendingSnapshotSeq;
       }
     } finally {
       _isSaving = false;
-      _activeSaveCompleter?.complete();
+      final completer = _activeSaveCompleter;
       _activeSaveCompleter = null;
+      if (completer != null && !completer.isCompleted) {
+        completer.complete();
+      }
     }
   }
 
-  Future<void> _performSave(Map<String, dynamic> snapshot) async {
+  void _logSaved(Map<String, dynamic> snapshot) {
+    final trackMap = snapshot['track'];
+    final trackTitle = (trackMap is Map && trackMap['title'] != null)
+        ? trackMap['title'].toString()
+        : 'none';
+    final posMs = (snapshot['position_ms'] as num?)?.toInt() ?? 0;
+    debugPrint('[PlaybackPersist] Saved: $trackTitle @ ${posMs}ms');
+  }
+
+  void _performSaveSync(Map<String, dynamic> snapshot, {required int seq}) {
+    if (seq <= _lastWrittenSeq) return;
     final file = _resolveFile();
     if (file == null) return;
 
     try {
       final payload = const JsonEncoder.withIndent('  ').convert(snapshot);
       final parent = file.parent;
-      if (prefsFileOverride != null) {
-        if (!parent.existsSync()) parent.createSync(recursive: true);
+      if (!parent.existsSync()) parent.createSync(recursive: true);
+
+      final tmpFile = File('${file.path}.tmp');
+      try {
+        tmpFile.writeAsStringSync(payload, flush: true);
+        tmpFile.renameSync(file.path);
+      } catch (_) {
+        try {
+          if (tmpFile.existsSync()) tmpFile.deleteSync();
+        } catch (_) {}
         file.writeAsStringSync(payload, flush: true);
-      } else {
-        if (!await parent.exists()) await parent.create(recursive: true);
+      }
+
+      _lastWrittenSeq = seq;
+      _logSaved(snapshot);
+    } catch (e) {
+      debugPrint('PlaybackPersistenceService save error: $e');
+    }
+  }
+
+  Future<void> _performSave(
+    Map<String, dynamic> snapshot, {
+    bool syncFlush = false,
+    int? seq,
+  }) async {
+    final effectiveSeq = seq ?? ++_snapshotSeq;
+    if (effectiveSeq <= _lastWrittenSeq) return;
+    final file = _resolveFile();
+    if (file == null) return;
+
+    if (syncFlush || prefsFileOverride != null) {
+      _performSaveSync(snapshot, seq: effectiveSeq);
+      return;
+    }
+
+    try {
+      final payload = const JsonEncoder.withIndent('  ').convert(snapshot);
+      final parent = file.parent;
+      if (!await parent.exists()) await parent.create(recursive: true);
+      if (effectiveSeq <= _lastWrittenSeq) return;
+
+      final tmpFile = File('${file.path}.tmp');
+      try {
+        await tmpFile.writeAsString(payload, flush: true);
+        if (effectiveSeq <= _lastWrittenSeq) {
+          try {
+            if (await tmpFile.exists()) await tmpFile.delete();
+          } catch (_) {}
+          return;
+        }
+        await tmpFile.rename(file.path);
+      } catch (_) {
+        try {
+          if (await tmpFile.exists()) await tmpFile.delete();
+        } catch (_) {}
+        if (effectiveSeq <= _lastWrittenSeq) return;
         await file.writeAsString(payload, flush: true);
       }
+
+      _lastWrittenSeq = effectiveSeq;
+      _logSaved(snapshot);
     } catch (e) {
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('PlaybackPersistenceService save error: $e');
-      }
+      debugPrint('PlaybackPersistenceService save error: $e');
     }
   }
 
   /// Throttled save: calls will execute at most once per [throttleDuration].
-  void saveThrottled(Map<String, dynamic> snapshot) {
-    if (_disposed) return;
+  void saveThrottled(
+    Map<String, dynamic> snapshot, {
+    bool allowEmptyTrack = false,
+  }) {
+    if (_disposed || _isRestoring) return;
+    if (_shouldSkipEmptySnapshot(snapshot, allowEmptyTrack: allowEmptyTrack)) {
+      return;
+    }
+
+    ++_snapshotSeq;
     _lastSavedData = snapshot;
     _hasPendingSave = true;
 
@@ -206,21 +397,70 @@ class PlaybackPersistenceService {
     }
 
     _throttleTimer = Timer(throttleDuration, () {
-      if (_hasPendingSave && _lastSavedData != null) {
-        saveImmediate(_lastSavedData!);
+      if (_hasPendingSave && _lastSavedData != null && !_disposed && !_isRestoring) {
+        saveImmediate(_lastSavedData!, allowEmptyTrack: allowEmptyTrack);
       }
     });
   }
 
-  /// Flushes any pending throttled saves immediately (e.g. on window close).
-  Future<void> flush() async {
+  /// Flushes any pending throttled saves immediately (never aborted by dispose).
+  Future<void> flush({bool syncFlush = false}) async {
     _throttleTimer?.cancel();
     _throttleTimer = null;
+    if (_isRestoring) return;
+
     if (_hasPendingSave && _lastSavedData != null) {
-      await saveImmediate(_lastSavedData!);
+      final snap = _lastSavedData!;
+      _hasPendingSave = false;
+      final seq = ++_snapshotSeq;
+      if (_isSaving) {
+        _pendingSnapshot = snap;
+        _pendingSnapshotSeq = seq;
+        await _activeSaveCompleter?.future;
+        if (_pendingSnapshot != null) {
+          final remaining = _pendingSnapshot!;
+          final remainingSeq = _pendingSnapshotSeq;
+          _pendingSnapshot = null;
+          await _performSave(remaining, syncFlush: syncFlush, seq: remainingSeq);
+        }
+        return;
+      }
+      await _performSave(snap, syncFlush: syncFlush, seq: seq);
     } else if (_isSaving && _activeSaveCompleter != null) {
       await _activeSaveCompleter!.future;
     }
+  }
+
+  /// Awaits any active save and synchronously/atomically flushes the final [snapshot] for app exit.
+  Future<void> saveAndFlushForExit(
+    Map<String, dynamic> snapshot, {
+    bool allowEmptyTrack = false,
+  }) async {
+    _throttleTimer?.cancel();
+    _throttleTimer = null;
+    if (_isRestoring) return;
+
+    var target = snapshot;
+    if (_shouldSkipEmptySnapshot(snapshot, allowEmptyTrack: allowEmptyTrack)) {
+      if (_hasPendingSave &&
+          _lastSavedData != null &&
+          _lastSavedData!['track'] != null) {
+        target = _lastSavedData!;
+      } else {
+        return;
+      }
+    }
+
+    final seq = ++_snapshotSeq;
+    _lastSavedData = target;
+    _hasPendingSave = false;
+    _pendingSnapshot = null;
+
+    if (_isSaving && _activeSaveCompleter != null) {
+      await _activeSaveCompleter!.future;
+    }
+
+    await _performSave(target, syncFlush: true, seq: seq);
   }
 
   /// Loads saved state from disk.
@@ -237,45 +477,233 @@ class PlaybackPersistenceService {
       final raw = prefsFileOverride != null
           ? file.readAsStringSync()
           : await file.readAsString();
+      if (raw.trim().isEmpty) return null;
       final decoded = jsonDecode(raw);
       if (decoded is Map<String, dynamic>) {
         return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
       }
     } catch (_) {}
     return null;
   }
 
-  /// Restores saved playback session onto [audioService].
-  /// Sets volume, restores track info & position, and leaves player in paused state.
-  Future<bool> restoreSession(AudioService audioService) async {
-    final data = await load();
-    if (data == null) return false;
+  static bool _isRemoteUri(String raw) {
+    final lower = raw.trim().toLowerCase();
+    return lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        lower.startsWith('smb://') ||
+        lower.startsWith('dav://') ||
+        lower.startsWith('webdav://');
+  }
 
+  static bool _canRestoreMissingFromQueueTrack(
+    TrackInfo track, {
+    required bool isInTest,
+  }) {
+    final fp = track.filePath?.trim();
+    if (fp == null || fp.isEmpty) return true;
+    if (_isRemoteUri(fp)) return true;
+    if (isInTest) return true;
     try {
-      final savedVolume = (data['volume'] as num?)?.toDouble();
-      if (savedVolume != null && savedVolume.isFinite) {
-        await audioService.setVolume(savedVolume.clamp(0.0, 1.0));
+      return File(fp).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  List<TrackInfo> _mergeRestoredQueue({
+    required List<TrackInfo> savedQueue,
+    required List<TrackInfo> existingQueue,
+    required TrackInfo matchedTrack,
+    required int savedQueueIndex,
+    required bool isInTest,
+  }) {
+    final restored = <TrackInfo>[];
+
+    void addIfUnique(TrackInfo candidate) {
+      if (findTrackIndex(restored, candidate) < 0) {
+        restored.add(candidate);
       }
+    }
 
-      final rawTrack = data['track'];
-      final savedTrack = _deserializeTrack(rawTrack);
-      final savedPosMs = (data['position_ms'] as num?)?.toInt() ?? 0;
-      final savedPos = Duration(milliseconds: savedPosMs);
+    for (final savedItem in savedQueue) {
+      final existingIdx = findTrackIndex(existingQueue, savedItem);
+      if (existingIdx >= 0) {
+        final libTrack = existingQueue[existingIdx];
+        final resolved = libTrack.duration <= Duration.zero &&
+                savedItem.duration > Duration.zero
+            ? libTrack.copyWith(duration: savedItem.duration)
+            : libTrack;
+        addIfUnique(resolved);
+      } else if (_canRestoreMissingFromQueueTrack(savedItem, isInTest: isInTest)) {
+        addIfUnique(savedItem);
+      }
+    }
 
-      if (savedTrack != null) {
-        // Seek to saved position without auto-playing
-        if (savedPos > Duration.zero) {
-          await audioService.seek(savedPos);
+    if (restored.isEmpty) {
+      for (final existing in existingQueue) {
+        addIfUnique(existing);
+      }
+      if (findTrackIndex(restored, matchedTrack) < 0) {
+        final insertAt = savedQueueIndex.clamp(0, restored.length);
+        restored.insert(insertAt, matchedTrack);
+      }
+    } else {
+      if (findTrackIndex(restored, matchedTrack) < 0) {
+        final insertAt = savedQueueIndex.clamp(0, restored.length);
+        restored.insert(insertAt, matchedTrack);
+      }
+      // Preserve any real library tracks (with filePath) that weren't in savedQueue.
+      for (final existing in existingQueue) {
+        final hasLocalPath =
+            existing.filePath != null && existing.filePath!.trim().isNotEmpty;
+        if (hasLocalPath) {
+          addIfUnique(existing);
         }
-        return true;
       }
-    } catch (_) {}
-    return false;
+    }
+
+    return restored;
+  }
+
+  /// Restores saved playback session onto [audioService].
+  /// Sets volume, restores track, queue & position, and leaves player in paused standby.
+  Future<bool> restoreSession(
+    AudioService audioService, {
+    bool rememberPosition = true,
+  }) async {
+    _isRestoring = true;
+    try {
+      final data = await load();
+      if (data == null) return false;
+      _lastSavedData ??= data;
+
+      final rawVolume = (data['volume'] as num?)?.toDouble();
+      final savedVolume =
+          (rawVolume != null && rawVolume.isFinite) ? rawVolume.clamp(0.0, 1.0) : null;
+      final isMuted = data['is_muted'] == true;
+
+      if (!rememberPosition) {
+        if (savedVolume != null) {
+          await audioService.setVolume(savedVolume);
+        }
+        if (isMuted && !audioService.currentState.isMuted) {
+          await audioService.toggleMute();
+        }
+        await Future<void>.microtask(() {});
+        return false;
+      }
+
+      final savedTrack = _deserializeTrack(data['track']);
+      if (savedTrack == null) {
+        if (savedVolume != null) {
+          await audioService.setVolume(savedVolume);
+        }
+        if (isMuted && !audioService.currentState.isMuted) {
+          await audioService.toggleMute();
+        }
+        await Future<void>.microtask(() {});
+        return false;
+      }
+
+      final isInTest = prefsFileOverride != null ||
+          Platform.environment.containsKey('FLUTTER_TEST');
+
+      final existingQueue = audioService.queue;
+      final matchedQueueIdx = findTrackIndex(existingQueue, savedTrack);
+      late final TrackInfo matchedTrack;
+      if (matchedQueueIdx >= 0) {
+        final libTrack = existingQueue[matchedQueueIdx];
+        matchedTrack = libTrack.duration <= Duration.zero &&
+                savedTrack.duration > Duration.zero
+            ? libTrack.copyWith(duration: savedTrack.duration)
+            : libTrack;
+      } else {
+        if (!_canRestoreMissingFromQueueTrack(savedTrack, isInTest: isInTest)) {
+          if (savedVolume != null) {
+            await audioService.setVolume(savedVolume);
+          }
+          if (isMuted && !audioService.currentState.isMuted) {
+            await audioService.toggleMute();
+          }
+          await Future<void>.microtask(() {});
+          return false;
+        }
+        matchedTrack = savedTrack;
+      }
+
+      final savedQueue = <TrackInfo>[];
+      final rawQueue = data['queue_tracks'];
+      if (rawQueue is List) {
+        for (final item in rawQueue) {
+          final parsed = _deserializeTrack(item);
+          if (parsed != null) {
+            savedQueue.add(parsed);
+          }
+        }
+      }
+
+      final savedQueueIndex = (data['queue_index'] as num?)?.toInt() ?? 0;
+      final restoredQueue = _mergeRestoredQueue(
+        savedQueue: savedQueue,
+        existingQueue: existingQueue,
+        matchedTrack: matchedTrack,
+        savedQueueIndex: savedQueueIndex,
+        isInTest: isInTest,
+      );
+
+      var matchedIndex = findTrackIndex(restoredQueue, matchedTrack);
+      if (matchedIndex < 0) {
+        restoredQueue.insert(0, matchedTrack);
+        matchedIndex = 0;
+      }
+
+      final savedPosMs = (data['position_ms'] as num?)?.toInt() ?? 0;
+      var clampedPos = Duration(milliseconds: savedPosMs < 0 ? 0 : savedPosMs);
+      if (matchedTrack.duration > Duration.zero &&
+          clampedPos > matchedTrack.duration) {
+        clampedPos = matchedTrack.duration;
+      }
+
+      await audioService.restorePlaybackSession(
+        track: matchedTrack,
+        position: clampedPos,
+        queue: restoredQueue,
+        queueIndex: matchedIndex,
+        volume: savedVolume,
+        isMuted: isMuted,
+      );
+
+      // Allow any broadcast stream events emitted during restore to be delivered
+      // before clearing _isRestoring.
+      await Future<void>.microtask(() {});
+
+      debugPrint(
+        '[PlaybackPersist] Restored: ${matchedTrack.title} @ ${clampedPos.inMilliseconds}ms',
+      );
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _isRestoring = false;
+    }
   }
 
   void dispose() {
-    _disposed = true;
     _throttleTimer?.cancel();
     _throttleTimer = null;
+    final pending = _pendingSnapshot ??
+        (_lastWrittenSeq < _snapshotSeq ? _lastSavedData : null);
+    if (pending != null &&
+        !_isRestoring &&
+        !_shouldSkipEmptySnapshot(pending, allowEmptyTrack: false)) {
+      _pendingSnapshot = null;
+      _hasPendingSave = false;
+      final seq = _snapshotSeq > _lastWrittenSeq ? _snapshotSeq : ++_snapshotSeq;
+      _performSaveSync(pending, seq: seq);
+    }
+    _disposed = true;
   }
 }

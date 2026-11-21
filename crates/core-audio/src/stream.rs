@@ -3,8 +3,9 @@ use std::future::Future;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use reqwest::{Client, Response, StatusCode};
@@ -35,13 +36,28 @@ fn http_runtime() -> std::io::Result<&'static tokio::runtime::Runtime> {
 fn http_client() -> std::io::Result<&'static Client> {
     let res = HTTP_CLIENT.get_or_init(|| {
         Client::builder()
-            .connect_timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| e.to_string())
     });
     res.as_ref()
         .map_err(|e| std::io::Error::other(format!("HTTP client init failed: {e}")))
+}
+
+fn is_cancelled(cancel: &Option<Arc<AtomicBool>>) -> bool {
+    cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+fn cancelled_io_error() -> std::io::Error {
+    std::io::Error::new(ErrorKind::Interrupted, "HTTP stream open cancelled")
+}
+
+fn timeout_io_error(timeout: Duration) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::TimedOut,
+        format!("HTTP stream open timed out after {}ms", timeout.as_millis()),
+    )
 }
 
 /// Runs an async future on the dedicated `HTTP_RUNTIME`, blocking the calling
@@ -56,6 +72,49 @@ where
     let (tx, rx) = mpsc::sync_channel(1);
     rt.spawn(async move {
         let out = fut.await;
+        let _ = tx.send(out);
+    });
+    rx.recv()
+        .map_err(|e| std::io::Error::other(format!("HTTP worker channel closed: {e}")))?
+}
+
+/// Runs an async future on `HTTP_RUNTIME` with bounded timeout and cooperative cancellation.
+fn run_http_future_cancellable<F, T>(
+    fut: F,
+    cancel: Option<Arc<AtomicBool>>,
+    timeout: Duration,
+) -> std::io::Result<T>
+where
+    F: Future<Output = std::io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    if is_cancelled(&cancel) {
+        return Err(cancelled_io_error());
+    }
+    let rt = http_runtime()?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    rt.spawn(async move {
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        tokio::pin!(fut);
+
+        let out = if let Some(flag) = cancel {
+            loop {
+                if flag.load(Ordering::SeqCst) {
+                    break Err(cancelled_io_error());
+                }
+                tokio::select! {
+                    res = &mut fut => break res,
+                    _ = &mut deadline => break Err(timeout_io_error(timeout)),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+        } else {
+            tokio::select! {
+                res = &mut fut => res,
+                _ = &mut deadline => Err(timeout_io_error(timeout)),
+            }
+        };
         let _ = tx.send(out);
     });
     rx.recv()
@@ -209,6 +268,28 @@ pub struct HttpRangeMediaSource {
 
 impl HttpRangeMediaSource {
     pub fn open(url: &str, headers: &HashMap<String, String>) -> std::io::Result<Self> {
+        Self::open_with_cancel(url, headers, None, Duration::from_secs(10))
+    }
+
+    pub fn open_with_cancel(
+        url: &str,
+        headers: &HashMap<String, String>,
+        cancel: Option<Arc<AtomicBool>>,
+        timeout: Duration,
+    ) -> std::io::Result<Self> {
+        if is_cancelled(&cancel) {
+            return Err(cancelled_io_error());
+        }
+        let deadline = Instant::now() + timeout;
+        let remaining_timeout = || {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
+                Duration::from_millis(1)
+            } else {
+                rem
+            }
+        };
+
         let trimmed = url.trim();
         let lower = trimmed.to_ascii_lowercase();
         if !lower.starts_with("http://") && !lower.starts_with("https://") {
@@ -220,15 +301,24 @@ impl HttpRangeMediaSource {
 
         let header_map = build_header_map(headers)?;
         let mut active_url = if is_playlist_url(trimmed) {
-            resolve_playlist_url(trimmed, headers)?
+            resolve_playlist_url_with_cancel(trimmed, headers, cancel.clone(), remaining_timeout())?
         } else {
             trimmed.to_string()
         };
 
+        if is_cancelled(&cancel) {
+            return Err(cancelled_io_error());
+        }
+
         let mut probe = {
             let url_owned = active_url.clone();
             let headers_clone = header_map.clone();
-            run_http_future(async move { probe_http_stream(&url_owned, &headers_clone).await })?
+            let step_timeout = remaining_timeout();
+            run_http_future_cancellable(
+                async move { probe_http_stream(&url_owned, &headers_clone, step_timeout).await },
+                cancel.clone(),
+                step_timeout,
+            )?
         };
 
         let probe_ct = match &probe {
@@ -237,10 +327,26 @@ impl HttpRangeMediaSource {
         };
         if probe_ct.is_some_and(is_playlist_content_type) {
             drop(probe);
-            active_url = resolve_playlist_url(&active_url, headers)?;
+            if is_cancelled(&cancel) {
+                return Err(cancelled_io_error());
+            }
+            active_url = resolve_playlist_url_with_cancel(
+                &active_url,
+                headers,
+                cancel.clone(),
+                remaining_timeout(),
+            )?;
+            if is_cancelled(&cancel) {
+                return Err(cancelled_io_error());
+            }
             let url_owned = active_url.clone();
             let headers_clone = header_map.clone();
-            probe = run_http_future(async move { probe_http_stream(&url_owned, &headers_clone).await })?;
+            let step_timeout = remaining_timeout();
+            probe = run_http_future_cancellable(
+                async move { probe_http_stream(&url_owned, &headers_clone, step_timeout).await },
+                cancel,
+                step_timeout,
+            )?;
         }
 
         let (seekable, total_len, content_type, mode) = match probe {
@@ -384,27 +490,38 @@ pub fn resolve_playlist_url(
     url: &str,
     headers: &HashMap<String, String>,
 ) -> std::io::Result<String> {
+    resolve_playlist_url_with_cancel(url, headers, None, Duration::from_secs(10))
+}
+
+pub fn resolve_playlist_url_with_cancel(
+    url: &str,
+    headers: &HashMap<String, String>,
+    cancel: Option<Arc<AtomicBool>>,
+    timeout: Duration,
+) -> std::io::Result<String> {
     let header_map = build_header_map(headers)?;
     let start_url = url.trim().to_string();
-    run_http_future(async move {
-        let client = http_client()?;
-        let mut current = start_url;
-        let mut visited = HashSet::new();
+    run_http_future_cancellable(
+        async move {
+            let client = http_client()?;
+            let mut current = start_url;
+            let mut visited = HashSet::new();
 
-        for _depth in 0..MAX_PLAYLIST_DEPTH {
-            if !visited.insert(current.clone()) {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Playlist redirect/reference cycle detected at {current}"),
-                ));
-            }
+            for _depth in 0..MAX_PLAYLIST_DEPTH {
+                if !visited.insert(current.clone()) {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Playlist redirect/reference cycle detected at {current}"),
+                    ));
+                }
 
-            let resp = client
-                .get(&current)
-                .headers(header_map.clone())
-                .send()
-                .await
-                .map_err(|e| std::io::Error::other(format!("HTTP playlist GET failed: {e}")))?;
+                let resp = client
+                    .get(&current)
+                    .headers(header_map.clone())
+                    .timeout(timeout)
+                    .send()
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("HTTP playlist GET failed: {e}")))?;
 
             let status = resp.status();
             if !status.is_success() {
@@ -476,7 +593,10 @@ pub fn resolve_playlist_url(
             ErrorKind::InvalidData,
             format!("Exceeded max playlist nesting depth ({MAX_PLAYLIST_DEPTH})"),
         ))
-    })
+    },
+    cancel,
+    timeout,
+    )
 }
 
 impl Read for HttpRangeMediaSource {
@@ -580,13 +700,23 @@ fn map_http_status_err(status: StatusCode, url: &str) -> std::io::Error {
     std::io::Error::new(kind, format!("HTTP {} fetching {}", status.as_u16(), url))
 }
 
-async fn probe_http_stream(url: &str, headers: &HeaderMap) -> std::io::Result<ProbeResult> {
+async fn probe_http_stream(
+    url: &str,
+    headers: &HeaderMap,
+    timeout: Duration,
+) -> std::io::Result<ProbeResult> {
     let client = http_client()?;
 
     let mut head_content_type = None;
     let mut head_content_length = None;
 
-    if let Ok(head_resp) = client.head(url).headers(headers.clone()).send().await {
+    if let Ok(head_resp) = client
+        .head(url)
+        .headers(headers.clone())
+        .timeout(timeout.min(Duration::from_secs(4)))
+        .send()
+        .await
+    {
         let status = head_resp.status();
         if status.is_success() {
             let resp_headers = head_resp.headers();
@@ -617,6 +747,7 @@ async fn probe_http_stream(url: &str, headers: &HeaderMap) -> std::io::Result<Pr
     let resp = client
         .get(url)
         .headers(probe_headers)
+        .timeout(timeout)
         .send()
         .await
         .map_err(|e| std::io::Error::other(format!("HTTP probe GET failed: {e:?}")))?;

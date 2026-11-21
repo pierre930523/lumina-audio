@@ -18,12 +18,18 @@ class UiScaleController extends ChangeNotifier {
     1.50,
   ];
 
+  final File? prefsFileOverride;
+
+  UiScaleController({this.prefsFileOverride});
+
   double _scale = 1.0;
   bool _restoreOnStartup = true;
   bool _restoreOutputOnStartup = true;
   String? _lastOutputDeviceId;
   bool _rememberPlaybackPosition = true;
   bool _notifyOnResample = false;
+  bool _enableAudioVisualizer = true;
+  bool _minimizeToTrayOnClose = true;
 
   double get scale => _scale;
   bool get restoreOnStartup => _restoreOnStartup;
@@ -31,9 +37,13 @@ class UiScaleController extends ChangeNotifier {
   String? get lastOutputDeviceId => _lastOutputDeviceId;
   bool get rememberPlaybackPosition => _rememberPlaybackPosition;
   bool get notifyOnResample => _notifyOnResample;
+  bool get enableAudioVisualizer => _enableAudioVisualizer;
+  bool get minimizeToTrayOnClose => _minimizeToTrayOnClose;
   int get percentage => (_scale * 100).round();
 
-  File _prefsFile() {
+  File? _prefsFile() {
+    if (prefsFileOverride != null) return prefsFileOverride;
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return null;
     final localAppData = Platform.environment['LOCALAPPDATA'];
     if (localAppData != null && localAppData.isNotEmpty) {
       return File(
@@ -46,13 +56,19 @@ class UiScaleController extends ChangeNotifier {
   }
 
   Future<void> load({AudioService? audioService}) async {
-    if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    final file = _prefsFile();
+    if (file == null) {
       return;
     }
     try {
-      final file = _prefsFile();
-      if (await file.exists()) {
-        final decoded = jsonDecode(await file.readAsString());
+      final exists = prefsFileOverride != null
+          ? file.existsSync()
+          : await file.exists();
+      if (exists) {
+        final raw = prefsFileOverride != null
+            ? file.readAsStringSync()
+            : await file.readAsString();
+        final decoded = jsonDecode(raw);
         if (decoded is Map<String, dynamic>) {
           final restore = decoded['restore_on_startup'] != false;
           final savedScale = (decoded['scale'] as num?)?.toDouble();
@@ -66,6 +82,14 @@ class UiScaleController extends ChangeNotifier {
           _rememberPlaybackPosition =
               decoded['remember_playback_position'] != false;
           _notifyOnResample = decoded['notify_on_resample'] == true;
+          final visualizerVal =
+              decoded['enableAudioVisualizer'] ?? decoded['enable_audio_visualizer'];
+          _enableAudioVisualizer = visualizerVal is bool ? visualizerVal : true;
+          final minimizeToTrayVal =
+              decoded['minimize_to_tray_on_close'] ??
+              decoded['minimizeToTrayOnClose'];
+          _minimizeToTrayOnClose =
+              minimizeToTrayVal is bool ? minimizeToTrayVal : true;
           notifyListeners();
         }
       }
@@ -85,22 +109,28 @@ class UiScaleController extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    final file = _prefsFile();
+    if (file == null) {
       return;
     }
     try {
-      final file = _prefsFile();
+      final payload = jsonEncode({
+        'scale': double.parse(_scale.toStringAsFixed(2)),
+        'restore_on_startup': _restoreOnStartup,
+        'restore_output_on_startup': _restoreOutputOnStartup,
+        'last_output_device_id': _lastOutputDeviceId,
+        'remember_playback_position': _rememberPlaybackPosition,
+        'notify_on_resample': _notifyOnResample,
+        'enableAudioVisualizer': _enableAudioVisualizer,
+        'minimize_to_tray_on_close': _minimizeToTrayOnClose,
+      });
+      if (prefsFileOverride != null) {
+        file.parent.createSync(recursive: true);
+        file.writeAsStringSync(payload);
+        return;
+      }
       await file.parent.create(recursive: true);
-      await file.writeAsString(
-        jsonEncode({
-          'scale': double.parse(_scale.toStringAsFixed(2)),
-          'restore_on_startup': _restoreOnStartup,
-          'restore_output_on_startup': _restoreOutputOnStartup,
-          'last_output_device_id': _lastOutputDeviceId,
-          'remember_playback_position': _rememberPlaybackPosition,
-          'notify_on_resample': _notifyOnResample,
-        }),
-      );
+      await file.writeAsString(payload);
     } catch (_) {
       // Ignore write failures cleanly without blocking UI interaction.
     }
@@ -150,6 +180,20 @@ class UiScaleController extends ChangeNotifier {
   void setNotifyOnResample(bool enabled) {
     if (_notifyOnResample == enabled) return;
     _notifyOnResample = enabled;
+    notifyListeners();
+    _save();
+  }
+
+  void setEnableAudioVisualizer(bool enabled) {
+    if (_enableAudioVisualizer == enabled) return;
+    _enableAudioVisualizer = enabled;
+    notifyListeners();
+    _save();
+  }
+
+  void setMinimizeToTrayOnClose(bool enabled) {
+    if (_minimizeToTrayOnClose == enabled) return;
+    _minimizeToTrayOnClose = enabled;
     notifyListeners();
     _save();
   }

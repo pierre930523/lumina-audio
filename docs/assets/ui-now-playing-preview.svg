@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="100%" height="100%">
+  <defs>
+    <linearGradient id="meshBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="40%" stop-color="#2E1065"/>
+      <stop offset="75%" stop-color="#134E4A"/>
+      <stop offset="100%" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="albumArtGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="50%" stop-color="#7C3AED"/>
+      <stop offset="100%" stop-color="#DB2777"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="440" rx="18" fill="url(#meshBg)"/>
+  <rect x="1" y="1" width="1198" height="438" rx="17" fill="none" stroke="#475569" stroke-opacity="0.5" stroke-width="1.5"/>
+
+  <!-- Top Bar inside Now Playing -->
+  <rect x="24" y="18" width="38" height="34" rx="9" fill="#0B0F19" fill-opacity="0.55" stroke="#94A3B8" stroke-opacity="0.3"/>
+  <text x="43" y="40" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="16" font-weight="700">⌄</text>
+  <text x="78" y="40" fill="#CBD5E1" font-family="Segoe UI, Inter, sans-serif" font-size="13" font-weight="600">沉浸式播放頁 • 300ms 純 GPU 零掉幀過場 • 單實例無拖影封面與逐字歌詞</text>
+
+  <!-- Mode Switch Pills -->
+  <rect x="940" y="18" width="236" height="34" rx="9" fill="#0B0F19" fill-opacity="0.55" stroke="#94A3B8" stroke-opacity="0.25"/>
+  <rect x="944" y="22" width="76" height="26" rx="6" fill="#38BDF8" fill-opacity="0.25"/>
+  <text x="982" y="39" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">雙欄歌詞</text>
+  <text x="1058" y="39" text-anchor="middle" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="11.5">純歌詞</text>
+  <text x="1132" y="39" text-anchor="middle" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="11.5">純封面</text>
+
+  <!-- Left Column: Hero Album Cover & Metadata (Isolated RepaintBoundary) -->
+  <g transform="translate(110, 74)">
+    <rect x="0" y="0" width="230" height="230" rx="16" fill="url(#albumArtGrad)" stroke="#F8FAFC" stroke-opacity="0.22"/>
+    <circle cx="115" cy="115" r="52" fill="#0B0F19" fill-opacity="0.35" stroke="#F8FAFC" stroke-opacity="0.3" stroke-width="2"/>
+    <circle cx="115" cy="115" r="14" fill="#F8FAFC" fill-opacity="0.85"/>
+
+    <text x="115" y="262" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="21" font-weight="800">Comfortably Numb</text>
+    <text x="115" y="286" text-anchor="middle" fill="#CBD5E1" font-family="Segoe UI, Inter, sans-serif" font-size="13.5">Pink Floyd  •  The Wall (Hi-Res Master)</text>
+
+    <!-- Quality & Format Pills -->
+    <rect x="8" y="302" width="112" height="26" rx="13" fill="#0F172A" fill-opacity="0.8" stroke="#475569"/>
+    <text x="64" y="319" text-anchor="middle" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="600">FLAC 24/192kHz</text>
+
+    <rect x="128" y="302" width="102" height="26" rx="13" fill="#064E3B" stroke="#10B981"/>
+    <text x="179" y="319" text-anchor="middle" fill="#6EE7B7" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">● Lossless</text>
+  </g>
+
+  <!-- Right Column: Word-by-Word Synced LRC Lyrics Stage -->
+  <g transform="translate(460, 88)">
+    <text x="0" y="36" fill="#94A3B8" fill-opacity="0.4" font-family="Segoe UI, Inter, sans-serif" font-size="18" font-weight="600">Hello? Is there anybody in there?</text>
+    <text x="0" y="82" fill="#CBD5E1" fill-opacity="0.65" font-family="Segoe UI, Inter, sans-serif" font-size="20" font-weight="600">Just nod if you can hear me</text>
+
+    <!-- Active Highlighted Word-by-Word Lyric Line -->
+    <rect x="-16" y="106" width="620" height="58" rx="12" fill="#F8FAFC" fill-opacity="0.08" stroke="#38BDF8" stroke-opacity="0.4"/>
+    <text x="0" y="144" font-family="Segoe UI, Inter, sans-serif" font-size="27" font-weight="800">
+      <tspan fill="#38BDF8">There is no pain </tspan>
+      <tspan fill="#F8FAFC">you are receding</tspan>
+    </text>
+
+    <text x="0" y="204" fill="#CBD5E1" fill-opacity="0.65" font-family="Segoe UI, Inter, sans-serif" font-size="20" font-weight="600">A distant ship, smoke on the horizon</text>
+    <text x="0" y="250" fill="#94A3B8" fill-opacity="0.4" font-family="Segoe UI, Inter, sans-serif" font-size="18" font-weight="600">You are only coming through in waves</text>
+    <text x="0" y="292" fill="#64748B" fill-opacity="0.25" font-family="Segoe UI, Inter, sans-serif" font-size="17" font-weight="600">Your lips move, but I can't hear what you're saying</text>
+
+    <!-- Lyrics Toolbar Pill -->
+    <rect x="420" y="276" width="184" height="34" rx="17" fill="#0B0F19" fill-opacity="0.65" stroke="#475569"/>
+    <text x="512" y="297" text-anchor="middle" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="600">Aa 100%  |  -0.0s +  |  .LRC</text>
+  </g>
+</svg>

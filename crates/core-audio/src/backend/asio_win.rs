@@ -916,6 +916,12 @@ impl AsioRenderCore {
                 self.channels as u16,
                 self.sample_rate,
             );
+            crate::visualizer::global_tap().feed_wire(
+                &self.scratch[..aligned],
+                self.wire,
+                self.channels as u16,
+                self.sample_rate,
+            );
             let frames = if is_dsd_bit_packed {
                 ((aligned / wire_bpf) * 8) as u64
             } else {

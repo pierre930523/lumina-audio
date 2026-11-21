@@ -15,9 +15,9 @@ import 'package:lumina_app/shaders/mesh_fluid_painter.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
 import 'package:lumina_app/ui/lyrics/lyrics_view.dart';
 import 'package:lumina_app/ui/mini_player/floating_capsule.dart';
-import 'package:lumina_app/ui/now_playing/dynamic_waveform_bar.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_layout.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
+import 'package:lumina_app/ui/now_playing/spectrum_visualizer.dart';
 import 'package:lumina_app/ui/signal_path/quality_badge.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -998,8 +998,8 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // 1. DynamicWaveformBar is mounted
-        expect(find.byType(DynamicWaveformBar), findsOneWidget);
+        // 1. SpectrumVisualizerWidget is removed from NowPlayingOverlay
+        expect(find.byType(SpectrumVisualizerWidget), findsNothing);
 
         // 2. Desktop window caption buttons are mounted
         expect(find.byKey(const Key('btn_window_minimize')), findsOneWidget);

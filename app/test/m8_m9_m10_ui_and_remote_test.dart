@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -10,7 +11,17 @@ import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/ffi_audio_service.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
 import 'package:lumina_app/services/server_audio_service.dart';
+import 'package:lumina_app/services/streaming/providers/apple_music_provider.dart';
+import 'package:lumina_app/services/streaming/providers/deezer_provider.dart';
+import 'package:lumina_app/services/streaming/providers/qobuz_provider.dart';
+import 'package:lumina_app/services/streaming/providers/tidal_provider.dart';
+import 'package:lumina_app/services/streaming/providers/youtube_music_provider.dart';
+import 'package:lumina_app/services/streaming/secure_credential_store.dart';
+import 'package:lumina_app/services/streaming/streaming_manager.dart';
+import 'package:lumina_app/services/streaming/streaming_provider.dart';
 import 'package:lumina_app/ui/albums/album_detail_page.dart';
+import 'package:lumina_app/ui/home_screen.dart';
+import 'package:lumina_app/ui/theme/lumina_tokens.dart';
 import 'package:material_ui/material_ui.dart';
 
 Uint8List _buildMockDnsSdAnnouncement({
@@ -80,6 +91,26 @@ Uint8List _buildMockDnsSdAnnouncement({
   out.add(InternetAddress(ipv4).rawAddress);
 
   return out.toBytes();
+}
+
+Future<void> _pumpUntil(
+  WidgetTester tester,
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw TimeoutException('Condition not satisfied within $timeout');
+    }
+    await tester.pump(const Duration(milliseconds: 25));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(milliseconds: 25));
+  }
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 100));
 }
 
 Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
@@ -199,88 +230,9 @@ void main() {
       await _tapVisible(tester, find.byKey(const Key('btn_group_zones')));
       await _tapVisible(tester, find.byKey(const Key('btn_sync_zones')));
 
-      // 5. Providers & Remote Pairing UI
+      // 5. Network Shares & Remote Pairing UI
       await tester.tap(find.byKey(const Key('nav_tab_settings')));
       await tester.pumpAndSettle();
-
-      await _tapVisible(
-        tester,
-        find.byKey(const Key('provider_row_apple_music')),
-      );
-      await _enterVisibleText(
-        tester,
-        find.byKey(const Key('input_apple_music_token')),
-        'am_test_tok_123',
-      );
-      await _tapVisible(tester, find.byKey(const Key('btn_save_apple_music')));
-      expect(find.byKey(const Key('btn_logout_apple_music')), findsOneWidget);
-      expect(find.byKey(const Key('nav_streaming_apple_music')), findsOneWidget);
-
-      await _tapVisible(
-        tester,
-        find.byKey(const Key('provider_row_youtube_music')),
-      );
-      await _enterVisibleText(
-        tester,
-        find.byKey(const Key('input_youtube_music_token')),
-        'ytm_test_tok_123',
-      );
-      await _tapVisible(
-        tester,
-        find.byKey(const Key('btn_save_youtube_music')),
-      );
-      expect(
-        find.byKey(const Key('btn_logout_youtube_music')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const Key('nav_streaming_youtube_music')),
-        findsOneWidget,
-      );
-
-      // Click logged-in Apple Music sidebar entry, sync catalog, then log out
-      await tester.tap(find.byKey(const Key('nav_streaming_apple_music')));
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const Key('streaming_service_view_apple_music')),
-        findsOneWidget,
-      );
-      await tester.tap(find.byKey(const Key('btn_sync_streaming_provider')));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('streaming_track_am-001')), findsOneWidget);
-      await tester.tap(find.byKey(const Key('btn_streaming_open_settings')));
-      await tester.pumpAndSettle();
-      await _tapVisible(tester, find.byKey(const Key('btn_logout_apple_music')));
-      expect(find.byKey(const Key('nav_streaming_apple_music')), findsNothing);
-      expect(
-        find.byKey(const Key('nav_streaming_youtube_music')),
-        findsOneWidget,
-      );
-
-      await _tapVisible(tester, find.byKey(const Key('provider_row_qobuz')));
-      await _enterVisibleText(
-        tester,
-        find.byKey(const Key('input_qobuz_token')),
-        'qb_test_tok_123',
-      );
-      await _tapVisible(tester, find.byKey(const Key('btn_save_qobuz')));
-
-      await _tapVisible(tester, find.byKey(const Key('provider_row_tidal')));
-      await _tapVisible(tester, find.byKey(const Key('btn_tidal_pkce_start')));
-      await _enterVisibleText(
-        tester,
-        find.byKey(const Key('input_tidal_code')),
-        'auth_code_xyz',
-      );
-      await _tapVisible(tester, find.byKey(const Key('btn_tidal_pkce_complete')));
-
-      await _tapVisible(tester, find.byKey(const Key('provider_row_deezer')));
-      await _enterVisibleText(
-        tester,
-        find.byKey(const Key('input_deezer_arl')),
-        'arl_cookie_sample',
-      );
-      await _tapVisible(tester, find.byKey(const Key('btn_save_deezer')));
 
       await _tapVisible(tester, find.byKey(const Key('provider_row_web_dav')));
       await _enterVisibleText(
@@ -316,6 +268,338 @@ void main() {
 
       await _tapVisible(tester, find.byKey(const Key('btn_switch_local_mode')));
       expect(service.connectionMode, ConnectionMode.localOrUsbDac);
+    },
+  );
+
+  testWidgets(
+    'Desktop UI: Real StreamingManager + StreamingLoginDialog + StreamingServiceView integration against local HttpServer',
+    (WidgetTester tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(1280, 900);
+      final prevOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() {
+        HttpOverrides.global = prevOverrides;
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final server = (await tester.runAsync(() async {
+        final srv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        srv.listen((req) async {
+          final path = req.uri.path;
+          Future<void> replyJson(int status, Object body) async {
+            req.response.statusCode = status;
+            req.response.headers.contentType = ContentType.json;
+            req.response.write(jsonEncode(body));
+            await req.response.close();
+          }
+
+          if (path == '/v1/me/storefront') {
+            return replyJson(HttpStatus.ok, {
+              'data': [
+                {
+                  'id': 'tw',
+                  'attributes': {'name': 'Taiwan'},
+                },
+              ],
+            });
+          }
+          if (path == '/v1/me/library/songs') {
+            return replyJson(HttpStatus.ok, {
+              'data': [
+                {
+                  'id': 'am-001',
+                  'attributes': {
+                    'name': '群青',
+                    'artistName': 'YOASOBI',
+                    'albumName': 'THE BOOK 2',
+                    'durationInMillis': 248000,
+                  },
+                },
+              ],
+            });
+          }
+          if (path == '/v1/me/library/albums' ||
+              path == '/v1/me/library/playlists') {
+            return replyJson(HttpStatus.ok, {'data': []});
+          }
+          if (path == '/youtubei/v1/account/account_menu') {
+            return replyJson(HttpStatus.ok, {
+              'actions': [
+                {
+                  'openPopupAction': {
+                    'popup': {
+                      'multiPageMenuRenderer': {
+                        'header': {
+                          'activeAccountHeaderRenderer': {
+                            'accountName': {
+                              'runs': [
+                                {'text': 'Lumina YTM'},
+                              ],
+                            },
+                            'manageAccountTitle': {
+                              'runs': [
+                                {'text': 'YouTube Music Premium'},
+                              ],
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              ],
+            });
+          }
+          if (path == '/user/login') {
+            return replyJson(HttpStatus.ok, {
+              'user_auth_token': 'qb_live_tok_999',
+              'user': {
+                'id': 42,
+                'display_name': 'Qobuz Studio Member',
+                'credential': {'label': 'Studio Sublime'},
+              },
+            });
+          }
+          if (path == '/v1/oauth2/token') {
+            return replyJson(HttpStatus.ok, {
+              'access_token': 'tidal_acc_123',
+              'refresh_token': 'tidal_ref_123',
+              'expires_in': 3600,
+              'user_id': 777,
+            });
+          }
+          if (path == '/sessions') {
+            return replyJson(HttpStatus.ok, {'userId': 777, 'countryCode': 'TW'});
+          }
+          if (path == '/users/777') {
+            return replyJson(HttpStatus.ok, {
+              'id': 777,
+              'username': 'tidal_audiophile',
+            });
+          }
+          if (path == '/users/777/subscription') {
+            return replyJson(HttpStatus.ok, {
+              'subscription': {'type': 'HIFI'},
+              'highestSoundQuality': 'HI_RES_LOSSLESS',
+            });
+          }
+          if (path == '/gw') {
+            return replyJson(HttpStatus.ok, {
+              'results': {
+                'USER': {
+                  'USER_ID': 888,
+                  'BLOG_NAME': 'Deezer HiFi Listener',
+                  'OPTIONS': {'web_lossless': true, 'web_hq': true},
+                },
+              },
+            });
+          }
+          return replyJson(HttpStatus.notFound, {'error': 'Unhandled $path'});
+        });
+        return srv;
+      }))!;
+      addTearDown(() => server.close(force: true));
+
+      final baseUrl = 'http://127.0.0.1:${server.port}';
+      final credStore = MemorySecureCredentialStore();
+      final streamingManager = StreamingManager(
+        credentialStore: credStore,
+        providers: <String, StreamingProvider>{
+          'apple_music': AppleMusicProvider(
+            credentialStore: credStore,
+            apiBaseUrl: baseUrl,
+          ),
+          'youtube_music': YouTubeMusicProvider(
+            credentialStore: credStore,
+            baseUrl: baseUrl,
+          ),
+          'qobuz': QobuzProvider(
+            credentialStore: credStore,
+            baseUrl: baseUrl,
+          ),
+          'tidal': TidalProvider(
+            credentialStore: credStore,
+            authBaseUrl: baseUrl,
+            tokenBaseUrl: baseUrl,
+            apiBaseUrl: baseUrl,
+          ),
+          'deezer': DeezerProvider(
+            credentialStore: credStore,
+            gwUrl: '$baseUrl/gw',
+            apiBaseUrl: baseUrl,
+          ),
+        },
+      );
+      addTearDown(streamingManager.dispose);
+
+      final service = MockAudioService();
+      addTearDown(service.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: LuminaTokens.buildDarkTheme(),
+          home: HomeScreen(
+            audioService: service,
+            streamingManager: streamingManager,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('btn_open_settings_hub')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('nav_tab_settings')));
+      await tester.pumpAndSettle();
+
+      // Apple Music login via StreamingLoginDialog
+      await _tapVisible(tester, find.byKey(const Key('btn_signin_apple_music')));
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_toggle_manual_token_section')),
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_apple_dev_token')),
+        'dev_jwt_123',
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_apple_user_token')),
+        'user_tok_123',
+      );
+      await tester.ensureVisible(find.byKey(const Key('btn_dialog_submit_login')));
+      await tester.tap(find.byKey(const Key('btn_dialog_submit_login')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('btn_logout_apple_music')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('btn_logout_apple_music')), findsOneWidget);
+      expect(find.byKey(const Key('nav_streaming_apple_music')), findsOneWidget);
+
+      // YouTube Music login via StreamingLoginDialog
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_signin_youtube_music')),
+      );
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_toggle_manual_token_section')),
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_ytm_cookie')),
+        'SAPISID=abc123; SID=xyz789',
+      );
+      await tester.ensureVisible(find.byKey(const Key('btn_dialog_submit_login')));
+      await tester.tap(find.byKey(const Key('btn_dialog_submit_login')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('btn_logout_youtube_music')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('btn_logout_youtube_music')), findsOneWidget);
+      expect(find.byKey(const Key('nav_streaming_youtube_music')), findsOneWidget);
+
+      // Click logged-in Apple Music sidebar entry, sync catalog, then log out
+      await tester.tap(find.byKey(const Key('nav_streaming_apple_music')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('streaming_service_view_apple_music')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('btn_sync_streaming_provider')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('streaming_track_apple:am-001')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('streaming_track_apple:am-001')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('btn_streaming_open_settings')));
+      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.byKey(const Key('btn_logout_apple_music')));
+      expect(find.byKey(const Key('nav_streaming_apple_music')), findsNothing);
+      expect(find.byKey(const Key('nav_streaming_youtube_music')), findsOneWidget);
+
+      // Qobuz login
+      await _tapVisible(tester, find.byKey(const Key('btn_signin_qobuz')));
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_toggle_manual_token_section')),
+      );
+      await _tapVisible(tester, find.byKey(const Key('qobuz_byok_toggle')));
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_qobuz_app_id')),
+        '285473059',
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_qobuz_email')),
+        'qobuz@example.com',
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_qobuz_password')),
+        'pass123',
+      );
+      await tester.ensureVisible(find.byKey(const Key('btn_dialog_submit_login')));
+      await tester.tap(find.byKey(const Key('btn_dialog_submit_login')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('btn_logout_qobuz')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('btn_logout_qobuz')), findsOneWidget);
+
+      // Tidal PKCE manual fallback login
+      await _tapVisible(tester, find.byKey(const Key('btn_signin_tidal')));
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_toggle_manual_token_section')),
+      );
+      await _tapVisible(tester, find.byKey(const Key('tidal_byok_toggle')));
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_tidal_client_id')),
+        'tidal_client_1',
+      );
+      await _tapVisible(tester, find.byKey(const Key('tidal_manual_code_toggle')));
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_tidal_manual_code')),
+        'auth_code_xyz',
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_tidal_manual_verifier')),
+        'verifier_xyz_123456',
+      );
+      await tester.ensureVisible(find.byKey(const Key('btn_dialog_submit_login')));
+      await tester.tap(find.byKey(const Key('btn_dialog_submit_login')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('btn_logout_tidal')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('btn_logout_tidal')), findsOneWidget);
+
+      // Deezer ARL login
+      await _tapVisible(tester, find.byKey(const Key('btn_signin_deezer')));
+      await _tapVisible(
+        tester,
+        find.byKey(const Key('btn_toggle_manual_token_section')),
+      );
+      await _enterVisibleText(
+        tester,
+        find.byKey(const Key('input_deezer_arl')),
+        'arl_cookie_sample_999',
+      );
+      await tester.ensureVisible(find.byKey(const Key('btn_dialog_submit_login')));
+      await tester.tap(find.byKey(const Key('btn_dialog_submit_login')));
+      await _pumpUntil(
+        tester,
+        () => find.byKey(const Key('btn_logout_deezer')).evaluate().isNotEmpty,
+      );
+      expect(find.byKey(const Key('btn_logout_deezer')), findsOneWidget);
     },
   );
 

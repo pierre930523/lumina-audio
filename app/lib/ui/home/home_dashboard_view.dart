@@ -1,17 +1,22 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/playback_state.dart';
+import '../../models/streaming_models.dart';
+import '../../models/streaming_provider_meta.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/streaming/streaming_manager.dart';
 import '../artwork/album_artwork_view.dart';
 import '../theme/lumina_tokens.dart';
 
 class HomeDashboardView extends StatefulWidget {
   final AudioService audioService;
   final LibraryIndexCache? libraryCache;
+  final StreamingManager? streamingManager;
   final VoidCallback onOpenAlbums;
   final VoidCallback onOpenLibrary;
   final VoidCallback onOpenCredits;
@@ -19,7 +24,11 @@ class HomeDashboardView extends StatefulWidget {
   final VoidCallback onOpenZones;
   final VoidCallback? onOpenAppearance;
   final VoidCallback? onOpenLibrarySettings;
+  final VoidCallback? onOpenProviderSettings;
   final void Function(String albumId)? onOpenAlbumDetail;
+  final void Function(StreamingAlbum album)? onOpenStreamingAlbum;
+  final void Function(TrackInfo track, {List<TrackInfo>? queueContext})?
+      onPlayStreamingTrack;
   final double initialScrollOffset;
   final ValueChanged<double>? onScrollOffsetChanged;
 
@@ -27,6 +36,7 @@ class HomeDashboardView extends StatefulWidget {
     super.key,
     required this.audioService,
     this.libraryCache,
+    this.streamingManager,
     required this.onOpenAlbums,
     required this.onOpenLibrary,
     required this.onOpenCredits,
@@ -34,7 +44,10 @@ class HomeDashboardView extends StatefulWidget {
     required this.onOpenZones,
     this.onOpenAppearance,
     this.onOpenLibrarySettings,
+    this.onOpenProviderSettings,
     this.onOpenAlbumDetail,
+    this.onOpenStreamingAlbum,
+    this.onPlayStreamingTrack,
     this.initialScrollOffset = 0.0,
     this.onScrollOffsetChanged,
   });
@@ -49,6 +62,7 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
   List<AudioZoneInfo> _zones = const [];
   bool _showPlayedTab = false;
   int _carouselOffset = 0;
+  String _selectedRecFilter = 'all';
   late final ScrollController _scrollController;
 
   @override
@@ -57,6 +71,7 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
     _scrollController = ScrollController(
       initialScrollOffset: widget.initialScrollOffset,
     )..addListener(_handleScroll);
+    widget.streamingManager?.addListener(_onStreamingManagerChanged);
     if (widget.libraryCache != null && widget.libraryCache!.albums.isNotEmpty) {
       _albums = widget.libraryCache!.albums;
     }
@@ -64,11 +79,34 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
   }
 
   @override
+  void didUpdateWidget(covariant HomeDashboardView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.streamingManager, widget.streamingManager)) {
+      oldWidget.streamingManager?.removeListener(_onStreamingManagerChanged);
+      widget.streamingManager?.addListener(_onStreamingManagerChanged);
+    }
+  }
+
+  @override
   void dispose() {
+    widget.streamingManager?.removeListener(_onStreamingManagerChanged);
     _scrollController
       ..removeListener(_handleScroll)
       ..dispose();
     super.dispose();
+  }
+
+  void _onStreamingManagerChanged() {
+    if (!mounted) return;
+    final sm = widget.streamingManager;
+    if (sm != null && _selectedRecFilter != 'all') {
+      final filteredProvider = sm.providerFor(_selectedRecFilter);
+      if (filteredProvider?.authState != StreamingAuthState.connected &&
+          sm.recommendationErrorFor(_selectedRecFilter) == null) {
+        _selectedRecFilter = 'all';
+      }
+    }
+    setState(() {});
   }
 
   void _handleScroll() {
@@ -512,6 +550,11 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                 ),
                 const SizedBox(height: 16),
 
+                if (_shouldShowStreamingRecommendations()) ...[
+                  _buildStreamingRecommendationsSection(availW),
+                  const SizedBox(height: 16),
+                ],
+
                 // Adaptive Bottom Studio Workspace: Single Column (< 920) or Balanced Two Columns (>= 920)
                 if (availW >= 920)
                   IntrinsicHeight(
@@ -538,6 +581,673 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
           ),
         );
       },
+    );
+  }
+
+  bool _shouldShowStreamingRecommendations() {
+    final sm = widget.streamingManager;
+    if (sm == null) return false;
+    if (sm.connectedProviders.isNotEmpty) return true;
+    for (final kind in StreamingManager.providerOrder) {
+      if (sm.recommendationErrorFor(kind) != null) return true;
+      final p = sm.providerFor(kind);
+      if (p?.authState == StreamingAuthState.error && p?.lastError != null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Widget _buildStreamingRecommendationsSection(double availW) {
+    final sm = widget.streamingManager!;
+    final connected = sm.connectedProviders;
+    final activeFilter = _selectedRecFilter;
+    final recAlbums = sm.allRecommendedAlbums(filterKind: activeFilter);
+    final recTracks = sm.allRecommendedTracks(filterKind: activeFilter);
+    final isLoading = activeFilter == 'all'
+        ? sm.isAnyRecommendationLoading
+        : sm.isLoadingRecommendations(activeFilter);
+
+    final errorEntries = <({String kind, String message, bool isExpired})>[];
+    for (final kind in StreamingManager.providerOrder) {
+      if (activeFilter != 'all' && activeFilter != kind) continue;
+      final recErr = sm.recommendationErrorFor(kind);
+      final p = sm.providerFor(kind);
+      final authErr =
+          p?.authState == StreamingAuthState.error ? p?.lastError : null;
+      final msg = recErr ?? authErr;
+      if (msg != null && msg.trim().isNotEmpty) {
+        errorEntries.add((
+          kind: kind,
+          message: msg.trim(),
+          isExpired: sm.isRecommendationTokenExpired(kind) ||
+              msg.contains('401') ||
+              msg.contains('過期') ||
+              msg.contains('失效'),
+        ));
+      }
+    }
+
+    return Container(
+      key: const Key('home_streaming_recommendations_panel'),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+      decoration: BoxDecoration(
+        color: LuminaTokens.cardBg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: LuminaTokens.borderSubtle),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 18,
+                    color: LuminaTokens.accentBlue,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '串流平台個人化推薦',
+                    style: TextStyle(
+                      color: LuminaTokens.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (connected.length >= 2) ...[
+                    const SizedBox(width: 16),
+                    _buildRecFilterCapsule(
+                      key: const Key('rec_filter_all'),
+                      label: '全部 (${connected.length})',
+                      selected: activeFilter == 'all',
+                      onTap: () => setState(() => _selectedRecFilter = 'all'),
+                    ),
+                    for (final p in connected) ...[
+                      const SizedBox(width: 8),
+                      _buildRecFilterCapsule(
+                        key: Key('rec_filter_${p.kind}'),
+                        label: p.meta.name,
+                        leading: p.meta.buildBadge(boxSize: 16, borderRadius: 4),
+                        selected: activeFilter == p.kind,
+                        onTap: () =>
+                            setState(() => _selectedRecFilter = p.kind),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+              TextButton.icon(
+                key: const Key('btn_refresh_streaming_recommendations'),
+                onPressed: isLoading
+                    ? null
+                    : () {
+                        unawaited(sm.refreshAllRecommendations(force: true));
+                      },
+                icon: const Icon(Icons.refresh_rounded, size: 15),
+                label: const Text(
+                  '重新整理推薦',
+                  style: TextStyle(fontSize: 12),
+                ),
+                style: TextButton.styleFrom(
+                  foregroundColor: LuminaTokens.textSecondary,
+                  backgroundColor: LuminaTokens.cardElevatedBg,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  minimumSize: const Size(0, 30),
+                ),
+              ),
+            ],
+          ),
+          for (final err in errorEntries) ...[
+            const SizedBox(height: 12),
+            Container(
+              key: Key('rec_error_banner_${err.kind}'),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF3B1F2B).withValues(alpha: 0.72),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: const Color(0xFFF43F5E).withValues(alpha: 0.45),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    size: 18,
+                    color: Color(0xFFFB7185),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${StreamingProviderMeta.byKind(err.kind)?.name ?? err.kind}：'
+                      '${err.isExpired ? "授權權杖已過期或失效（${err.message}），請重新登入或重試。" : err.message}',
+                      style: const TextStyle(
+                        color: Color(0xFFFECDD3),
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    key: Key('btn_retry_rec_${err.kind}'),
+                    onPressed: () {
+                      unawaited(
+                        sm.refreshRecommendationsFor(err.kind, force: true),
+                      );
+                    },
+                    child: const Text(
+                      '重試',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (widget.onOpenProviderSettings != null)
+                    TextButton(
+                      key: Key('btn_rec_open_settings_${err.kind}'),
+                      onPressed: widget.onOpenProviderSettings,
+                      child: const Text(
+                        '帳號設定',
+                        style: TextStyle(
+                          color: Color(0xFF93C5FD),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+          if (connected.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            // Section 1: 為你推薦的專輯
+            Container(
+              key: const Key('home_recommended_albums_section'),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    '為你推薦的專輯',
+                    style: TextStyle(
+                      color: LuminaTokens.textPrimary,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (recAlbums.isEmpty && isLoading)
+                    _buildRecommendedAlbumsSkeleton(availW)
+                  else if (recAlbums.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        '目前尚無可顯示的推薦專輯。',
+                        style: TextStyle(
+                          color: LuminaTokens.textMuted,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    )
+                  else
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final innerW = constraints.maxWidth;
+                        final maxCols = innerW >= 1420
+                            ? 6
+                            : (innerW >= 1060
+                                ? 5
+                                : (innerW >= 760
+                                    ? 4
+                                    : (innerW >= 480 ? 3 : 2)));
+                        final visibleAlbums =
+                            recAlbums.take(maxCols * 2).toList();
+                        const spacing = 14.0;
+                        final cardWidth =
+                            (innerW - spacing * (maxCols - 1)) / maxCols;
+                        return Wrap(
+                          spacing: spacing,
+                          runSpacing: 16,
+                          children: [
+                            for (var i = 0; i < visibleAlbums.length; i++)
+                              SizedBox(
+                                width: cardWidth,
+                                child: _buildRecommendedAlbumCard(
+                                  visibleAlbums[i],
+                                  _coverPalettes[i % _coverPalettes.length],
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            // Section 2: 推薦歌曲
+            Container(
+              key: const Key('home_recommended_tracks_section'),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    '推薦歌曲',
+                    style: TextStyle(
+                      color: LuminaTokens.textPrimary,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  if (recTracks.isEmpty && isLoading)
+                    _buildRecommendedTracksSkeleton()
+                  else if (recTracks.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        '目前尚無可顯示的推薦歌曲。',
+                        style: TextStyle(
+                          color: LuminaTokens.textMuted,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    )
+                  else
+                    Column(
+                      children: [
+                        for (final track in recTracks.take(10))
+                          _buildRecommendedTrackTile(
+                            track,
+                            recTracks,
+                          ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecFilterCapsule({
+    required Key key,
+    required String label,
+    Widget? leading,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      key: key,
+      borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected
+              ? LuminaTokens.accentBlue.withValues(alpha: 0.22)
+              : LuminaTokens.cardElevatedBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+          border: Border.all(
+            color: selected
+                ? LuminaTokens.accentBlue
+                : LuminaTokens.borderControl,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (leading != null) ...[
+              leading,
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: TextStyle(
+                color: selected
+                    ? LuminaTokens.textPrimary
+                    : LuminaTokens.textSecondary,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecommendedAlbumsSkeleton(double availW) {
+    final cols = availW >= 1060 ? 5 : (availW >= 760 ? 4 : 3);
+    return Row(
+      key: const Key('rec_albums_skeleton'),
+      children: [
+        for (var i = 0; i < cols; i++) ...[
+          if (i > 0) const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AspectRatio(
+                  aspectRatio: 1,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  height: 12,
+                  width: 90,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  height: 10,
+                  width: 60,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildRecommendedTracksSkeleton() {
+    return Column(
+      key: const Key('rec_tracks_skeleton'),
+      children: [
+        for (var i = 0; i < 4; i++)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        height: 12,
+                        width: 160,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        height: 10,
+                        width: 110,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.05),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildRecommendedAlbumCard(
+    StreamingAlbum album,
+    List<Color> palette,
+  ) {
+    final meta = StreamingProviderMeta.byKind(album.providerKind);
+    final cover = album.coverUrl?.trim();
+    return InkWell(
+      key: Key('rec_album_card_${album.providerKind}_${album.id}'),
+      borderRadius: BorderRadius.circular(8),
+      onTap: () {
+        if (widget.onOpenStreamingAlbum != null) {
+          widget.onOpenStreamingAlbum!(album);
+        } else {
+          widget.onOpenAlbumDetail?.call(
+            'streaming:${album.providerKind}:${album.id}',
+          );
+        }
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AspectRatio(
+            aspectRatio: 1,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: (cover != null && cover.isNotEmpty)
+                      ? Image.network(
+                          cover,
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
+                          errorBuilder: (_, _, _) =>
+                              _buildAlbumCoverFallback(palette),
+                        )
+                      : _buildAlbumCoverFallback(palette),
+                ),
+                if (meta != null)
+                  Positioned(
+                    top: 6,
+                    right: 6,
+                    child: Container(
+                      key: Key(
+                        'rec_album_badge_${album.providerKind}_${album.id}',
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(6),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black54,
+                            blurRadius: 4,
+                            offset: Offset(0, 1),
+                          ),
+                        ],
+                      ),
+                      child: meta.buildBadge(boxSize: 22, borderRadius: 5),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            album.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: LuminaTokens.textPrimary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            album.artist,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: LuminaTokens.textMuted,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAlbumCoverFallback(List<Color> palette) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: palette,
+        ),
+      ),
+      child: const Center(
+        child: Icon(
+          Icons.album_rounded,
+          size: 36,
+          color: Colors.white70,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecommendedTrackTile(
+    TrackInfo track,
+    List<TrackInfo> queueContext,
+  ) {
+    final sm = widget.streamingManager;
+    final meta = sm?.resolveProviderForTrack(track)?.meta;
+    final cover = (track.coverUrl ?? track.albumArtUrl)?.trim();
+    final mins = track.duration.inMinutes;
+    final secs = (track.duration.inSeconds % 60).toString().padLeft(2, '0');
+    final durationLabel = track.duration > Duration.zero ? '$mins:$secs' : '--:--';
+
+    return InkWell(
+      key: Key('rec_track_tile_${track.id}'),
+      borderRadius: BorderRadius.circular(8),
+      onTap: () {
+        if (widget.onPlayStreamingTrack != null) {
+          widget.onPlayStreamingTrack!(track, queueContext: queueContext);
+        } else {
+          widget.audioService.play(track: track);
+        }
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: SizedBox(
+                width: 40,
+                height: 40,
+                child: (cover != null && cover.isNotEmpty)
+                    ? Image.network(
+                        cover,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        errorBuilder: (_, _, _) => Container(
+                          color: LuminaTokens.cardElevatedBg,
+                          child: const Icon(
+                            Icons.music_note_rounded,
+                            size: 18,
+                            color: LuminaTokens.textMuted,
+                          ),
+                        ),
+                      )
+                    : Container(
+                        color: LuminaTokens.cardElevatedBg,
+                        child: const Icon(
+                          Icons.music_note_rounded,
+                          size: 18,
+                          color: LuminaTokens.textMuted,
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            if (meta != null) ...[
+              Container(
+                key: Key('rec_track_badge_${track.id}'),
+                child: meta.buildBadge(boxSize: 18, borderRadius: 4),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              flex: 4,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    track.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    track.artist,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.textMuted,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 3,
+              child: Text(
+                track.album,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: LuminaTokens.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              durationLabel,
+              style: const TextStyle(
+                color: LuminaTokens.textMuted,
+                fontSize: 12,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

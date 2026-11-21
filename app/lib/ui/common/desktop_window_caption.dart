@@ -10,12 +10,14 @@ import '../theme/lumina_tokens.dart';
 /// Features Windows 11-style hover states, red close button highlight, and tooltips.
 class DesktopWindowCaptionButtons extends StatefulWidget {
   final DesktopWindowController? controller;
+  final dynamic audioService;
   final Color? color;
   final double height;
 
   const DesktopWindowCaptionButtons({
     super.key,
     this.controller,
+    this.audioService,
     this.color,
     this.height = 36.0,
   });
@@ -29,26 +31,31 @@ class _DesktopWindowCaptionButtonsState
     extends State<DesktopWindowCaptionButtons> with WidgetsBindingObserver {
   late DesktopWindowController _controller;
   bool _isMaximized = false;
+  bool _isFullScreen = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _controller = widget.controller ?? DesktopWindowController.instance;
-    _checkMaximizedState();
+    _controller.isFullScreenNotifier.addListener(_onFullScreenChanged);
+    _checkWindowState();
   }
 
   @override
   void didUpdateWidget(DesktopWindowCaptionButtons oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.controller != oldWidget.controller) {
+      _controller.isFullScreenNotifier.removeListener(_onFullScreenChanged);
       _controller = widget.controller ?? DesktopWindowController.instance;
-      _checkMaximizedState();
+      _controller.isFullScreenNotifier.addListener(_onFullScreenChanged);
+      _checkWindowState();
     }
   }
 
   @override
   void dispose() {
+    _controller.isFullScreenNotifier.removeListener(_onFullScreenChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -56,13 +63,23 @@ class _DesktopWindowCaptionButtonsState
   @override
   void didChangeMetrics() {
     super.didChangeMetrics();
-    _checkMaximizedState();
+    _checkWindowState();
   }
 
-  Future<void> _checkMaximizedState() async {
+  void _onFullScreenChanged() {
+    if (mounted && _controller.isFullScreenNotifier.value != _isFullScreen) {
+      setState(() => _isFullScreen = _controller.isFullScreenNotifier.value);
+    }
+  }
+
+  Future<void> _checkWindowState() async {
     final max = await _controller.isMaximized();
-    if (mounted && max != _isMaximized) {
-      setState(() => _isMaximized = max);
+    final full = await _controller.isFullScreen();
+    if (mounted && (max != _isMaximized || full != _isFullScreen)) {
+      setState(() {
+        _isMaximized = max;
+        _isFullScreen = full;
+      });
     }
   }
 
@@ -84,39 +101,62 @@ class _DesktopWindowCaptionButtonsState
         children: [
           _CaptionButton(
             key: const Key('btn_window_minimize'),
-          tooltip: '最小化',
-          icon: Icons.remove_rounded,
-          iconSize: 15,
-          defaultColor: defaultColor,
-          hoverColor: Colors.white.withValues(alpha: 0.12),
-          onTap: () => _controller.minimize(),
-        ),
-        _CaptionButton(
-          key: const Key('btn_window_maximize'),
-          tooltip: _isMaximized ? '向下還原' : '最大化',
-          icon: _isMaximized
-              ? Icons.filter_none_rounded
-              : Icons.crop_square_rounded,
-          iconSize: 13,
-          defaultColor: defaultColor,
-          hoverColor: Colors.white.withValues(alpha: 0.12),
-          onTap: () async {
-            await _controller.toggleMaximize();
-            await _checkMaximizedState();
-          },
-        ),
-        _CaptionButton(
-          key: const Key('btn_window_close'),
-          tooltip: '關閉',
-          icon: Icons.close_rounded,
-          iconSize: 16,
-          defaultColor: defaultColor,
-          hoverColor: const Color(0xFFE81123),
-          hoverIconColor: Colors.white,
-          onTap: () => _controller.close(),
-        ),
-      ],
-    ),
+            tooltip: '最小化',
+            icon: Icons.remove_rounded,
+            iconSize: 15,
+            defaultColor: defaultColor,
+            hoverColor: Colors.white.withValues(alpha: 0.12),
+            onTap: () {
+              widget.audioService?.setWindowMinimized(true);
+              _controller.minimize();
+            },
+          ),
+          _CaptionButton(
+            key: const Key('btn_window_fullscreen'),
+            tooltip: _isFullScreen ? '退出全螢幕 (Esc)' : '全螢幕 (F11)',
+            icon: _isFullScreen
+                ? Icons.fullscreen_exit_rounded
+                : Icons.fullscreen_rounded,
+            iconSize: 17,
+            defaultColor: defaultColor,
+            hoverColor: Colors.white.withValues(alpha: 0.12),
+            onTap: () async {
+              await _controller.toggleFullScreen();
+              await _checkWindowState();
+            },
+          ),
+          _CaptionButton(
+            key: const Key('btn_window_maximize'),
+            tooltip: _isFullScreen
+                ? '退出全螢幕 (Esc)'
+                : (_isMaximized ? '向下還原' : '最大化'),
+            icon: _isFullScreen || _isMaximized
+                ? Icons.filter_none_rounded
+                : Icons.crop_square_rounded,
+            iconSize: 13,
+            defaultColor: defaultColor,
+            hoverColor: Colors.white.withValues(alpha: 0.12),
+            onTap: () async {
+              if (_isFullScreen) {
+                await _controller.setFullScreen(false);
+              } else {
+                await _controller.toggleMaximize();
+              }
+              await _checkWindowState();
+            },
+          ),
+          _CaptionButton(
+            key: const Key('btn_window_close'),
+            tooltip: '關閉',
+            icon: Icons.close_rounded,
+            iconSize: 16,
+            defaultColor: defaultColor,
+            hoverColor: const Color(0xFFE81123),
+            hoverIconColor: Colors.white,
+            onTap: () => _controller.close(),
+          ),
+        ],
+      ),
     );
   }
 }

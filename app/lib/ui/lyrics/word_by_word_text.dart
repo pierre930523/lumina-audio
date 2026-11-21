@@ -7,6 +7,7 @@ class WordByWordText extends StatelessWidget {
   final Duration currentPosition;
   final bool isActiveLine;
   final TextAlign textAlign;
+  final double fontScale;
 
   const WordByWordText({
     super.key,
@@ -14,6 +15,7 @@ class WordByWordText extends StatelessWidget {
     required this.currentPosition,
     required this.isActiveLine,
     this.textAlign = TextAlign.center,
+    this.fontScale = 1.0,
   });
 
   @override
@@ -26,7 +28,7 @@ class WordByWordText extends StatelessWidget {
           color: isActiveLine
               ? LuminaTokens.textPrimary
               : LuminaTokens.textSecondary,
-          fontSize: isActiveLine ? 28 : 21,
+          fontSize: (isActiveLine ? 28.0 : 21.0) * fontScale,
           fontWeight: isActiveLine ? FontWeight.w800 : FontWeight.w600,
           height: 1.4,
         ),
@@ -42,7 +44,7 @@ class WordByWordText extends StatelessWidget {
             text: word.text,
             style: TextStyle(
               color: sung ? LuminaTokens.textPrimary : LuminaTokens.textMuted,
-              fontSize: 28,
+              fontSize: 28.0 * fontScale,
               fontWeight: sung ? FontWeight.w800 : FontWeight.w600,
               height: 1.4,
             ),

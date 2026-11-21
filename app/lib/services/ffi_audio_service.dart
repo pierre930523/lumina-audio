@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/audio_format.dart';
 import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
@@ -12,7 +14,24 @@ import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'mock_audio_service.dart';
 import 'per_device_playback_tracker.dart';
+import 'playback_persistence_service.dart';
 import 'server_audio_service.dart';
+import 'visualizer_lifecycle_coordinator.dart';
+
+typedef LuminaVisualizerSetEnabledNative = ffi.Int32 Function(ffi.Int32);
+typedef LuminaVisualizerSetEnabledDart = int Function(int);
+
+typedef LuminaVisualizerIsEnabledNative = ffi.Int32 Function();
+typedef LuminaVisualizerIsEnabledDart = int Function();
+
+typedef LuminaVisualizerGetBandsNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Float>,
+  ffi.Uint32,
+);
+typedef LuminaVisualizerGetBandsDart = int Function(
+  ffi.Pointer<ffi.Float>,
+  int,
+);
 
 typedef _LuminaVoidIntNative = ffi.Int32 Function();
 typedef _LuminaVoidIntDart = int Function();
@@ -65,6 +84,15 @@ typedef _LuminaSetVolumeDart = int Function(double);
 
 typedef _LuminaSeekNative = ffi.Int32 Function(ffi.Uint64);
 typedef _LuminaSeekDart = int Function(int);
+
+typedef _LuminaPlayAsyncNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Uint64,
+);
+typedef _LuminaPlayAsyncDart = int Function(ffi.Pointer<ffi.Uint8>, int);
+
+typedef _LuminaCancelPendingNative = ffi.Int32 Function(ffi.Uint64);
+typedef _LuminaCancelPendingDart = int Function(int);
 
 typedef _LuminaVoidU64Native = ffi.Uint64 Function();
 typedef _LuminaVoidU64Dart = int Function();
@@ -184,6 +212,9 @@ class FfiAudioService implements AudioService {
   _LuminaVoidIntDart? _playbackResumeFn;
   _LuminaVoidPtrDart? _playbackGetStateJsonFn;
   _LuminaVoidIntDart? _playbackReconnectDeviceFn;
+  _LuminaPlayAsyncDart? _playbackPlayAsyncFn;
+  _LuminaCancelPendingDart? _playbackCancelPendingFn;
+  _LuminaVoidU64Dart? _playbackGetActiveRequestIdFn;
   _LuminaArtworkGetDart? _artworkGetFn;
   _LuminaStrStrIntDart? _artworkSetUserCoverFn;
   _LuminaStrIntDart? _artworkClearUserCoverFn;
@@ -191,6 +222,44 @@ class FfiAudioService implements AudioService {
   _LuminaStrPtrDart? _lyricsGetFn;
   _LuminaStrStrIntDart? _lyricsSetUserFileFn;
   _LuminaStrIntDart? _lyricsClearUserFileFn;
+
+  // Real-time Visualizer FFI function pointers
+  LuminaVisualizerSetEnabledDart? _visualizerSetEnabledFn;
+  LuminaVisualizerIsEnabledDart? _visualizerIsEnabledFn;
+  LuminaVisualizerGetBandsDart? _visualizerGetBandsFn;
+
+  VisualizerLifecycleCoordinator? _visualizerCoordinator;
+  bool _visualizerSettingEnabled = true;
+  bool _isNowPlayingVisible = false;
+  bool _isWindowMinimized = false;
+
+  VisualizerLifecycleCoordinator? get visualizerCoordinator =>
+      _visualizerCoordinator;
+  LuminaVisualizerSetEnabledDart? get visualizerSetEnabledFn =>
+      _visualizerSetEnabledFn;
+  LuminaVisualizerIsEnabledDart? get visualizerIsEnabledFn =>
+      _visualizerIsEnabledFn;
+  LuminaVisualizerGetBandsDart? get visualizerGetBandsFn =>
+      _visualizerGetBandsFn;
+
+  ValueListenable<Float32List> get visualizerBandsNotifier =>
+      _visualizerCoordinator?.bandsNotifier ??
+      AudioServiceVisualizerExt.defaultVisualizerNotifier;
+
+  void setVisualizerSettingEnabled(bool enabled) {
+    _visualizerSettingEnabled = enabled;
+    _visualizerCoordinator?.setSettingEnabled(enabled);
+  }
+
+  void setNowPlayingVisible(bool visible) {
+    _isNowPlayingVisible = visible;
+    _visualizerCoordinator?.setVisible(visible);
+  }
+
+  void setWindowMinimized(bool minimized) {
+    _isWindowMinimized = minimized;
+    _visualizerCoordinator?.setMinimized(minimized);
+  }
 
   List<LyricLine> _currentLyrics = const [];
 
@@ -204,15 +273,24 @@ class FfiAudioService implements AudioService {
   Timer? _positionTimer;
   String? _lastError;
   bool _isReroutingDevice = false;
+  bool _hasRestoredSession = false;
+  bool _needsLoadOnResume = false;
+  bool _disposed = false;
   Duration? _pendingResumePosition;
   bool _strictBitPerfect = false;
   double _savedNormalVolume = 0.85;
   DsdOutputModeOption _dsdOutputMode = DsdOutputModeOption.auto;
   bool _systemOutputActive = true;
   int _preferredBufferFrames = 512;
+  StreamingTrackHandler? _streamingTrackHandler;
+  int _activeRequestId = 0;
 
   @override
   String? get lastError => _lastError;
+
+  int get nativeActiveRequestId => isNativeBound
+      ? (_playbackGetActiveRequestIdFn?.call() ?? _activeRequestId)
+      : _activeRequestId;
 
   @override
   bool get isSystemOutputActive {
@@ -262,7 +340,23 @@ class FfiAudioService implements AudioService {
     _state = _delegate.currentState;
     _signalPath = _delegate.currentSignalPath;
     _queue = List<TrackInfo>.from(_delegate.queue);
+    _setupVisualizerCoordinator();
     _tryLoadNativeLibrary(headless: headless, databasePath: databasePath);
+  }
+
+  void _setupVisualizerCoordinator() {
+    _visualizerCoordinator = VisualizerLifecycleCoordinator(
+      enabled: _visualizerSettingEnabled,
+      isPlaying: _state.status == PlaybackStatus.playing,
+      isVisible: _isNowPlayingVisible,
+      isMinimized: _isWindowMinimized,
+      bridge: _FfiVisualizerEngineBridge(this),
+    );
+    _delegate.stateStream.listen((state) {
+      if (!isNativeBound) {
+        _visualizerCoordinator?.setPlaying(state.status == PlaybackStatus.playing);
+      }
+    });
   }
 
   void _tryLoadNativeLibrary({required bool headless, String? databasePath}) {
@@ -412,6 +506,9 @@ class FfiAudioService implements AudioService {
       _playbackResumeFn = tryLookup(() => dylib.lookupFunction<_LuminaVoidIntNative, _LuminaVoidIntDart>('lumina_playback_resume'));
       _playbackGetStateJsonFn = tryLookup(() => dylib.lookupFunction<_LuminaVoidPtrNative, _LuminaVoidPtrDart>('lumina_playback_get_state_json'));
       _playbackReconnectDeviceFn = tryLookup(() => dylib.lookupFunction<_LuminaVoidIntNative, _LuminaVoidIntDart>('lumina_playback_reconnect_device'));
+      _playbackPlayAsyncFn = tryLookup(() => dylib.lookupFunction<_LuminaPlayAsyncNative, _LuminaPlayAsyncDart>('lumina_playback_play_async'));
+      _playbackCancelPendingFn = tryLookup(() => dylib.lookupFunction<_LuminaCancelPendingNative, _LuminaCancelPendingDart>('lumina_playback_cancel_pending'));
+      _playbackGetActiveRequestIdFn = tryLookup(() => dylib.lookupFunction<_LuminaVoidU64Native, _LuminaVoidU64Dart>('lumina_playback_get_active_request_id'));
       _artworkGetFn = tryLookup(() => dylib.lookupFunction<_LuminaArtworkGetNative, _LuminaArtworkGetDart>('lumina_artwork_get'));
       _artworkSetUserCoverFn = tryLookup(() => dylib.lookupFunction<_LuminaStrStrIntNative, _LuminaStrStrIntDart>('lumina_artwork_set_user_cover'));
       _artworkClearUserCoverFn = tryLookup(() => dylib.lookupFunction<_LuminaStrIntNative, _LuminaStrIntDart>('lumina_artwork_clear_user_cover'));
@@ -420,14 +517,23 @@ class FfiAudioService implements AudioService {
       _lyricsSetUserFileFn = tryLookup(() => dylib.lookupFunction<_LuminaStrStrIntNative, _LuminaStrStrIntDart>('lumina_lyrics_set_user_file'));
       _lyricsClearUserFileFn = tryLookup(() => dylib.lookupFunction<_LuminaStrIntNative, _LuminaStrIntDart>('lumina_lyrics_clear_user_file'));
 
+      _visualizerSetEnabledFn = tryLookup(() => dylib.lookupFunction<
+          LuminaVisualizerSetEnabledNative,
+          LuminaVisualizerSetEnabledDart>('lumina_visualizer_set_enabled'));
+      _visualizerIsEnabledFn = tryLookup(() => dylib.lookupFunction<
+          LuminaVisualizerIsEnabledNative,
+          LuminaVisualizerIsEnabledDart>('lumina_visualizer_is_enabled'));
+      _visualizerGetBandsFn = tryLookup(() => dylib.lookupFunction<
+          LuminaVisualizerGetBandsNative,
+          LuminaVisualizerGetBandsDart>('lumina_visualizer_get_bands'));
+
       final initRc = headless ? _initHeadlessFn!() : _initFn!();
       if (initRc != 0) {
         _dylib = null;
         return;
       }
 
-      final dbPath = databasePath ??
-          '${Directory.systemTemp.path}${Platform.pathSeparator}lumina_desktop_library.db';
+      final dbPath = resolveDatabasePath(databasePathOverride: databasePath);
       _withNativeUtf8(dbPath, (ptr) => _libInitFn!(ptr));
       _setVolumeFn?.call(_state.volume);
       _reloadTracksFromNative();
@@ -436,6 +542,61 @@ class FfiAudioService implements AudioService {
     } catch (_) {
       _dylib = null;
     }
+  }
+
+  /// Resolves the SQLite library DB path (defaults to %LOCALAPPDATA%\LuminaAudio\lumina_desktop_library.db),
+  /// migrating any legacy temp-directory DB on first run while keeping FLUTTER_TEST isolated.
+  @visibleForTesting
+  static String resolveDatabasePath({
+    String? databasePathOverride,
+    String? localAppDataOverride,
+    String? tempDirOverride,
+    bool? isFlutterTestOverride,
+  }) {
+    if (databasePathOverride != null && databasePathOverride.isNotEmpty) {
+      return databasePathOverride;
+    }
+    final isTest =
+        isFlutterTestOverride ?? Platform.environment.containsKey('FLUTTER_TEST');
+    final tempRoot = tempDirOverride ?? Directory.systemTemp.path;
+    final legacyPath =
+        '$tempRoot${Platform.pathSeparator}lumina_desktop_library.db';
+    if (isTest) {
+      return legacyPath;
+    }
+
+    final localAppData =
+        localAppDataOverride ?? Platform.environment['LOCALAPPDATA'];
+    if (localAppData == null || localAppData.isEmpty) {
+      return legacyPath;
+    }
+
+    final appDirPath = '$localAppData${Platform.pathSeparator}LuminaAudio';
+    final targetPath =
+        '$appDirPath${Platform.pathSeparator}lumina_desktop_library.db';
+    try {
+      final appDir = Directory(appDirPath);
+      if (!appDir.existsSync()) {
+        appDir.createSync(recursive: true);
+      }
+      final targetFile = File(targetPath);
+      final legacyFile = File(legacyPath);
+      if (!targetFile.existsSync() && legacyFile.existsSync()) {
+        legacyFile.copySync(targetPath);
+        for (final suffix in const ['-wal', '-shm']) {
+          final legacySidecar = File('$legacyPath$suffix');
+          final targetSidecar = File('$targetPath$suffix');
+          if (legacySidecar.existsSync() && !targetSidecar.existsSync()) {
+            try {
+              legacySidecar.copySync(targetSidecar.path);
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {
+      return legacyPath;
+    }
+    return targetPath;
   }
 
   void _syncNativeDevicesAndZones() {
@@ -608,6 +769,27 @@ class FfiAudioService implements AudioService {
     final raw = _takeRustString(ptr);
     final parsed = _parseTrackListJson(raw);
     if (parsed.isNotEmpty) {
+      if (_hasRestoredSession && _state.track != null) {
+        final active = _state.track!;
+        final nextQueue = List<TrackInfo>.from(parsed);
+        final idx = PlaybackPersistenceService.findTrackIndex(nextQueue, active);
+        if (idx >= 0) {
+          final matched = nextQueue[idx].duration <= Duration.zero &&
+                  active.duration > Duration.zero
+              ? nextQueue[idx].copyWith(duration: active.duration)
+              : nextQueue[idx];
+          nextQueue[idx] = matched;
+          _queue = nextQueue;
+          _currentIndex = idx;
+          _state = _state.copyWith(track: matched);
+        } else {
+          nextQueue.insert(0, active);
+          _queue = nextQueue;
+          _currentIndex = 0;
+        }
+        return;
+      }
+
       _queue = parsed;
       if (_currentIndex >= _queue.length) {
         _currentIndex = 0;
@@ -663,6 +845,7 @@ class FfiAudioService implements AudioService {
     if (!_positionController.isClosed) {
       _positionController.add(_state.position);
     }
+    _visualizerCoordinator?.setPlaying(_state.status == PlaybackStatus.playing);
   }
 
   List<LyricLine> _parseLyricsJson(String rawJson) {
@@ -747,7 +930,21 @@ class FfiAudioService implements AudioService {
             final deviceLost = json['device_lost'] == true;
             final lastErr = json['last_error']?.toString();
             final clockSrc = json['clock_source']?.toString() ?? _state.clockSource;
-            final status = PlaybackStatus.fromCode(stateCode);
+            final playReqId = (json['play_request_id'] as num?)?.toInt() ?? 0;
+            final loadedReqId = (json['loaded_request_id'] as num?)?.toInt() ?? 0;
+            if (_activeRequestId > 0 &&
+                playReqId > 0 &&
+                playReqId != _activeRequestId) {
+              return;
+            }
+            var status = PlaybackStatus.fromCode(stateCode);
+            if (_activeRequestId > 0 && playReqId > loadedReqId) {
+              status = PlaybackStatus.loading;
+            }
+
+            final enteredPlaying =
+                _state.status != PlaybackStatus.playing &&
+                status == PlaybackStatus.playing;
 
             final updatedTrack = _state.track != null && durMs > 0
                 ? _state.track!.copyWith(duration: Duration(milliseconds: durMs))
@@ -772,9 +969,16 @@ class FfiAudioService implements AudioService {
                 isSeeking: isSeeking,
                 deviceLost: deviceLost,
                 lastError: lastErr,
+                clearLastError: lastErr == null || lastErr.isEmpty,
                 clockSource: clockSrc,
               ),
             );
+            if (enteredPlaying) {
+              _refreshSignalPath();
+              if (updatedTrack != null && _currentLyrics.isEmpty) {
+                _loadLyricsForTrack(updatedTrack);
+              }
+            }
             return;
           } catch (_) {}
         }
@@ -854,20 +1058,221 @@ class FfiAudioService implements AudioService {
   }
 
   @override
-  Future<void> play({TrackInfo? track}) async {
-    _currentLyrics = const [];
-    if (!isNativeBound) {
-      return _delegate.play(track: track);
-    }
-    final target = track ?? _state.track ?? (_queue.isNotEmpty ? _queue.first : null);
-    if (target == null) return;
+  void setStreamingTrackHandler(StreamingTrackHandler? handler) {
+    _streamingTrackHandler = handler;
+    _delegate.setStreamingTrackHandler(handler);
+  }
 
-    final idx = _queue.indexWhere((t) => t.id == target.id);
-    if (idx >= 0) {
+  @override
+  void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      _remoteClient!.beginOptimisticTrackLoad(track, queue: queue);
+      return;
+    }
+    if (!isNativeBound) {
+      _delegate.beginOptimisticTrackLoad(track, queue: queue);
+      return;
+    }
+    _positionTimer?.cancel();
+    _currentLyrics = const [];
+    _needsLoadOnResume = false;
+    _pendingResumePosition = null;
+    _lastError = null;
+    if (queue != null && queue.isNotEmpty) {
+      _queue = List<TrackInfo>.from(queue);
+    }
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx < 0) {
+      _queue.insert(0, track);
+      _currentIndex = 0;
+    } else {
       _currentIndex = idx;
     }
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.loading,
+        track: track,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+  }
 
-    final payload = jsonEncode({
+  @override
+  void failOptimisticTrackLoad(TrackInfo track, String message) {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      _remoteClient!.failOptimisticTrackLoad(track, message);
+      return;
+    }
+    if (!isNativeBound) {
+      _delegate.failOptimisticTrackLoad(track, message);
+      return;
+    }
+    _positionTimer?.cancel();
+    _lastError = message;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.error,
+        track: track,
+        position: Duration.zero,
+        lastError: message,
+      ),
+    );
+  }
+
+  @override
+  Future<void> cancelPendingPlayback() async {
+    _positionTimer?.cancel();
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      await _remoteClient!.cancelPendingPlayback();
+      return;
+    }
+    if (!isNativeBound) {
+      await _delegate.cancelPendingPlayback();
+      return;
+    }
+    _playbackCancelPendingFn?.call(0);
+  }
+
+  @override
+  Future<void> play({TrackInfo? track}) {
+    if (_streamingTrackHandler != null) {
+      final candidate =
+          track ?? _state.track ?? (_queue.isNotEmpty ? _queue.first : null);
+      if (candidate != null && AudioService.isStreamingTrackId(candidate.id)) {
+        final bool needsFreshLoad;
+        if (track != null) {
+          needsFreshLoad = true;
+        } else if (!isNativeBound) {
+          needsFreshLoad = _needsLoadOnResume ||
+              _state.status == PlaybackStatus.stopped ||
+              _state.status == PlaybackStatus.error ||
+              _state.status == PlaybackStatus.ended;
+        } else {
+          final nativeCode = _getStateFn?.call() ?? 1;
+          needsFreshLoad = _needsLoadOnResume ||
+              _state.status == PlaybackStatus.stopped ||
+              _state.status == PlaybackStatus.error ||
+              _state.status == PlaybackStatus.ended ||
+              nativeCode == 0 ||
+              nativeCode == 1 ||
+              nativeCode == 4;
+        }
+        if (needsFreshLoad) {
+          return _streamingTrackHandler!(
+            candidate,
+            queueContext: null,
+            debounce: false,
+          );
+        }
+      }
+    }
+    return _playInternal(track: track);
+  }
+
+  @override
+  Future<void> playStreamUrl({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) => _playInternal(
+    track: track,
+    streamUrl: streamUrl,
+    headers: headers,
+    hintExtension: hintExtension,
+  );
+
+  @override
+  Future<void> playStreamUrlAsync({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+    required int requestId,
+  }) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.playStreamUrlAsync(
+        track: track,
+        streamUrl: streamUrl,
+        headers: headers,
+        hintExtension: hintExtension,
+        requestId: requestId,
+      );
+    }
+    if (!isNativeBound) {
+      return _delegate.playStreamUrlAsync(
+        track: track,
+        streamUrl: streamUrl,
+        headers: headers,
+        hintExtension: hintExtension,
+        requestId: requestId,
+      );
+    }
+    if (_playbackPlayAsyncFn == null) {
+      return _playInternal(
+        track: track,
+        streamUrl: streamUrl,
+        headers: headers,
+        hintExtension: hintExtension,
+      );
+    }
+    _activeRequestId = requestId;
+    _currentLyrics = const [];
+    _needsLoadOnResume = false;
+    _pendingResumePosition = null;
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx >= 0) {
+      _currentIndex = idx;
+      _queue[idx] = track;
+    }
+
+    final payload = _encodeTrackPayload(
+      track,
+      streamUrl: streamUrl,
+      headers: headers,
+      hintExtension: hintExtension,
+    );
+    final rc = _withNativeUtf8(payload, (p) => _playbackPlayAsyncFn!(p, requestId));
+    if (rc != 0) {
+      final errMsg = _lastErrorMsgFn != null
+          ? _takeRustString(_lastErrorMsgFn!())
+          : null;
+      final msg = (errMsg != null && errMsg.isNotEmpty)
+          ? errMsg
+          : 'Playback failed (code $rc)';
+      _lastError = msg;
+      _positionTimer?.cancel();
+      _emitState(
+        _state.copyWith(
+          status: PlaybackStatus.error,
+          track: track,
+          position: Duration.zero,
+          lastError: msg,
+        ),
+      );
+      return;
+    }
+
+    _lastError = null;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.loading,
+        track: track,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+    _startPositionTimer();
+  }
+
+  String _encodeTrackPayload(
+    TrackInfo target, {
+    String? streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) {
+    return jsonEncode({
       'id': target.id,
       'title': target.title,
       'artist': target.artist,
@@ -881,10 +1286,162 @@ class FfiAudioService implements AudioService {
       'is_dsd': target.format.isDsd,
       if (target.filePath != null && target.filePath!.isNotEmpty)
         'file_path': target.filePath,
+      if (streamUrl != null && streamUrl.isNotEmpty) 'stream_url': streamUrl,
+      if (headers.isNotEmpty) 'headers': headers,
+      if (hintExtension != null && hintExtension.isNotEmpty)
+        'hint_extension': hintExtension,
       'source': target.providerName,
     });
-    final resumePos = track == null ? _pendingResumePosition : null;
+  }
+
+  @override
+  Future<void> restorePlaybackSession({
+    required TrackInfo track,
+    required Duration position,
+    List<TrackInfo>? queue,
+    int? queueIndex,
+    double? volume,
+    bool? isMuted,
+  }) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      await _remoteClient!.restorePlaybackSession(
+        track: track,
+        position: position,
+        queue: queue,
+        queueIndex: queueIndex,
+        volume: volume,
+        isMuted: isMuted,
+      );
+      return;
+    }
+    if (!isNativeBound) {
+      await _delegate.restorePlaybackSession(
+        track: track,
+        position: position,
+        queue: queue,
+        queueIndex: queueIndex,
+        volume: volume,
+        isMuted: isMuted,
+      );
+      _state = _delegate.currentState;
+      _queue = List<TrackInfo>.from(_delegate.queue);
+      return;
+    }
+
+    _positionTimer?.cancel();
+    if (_state.status == PlaybackStatus.playing) {
+      _stopFn?.call();
+    }
+
+    if (queue != null && queue.isNotEmpty) {
+      _queue = List<TrackInfo>.from(queue);
+    }
+
+    var idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx < 0) {
+      _queue.insert(0, track);
+      idx = 0;
+    }
+    _currentIndex = (queueIndex != null &&
+            queueIndex >= 0 &&
+            queueIndex < _queue.length &&
+            PlaybackPersistenceService.tracksMatch(_queue[queueIndex], track))
+        ? queueIndex
+        : idx;
+
+    final resolvedTrack = _queue[_currentIndex];
+    final clampedPos = resolvedTrack.duration > Duration.zero
+        ? (position < Duration.zero
+              ? Duration.zero
+              : (position > resolvedTrack.duration
+                    ? resolvedTrack.duration
+                    : position))
+        : (position < Duration.zero ? Duration.zero : position);
+
+    _hasRestoredSession = true;
+    _needsLoadOnResume = true;
+    _pendingResumePosition = clampedPos;
+
+    final targetVol = (volume ?? _state.volume).clamp(0.0, 1.0);
+    _savedNormalVolume = targetVol;
+    final muted = _strictBitPerfect
+        ? false
+        : (isMuted ?? (targetVol == 0.0));
+    final effectiveVol = _strictBitPerfect ? 1.0 : targetVol;
+    _setVolumeFn?.call(muted ? 0.0 : effectiveVol);
+
+    _loadLyricsForTrack(resolvedTrack);
+
+    _emitState(
+      PlaybackState(
+        status: PlaybackStatus.paused,
+        track: resolvedTrack,
+        position: clampedPos,
+        volume: effectiveVol,
+        isMuted: muted,
+        seekEpoch: _state.seekEpoch,
+        isSeeking: false,
+        lastError: null,
+        deviceLost: _state.deviceLost,
+        clockSource: _state.clockSource,
+      ),
+    );
+    _refreshSignalPath();
+  }
+
+  Future<void> _playInternal({
+    TrackInfo? track,
+    String? streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) async {
+    _currentLyrics = const [];
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      if (streamUrl != null) {
+        return _remoteClient!.playStreamUrl(
+          track: track!,
+          streamUrl: streamUrl,
+          headers: headers,
+          hintExtension: hintExtension,
+        );
+      }
+      return _remoteClient!.play(track: track);
+    }
+    if (!isNativeBound) {
+      if (streamUrl != null) {
+        return _delegate.playStreamUrl(
+          track: track!,
+          streamUrl: streamUrl,
+          headers: headers,
+          hintExtension: hintExtension,
+        );
+      }
+      return _delegate.play(track: track);
+    }
+    final target =
+        track ?? _state.track ?? (_queue.isNotEmpty ? _queue.first : null);
+    if (target == null) return;
+
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, target);
+    if (idx >= 0) {
+      _currentIndex = idx;
+    }
+
+    final isResumingRestored = track == null ||
+        (_needsLoadOnResume &&
+            _state.track != null &&
+            PlaybackPersistenceService.tracksMatch(_state.track!, target));
+    final resumePos = isResumingRestored ? _pendingResumePosition : null;
     _pendingResumePosition = null;
+    _needsLoadOnResume = false;
+
+    _activeRequestId = 0;
+    final payload = _encodeTrackPayload(
+      target,
+      streamUrl: streamUrl,
+      headers: headers,
+      hintExtension: hintExtension,
+    );
     final rc = _withNativeUtf8(payload, (p) => _playFn!(p));
     if (rc != 0) {
       final errMsg = _lastErrorMsgFn != null
@@ -911,24 +1468,18 @@ class FfiAudioService implements AudioService {
     _lastError = null;
     final durMs = _getDurationFn!();
     final syncedTrack = durMs > 0
-        ? TrackInfo(
-            id: target.id,
-            title: target.title,
-            artist: target.artist,
-            album: target.album,
-            duration: Duration(milliseconds: durMs),
-            albumArtUrl: target.albumArtUrl,
-            format: target.format,
-            providerName: target.providerName,
-            filePath: target.filePath,
-          )
+        ? target.copyWith(duration: Duration(milliseconds: durMs))
         : target;
+
+    final initialPos = (resumePos != null && resumePos > Duration.zero)
+        ? resumePos
+        : Duration(milliseconds: _getPositionFn!());
 
     _emitState(
       _state.copyWith(
         status: PlaybackStatus.playing,
         track: syncedTrack,
-        position: Duration(milliseconds: _getPositionFn!()),
+        position: initialPos,
       ),
     );
     _refreshSignalPath();
@@ -951,6 +1502,13 @@ class FfiAudioService implements AudioService {
     if (!isNativeBound) {
       return _delegate.resume();
     }
+    final nativeState = _getStateFn?.call() ?? 1;
+    if (_needsLoadOnResume ||
+        ((nativeState == 1 || nativeState == 4 || nativeState == 0) &&
+            _state.track != null)) {
+      await play(track: null);
+      return;
+    }
     if (_playbackResumeFn != null) {
       _playbackResumeFn!();
     } else {
@@ -962,10 +1520,20 @@ class FfiAudioService implements AudioService {
 
   @override
   Future<void> togglePlayPause() async {
+    if (!isNativeBound) {
+      return _delegate.togglePlayPause();
+    }
     if (currentState.status == PlaybackStatus.playing) {
       await pause();
     } else if (currentState.status == PlaybackStatus.paused) {
-      await resume();
+      final nativeState = _getStateFn?.call() ?? 1;
+      if (_needsLoadOnResume ||
+          ((nativeState == 1 || nativeState == 4 || nativeState == 0) &&
+              _state.track != null)) {
+        await play(track: null);
+      } else {
+        await resume();
+      }
     } else {
       await play();
     }
@@ -1188,10 +1756,13 @@ class FfiAudioService implements AudioService {
   @override
   Future<void> stop() async {
     _positionTimer?.cancel();
+    _activeRequestId = 0;
     _pendingResumePosition = null;
+    _needsLoadOnResume = false;
     if (!isNativeBound) {
       return _delegate.stop();
     }
+    _playbackCancelPendingFn?.call(0);
     _stopFn!();
     _emitState(
       _state.copyWith(status: PlaybackStatus.stopped, position: Duration.zero),
@@ -1203,9 +1774,18 @@ class FfiAudioService implements AudioService {
     if (!isNativeBound) {
       return _delegate.seek(position);
     }
-    final ms = position.inMilliseconds.clamp(0, 1 << 30);
+    final maxMs = _state.track != null && _state.track!.duration > Duration.zero
+        ? _state.track!.duration.inMilliseconds
+        : (1 << 30);
+    final ms = position.inMilliseconds.clamp(0, maxMs);
+    final clamped = Duration(milliseconds: ms);
+    if (_needsLoadOnResume) {
+      _pendingResumePosition = clamped;
+      _emitState(_state.copyWith(position: clamped));
+      return;
+    }
     _seekFn!(ms);
-    _emitState(_state.copyWith(position: Duration(milliseconds: ms)));
+    _emitState(_state.copyWith(position: clamped));
   }
 
   @override
@@ -1243,8 +1823,16 @@ class FfiAudioService implements AudioService {
       return _delegate.next();
     }
     if (_queue.isEmpty) return;
+    _needsLoadOnResume = false;
+    _pendingResumePosition = null;
     _currentIndex = (_currentIndex + 1) % _queue.length;
-    await play(track: _queue[_currentIndex]);
+    final target = _queue[_currentIndex];
+    if (_streamingTrackHandler != null &&
+        AudioService.isStreamingTrackId(target.id)) {
+      await _streamingTrackHandler!(target, queueContext: null, debounce: true);
+      return;
+    }
+    await play(track: target);
   }
 
   @override
@@ -1253,8 +1841,16 @@ class FfiAudioService implements AudioService {
       return _delegate.previous();
     }
     if (_queue.isEmpty) return;
+    _needsLoadOnResume = false;
+    _pendingResumePosition = null;
     _currentIndex = (_currentIndex - 1 + _queue.length) % _queue.length;
-    await play(track: _queue[_currentIndex]);
+    final target = _queue[_currentIndex];
+    if (_streamingTrackHandler != null &&
+        AudioService.isStreamingTrackId(target.id)) {
+      await _streamingTrackHandler!(target, queueContext: null, debounce: true);
+      return;
+    }
+    await play(track: target);
   }
 
   @override
@@ -1615,6 +2211,8 @@ class FfiAudioService implements AudioService {
               _pendingResumePosition = res.restoredState.position > Duration.zero
                   ? res.restoredState.position
                   : null;
+              _needsLoadOnResume = res.restoredState.track != null &&
+                  res.restoredState.status != PlaybackStatus.playing;
               final effVol = (prevStrict && !_strictBitPerfect && rustVol != null)
                   ? rustVol
                   : res.restoredState.volume;
@@ -1640,12 +2238,17 @@ class FfiAudioService implements AudioService {
             );
             final rustCode = _getStateFn?.call() ?? _state.status.code;
             final posMs = _getPositionFn?.call() ?? _state.position.inMilliseconds;
-            final syncedStatus = PlaybackStatus.fromCode(rustCode);
+            final syncedStatus = _needsLoadOnResume
+                ? PlaybackStatus.paused
+                : PlaybackStatus.fromCode(rustCode);
+            final syncedPos = _needsLoadOnResume
+                ? (_pendingResumePosition ?? _state.position)
+                : Duration(milliseconds: posMs);
             final effVol = rustVol ?? _state.volume;
             _emitState(
               _state.copyWith(
                 status: syncedStatus,
-                position: Duration(milliseconds: posMs),
+                position: syncedPos,
                 volume: effVol,
                 isMuted: effVol == 0.0,
                 deviceLost: false,
@@ -1824,12 +2427,14 @@ class FfiAudioService implements AudioService {
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
       return _remoteClient!.configureProvider(kind, config);
     }
-    if (kind == 'apple_music' ||
-        kind == 'youtube_music' ||
-        config['disconnect'] == true ||
-        !isNativeBound ||
-        _providerConfigureFn == null) {
+    if (!isNativeBound) {
       return _delegate.configureProvider(kind, config);
+    }
+    if (config['disconnect'] == true) {
+      return _delegate.configureProvider(kind, config);
+    }
+    if (_providerConfigureFn == null) {
+      return false;
     }
     final rc = _withNativeUtf8(
       kind,
@@ -1838,8 +2443,16 @@ class FfiAudioService implements AudioService {
         (cp) => _providerConfigureFn!(kp, cp),
       ),
     );
-    await _delegate.configureProvider(kind, config);
-    return rc == 0;
+    if (rc == 0) {
+      await _delegate.configureProvider(kind, config);
+      return true;
+    }
+    final errMsg =
+        _lastErrorMsgFn != null ? _takeRustString(_lastErrorMsgFn!()) : null;
+    _lastError = (errMsg != null && errMsg.isNotEmpty)
+        ? errMsg
+        : 'Failed to configure provider $kind (code $rc)';
+    return false;
   }
 
   @override
@@ -1879,24 +2492,29 @@ class FfiAudioService implements AudioService {
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
       return _remoteClient!.syncProvider(kind);
     }
-    if (kind == 'apple_music' ||
-        kind == 'youtube_music' ||
-        !isNativeBound ||
-        _providerSyncFn == null) {
-      final res = await _delegate.syncProvider(kind);
-      for (final t in _delegate.queue) {
-        if (!_queue.any((q) => q.id == t.id)) {
-          _queue.add(t);
-        }
-      }
-      return res;
+    if (!isNativeBound) {
+      return _delegate.syncProvider(kind);
+    }
+    if (_providerSyncFn == null) {
+      return {'provider': kind, 'tracks_count': 0};
     }
     final raw = _withNativeUtf8(
       kind,
       (p) => _takeRustString(_providerSyncFn!(p)),
     );
     _reloadTracksFromNative();
-    if (raw == null) return const {};
+    if (raw == null) {
+      final errMsg =
+          _lastErrorMsgFn != null ? _takeRustString(_lastErrorMsgFn!()) : null;
+      if (errMsg != null && errMsg.isNotEmpty) {
+        _lastError = errMsg;
+      }
+      return {
+        'provider': kind,
+        'tracks_count': 0,
+        if (_lastError != null) 'error': _lastError,
+      };
+    }
     final decoded = jsonDecode(raw);
     return decoded is Map<String, dynamic> ? decoded : const {};
   }
@@ -2220,15 +2838,55 @@ class FfiAudioService implements AudioService {
 
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _visualizerCoordinator?.dispose();
+    _visualizerCoordinator = null;
     _positionTimer?.cancel();
     _remoteClient?.dispose();
     if (isNativeBound) {
       _shutdownFn?.call();
+      _dylib = null;
     }
     _stateController.close();
     _signalPathController.close();
     _positionController.close();
     _delegate.dispose();
+  }
+}
+
+class _FfiVisualizerEngineBridge implements VisualizerEngineBridge {
+  final FfiAudioService _service;
+  _FfiVisualizerEngineBridge(this._service);
+
+  @override
+  int setVisualizerEnabled(int enabled) {
+    return _service._visualizerSetEnabledFn?.call(enabled) ?? 0;
+  }
+
+  @override
+  int isVisualizerEnabled() {
+    return _service._visualizerIsEnabledFn?.call() ?? 0;
+  }
+
+  @override
+  int getVisualizerBands(ffi.Pointer<ffi.Float> outPtr, int maxCount) {
+    return _service._visualizerGetBandsFn?.call(outPtr, maxCount) ?? 0;
+  }
+
+  @override
+  ffi.Pointer<ffi.Float>? allocateBandsBuffer() {
+    if (_service._bytesAllocFn != null) {
+      return _service._bytesAllocFn!(64 * ffi.sizeOf<ffi.Float>()).cast<ffi.Float>();
+    }
+    return null;
+  }
+
+  @override
+  void freeBandsBuffer(ffi.Pointer<ffi.Float> ptr) {
+    if (_service._bytesFreeFn != null) {
+      _service._bytesFreeFn!(ptr.cast<ffi.Uint8>(), 64 * ffi.sizeOf<ffi.Float>());
+    }
   }
 }
 

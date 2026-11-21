@@ -10,9 +10,11 @@ pub mod signal_path;
 pub mod stream;
 pub mod test_utils;
 pub mod verification;
+pub mod visualizer;
 
 pub use device_manager::{AudioDeviceManager, AudioFormatManager, NegotiatedFormat};
 pub use verification::{AudioVerificationEngine, VerificationConfig, WireSampleFormat};
+pub use visualizer::{global_tap, VisualizerRingBuffer, VisualizerTap};
 
 pub use backend::{
     asio::AsioBackend, mock::MockBackend, wasapi::WasapiBackend, AudioDeviceDescription,
@@ -38,13 +40,13 @@ pub use error::{BackendError, CoreAudioError, DecoderError, DsdError, DspError};
 pub use pcm::{AudioChunk, AudioDecoder, SymphoniaDecoder, SynthAudioDecoder};
 pub use player::{
     enumerate_cpal_devices, infer_extension_from_magic, open_decoder_for_path,
-    open_decoder_for_stream, rank_sample_format, select_best_config_index, ActiveTrackMeta,
-    AudioPlayer, PlaybackLifecycleState,
+    open_decoder_for_stream, open_decoder_for_stream_cancellable, rank_sample_format,
+    select_best_config_index, ActiveTrackMeta, AudioPlayer, PlaybackLifecycleState,
 };
 pub use signal_path::{SignalPathContext, SignalPathEngine};
 pub use stream::{
     is_playlist_extension, parse_m3u_entries, parse_pls_entries, resolve_playlist_url,
-    HttpRangeMediaSource, StreamOrigin, StreamSource,
+    resolve_playlist_url_with_cancel, HttpRangeMediaSource, StreamOrigin, StreamSource,
 };
 
 use core_types::{AudioFormat, OutputBackendKind, SignalPath};

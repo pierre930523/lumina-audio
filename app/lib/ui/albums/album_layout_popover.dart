@@ -1,7 +1,7 @@
-import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../services/album_layout_settings_controller.dart';
+import '../../services/escape_dismiss_registry.dart';
 import '../theme/lumina_tokens.dart';
 import '../theme/responsive_layout.dart';
 
@@ -28,6 +28,7 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
   );
   OverlayEntry? _overlayEntry;
   bool _metricsUpdateScheduled = false;
+  late final bool Function() _escapeDismissHandler = _handleEscapeDismiss;
 
   bool get _isOpen => _overlayEntry != null;
 
@@ -72,12 +73,22 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
   }
 
   void _removeOverlayOnly() {
+    EscapeDismissRegistry.instance.unregister(_escapeDismissHandler);
     final entry = _overlayEntry;
     if (entry != null) {
       entry.remove();
       entry.dispose();
       _overlayEntry = null;
     }
+  }
+
+  bool _handleEscapeDismiss() {
+    if (_overlayEntry == null) {
+      EscapeDismissRegistry.instance.unregister(_escapeDismissHandler);
+      return false;
+    }
+    _closePopover();
+    return true;
   }
 
   void _closePopover() {
@@ -101,6 +112,7 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
     final entry = OverlayEntry(builder: _buildOverlay);
     overlay.insert(entry);
     setState(() => _overlayEntry = entry);
+    EscapeDismissRegistry.instance.register(_escapeDismissHandler);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _overlayEntry != null) {
         _popoverFocusNode.requestFocus();
@@ -158,51 +170,46 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
           targetAnchor: clamp.targetAnchor,
           followerAnchor: clamp.followerAnchor,
           offset: clamp.offset,
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.escape): _closePopover,
-            },
-            child: FocusScope(
+          child: FocusScope(
+            autofocus: true,
+            child: Focus(
+              focusNode: _popoverFocusNode,
               autofocus: true,
-              child: Focus(
-                focusNode: _popoverFocusNode,
-                autofocus: true,
-                child: Listener(
-                  behavior: HitTestBehavior.opaque,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxWidth: clamp.width,
-                      maxHeight: clamp.maxHeight,
-                    ),
-                    child: SizedBox(
-                      width: clamp.width,
-                      child: Material(
-                        key: const Key('album_layout_popover'),
-                        color: LuminaTokens.cardElevatedBg,
-                        elevation: 16,
-                        shadowColor: const Color(0xAA000000),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(
-                            LuminaTokens.radiusMd,
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: clamp.width,
+                    maxHeight: clamp.maxHeight,
+                  ),
+                  child: SizedBox(
+                    width: clamp.width,
+                    child: Material(
+                      key: const Key('album_layout_popover'),
+                      color: LuminaTokens.cardElevatedBg,
+                      elevation: 16,
+                      shadowColor: const Color(0xAA000000),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusMd,
+                        ),
+                        side: BorderSide(
+                          color: LuminaTokens.borderControl.withValues(
+                            alpha: 0.8,
                           ),
-                          side: BorderSide(
-                            color: LuminaTokens.borderControl.withValues(
-                              alpha: 0.8,
+                        ),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: ListenableBuilder(
+                        listenable: widget.controller,
+                        builder: (context, _) {
+                          return SingleChildScrollView(
+                            padding: const EdgeInsets.all(
+                              LuminaTokens.spaceMd,
                             ),
-                          ),
-                        ),
-                        clipBehavior: Clip.antiAlias,
-                        child: ListenableBuilder(
-                          listenable: widget.controller,
-                          builder: (context, _) {
-                            return SingleChildScrollView(
-                              padding: const EdgeInsets.all(
-                                LuminaTokens.spaceMd,
-                              ),
-                              child: _buildPopoverContent(context),
-                            );
-                          },
-                        ),
+                            child: _buildPopoverContent(context),
+                          );
+                        },
                       ),
                     ),
                   ),

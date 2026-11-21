@@ -38,7 +38,11 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
   AlbumViewMode _viewMode = AlbumViewMode.grid;
   bool _showCardContainer = false;
   bool _disposed = false;
-  Future<void> _saveQueue = Future<void>.value();
+  bool _isSaving = false;
+  String? _pendingSavePayload;
+  Completer<void>? _activeSaveCompleter;
+
+  Future<void>? get currentSaveFuture => _activeSaveCompleter?.future;
 
   AlbumLayoutSettingsController({this.prefsFileOverride});
 
@@ -144,6 +148,7 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
   }
 
   void _save() {
+    if (_disposed) return;
     final file = _resolvePrefsFile();
     if (file == null) return;
 
@@ -164,14 +169,37 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
       return;
     }
 
-    _saveQueue = _saveQueue.then((_) async {
-      try {
-        await file.parent.create(recursive: true);
-        await file.writeAsString(payload);
-      } catch (_) {
-        // Ignore write failures cleanly without blocking UI interaction.
+    if (_isSaving) {
+      _pendingSavePayload = payload;
+      return;
+    }
+
+    _isSaving = true;
+    _activeSaveCompleter = Completer<void>();
+    _runSaveWorker(file, payload);
+  }
+
+  Future<void> _runSaveWorker(File file, String initialPayload) async {
+    String? current = initialPayload;
+    try {
+      while (current != null && !_disposed) {
+        final toSave = current;
+        _pendingSavePayload = null;
+        try {
+          if (!await file.parent.exists()) {
+            await file.parent.create(recursive: true);
+          }
+          await file.writeAsString(toSave);
+        } catch (_) {
+          // Ignore write failures cleanly without blocking UI interaction.
+        }
+        current = _pendingSavePayload;
       }
-    });
+    } finally {
+      _isSaving = false;
+      _activeSaveCompleter?.complete();
+      _activeSaveCompleter = null;
+    }
   }
 
   void setCoverTargetExtent(double extent) {

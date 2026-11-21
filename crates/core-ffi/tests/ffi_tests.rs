@@ -35,12 +35,12 @@ fn write_test_wav(path: &std::path::Path, sample_rate: u32, channels: u16, num_f
 
 #[test]
 fn test_core_version_export() {
-    assert_eq!(core_version(), "0.1.0");
+    assert_eq!(core_version(), env!("CARGO_PKG_VERSION"));
 
     let c_ver = lumina_version();
     assert!(!c_ver.is_null());
     let s = unsafe { CStr::from_ptr(c_ver).to_str().unwrap() };
-    assert_eq!(s, "0.1.0");
+    assert_eq!(s, env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
@@ -433,8 +433,16 @@ fn test_ffi_non_headless_wasapi_playback_and_zone_default() {
     let play_cstr = CString::new(play_payload).unwrap();
     assert_eq!(playback::lumina_playback_play(play_cstr.as_ptr()), 0);
 
-    std::thread::sleep(std::time::Duration::from_millis(140));
-    assert!(playback::lumina_playback_get_position_ms() > 0);
+    let start = std::time::Instant::now();
+    let mut pos = 0;
+    while start.elapsed() < std::time::Duration::from_millis(1500) {
+        pos = playback::lumina_playback_get_position_ms();
+        if pos > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(pos > 0, "Playback position should advance within 1.5s");
 
     let sp_ptr = signal_path::lumina_signal_path_get();
     let sp_str = unsafe { CStr::from_ptr(sp_ptr).to_str().unwrap().to_string() };
@@ -791,6 +799,188 @@ fn test_ffi_contract3_lyrics() {
     let lyr_val3: serde_json::Value = serde_json::from_str(&lyr_str3).unwrap();
     assert_eq!(lyr_val3["source"], "sidecar_lrc");
 
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[test]
+fn test_ffi_play_async_non_blocking_and_superseding_cancellation() {
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    // Local stalled TCP listener that accepts connections and never sends HTTP bytes.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stalled_port = listener.local_addr().unwrap().port();
+    let server_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_stop_bg = server_stop.clone();
+    listener.set_nonblocking(true).unwrap();
+    let server_handle = std::thread::spawn(move || {
+        let mut held_sockets = Vec::new();
+        while !server_stop_bg.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok((sock, _)) = listener.accept() {
+                held_sockets.push(sock);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    });
+
+    let slow_payload = serde_json::json!({
+        "id": "trk-slow-101",
+        "title": "Slow Hung Stream",
+        "stream_url": format!("http://127.0.0.1:{stalled_port}/hung.flac"),
+        "duration_ms": 120_000,
+    })
+    .to_string();
+    let c_slow = CString::new(slow_payload).unwrap();
+
+    let t0 = std::time::Instant::now();
+    assert_eq!(lumina_playback_play_async(c_slow.as_ptr(), 101), 0);
+    let elapsed_ms = t0.elapsed().as_millis();
+    assert!(
+        elapsed_ms < 50,
+        "lumina_playback_play_async blocked for {elapsed_ms}ms (expected < 50ms)"
+    );
+    assert_eq!(lumina_playback_get_active_request_id(), 101);
+    assert_eq!(lumina_playback_get_state(), 5);
+
+    let state_ptr1 = lumina_playback_get_state_json();
+    let state_str1 = unsafe { CStr::from_ptr(state_ptr1).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(state_ptr1) };
+    let v1: serde_json::Value = serde_json::from_str(&state_str1).unwrap();
+    assert_eq!(v1["state_code"], 5);
+    assert_eq!(v1["state_name"], "Loading");
+    assert_eq!(v1["play_request_id"], 101);
+    assert_eq!(v1["loaded_request_id"], 0);
+
+    // Supersede request 101 immediately with a fast local WAV track (request 102).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_async_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav_file = tmp_dir.join("fast_track.wav");
+    write_test_wav(&wav_file, 44_100, 2, 44_100);
+
+    let fast_payload = serde_json::json!({
+        "id": "trk-fast-102",
+        "title": "Fast Local Track",
+        "file_path": wav_file.to_string_lossy(),
+    })
+    .to_string();
+    let c_fast = CString::new(fast_payload).unwrap();
+
+    let t1 = std::time::Instant::now();
+    assert_eq!(lumina_playback_play_async(c_fast.as_ptr(), 102), 0);
+    assert!(t1.elapsed().as_millis() < 50);
+    assert_eq!(lumina_playback_get_active_request_id(), 102);
+
+    let mut settled = None;
+    for _ in 0..80 {
+        let p = lumina_playback_get_state_json();
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        let val: serde_json::Value = serde_json::from_str(&s).unwrap();
+        if val["loaded_request_id"] == 102 && val["state_code"] == 2 {
+            settled = Some(val);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let settled = settled.expect("request 102 should settle into Playing state");
+    assert_eq!(settled["current_track_id"], "trk-fast-102");
+    assert_eq!(settled["play_request_id"], 102);
+
+    // Verify explicit cancel_pending exits Loading cleanly.
+    assert_eq!(lumina_playback_play_async(c_slow.as_ptr(), 103), 0);
+    assert_eq!(lumina_playback_get_state(), 5);
+    assert_eq!(lumina_playback_cancel_pending(103), 0);
+    assert_eq!(lumina_playback_get_state(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(lumina_playback_get_state(), 1);
+
+    server_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = server_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[test]
+fn test_ffi_sync_play_followed_by_async_request_id_one_and_zero_rejection() {
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_sync_then_async_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav1 = tmp_dir.join("sync_1.wav");
+    let wav2 = tmp_dir.join("sync_2.wav");
+    write_test_wav(&wav1, 44_100, 2, 44_100);
+    write_test_wav(&wav2, 44_100, 2, 44_100);
+
+    for (id, path) in [("trk-sync-1", &wav1), ("trk-sync-2", &wav2)] {
+        let sync_json = serde_json::json!({
+            "id": id,
+            "title": id,
+            "file_path": path.to_string_lossy(),
+        })
+        .to_string();
+        let c_sync = CString::new(sync_json).unwrap();
+        assert_eq!(lumina_playback_play(c_sync.as_ptr()), 0);
+    }
+
+    // request_id == 0 must be rejected cleanly.
+    let bad_json = CString::new(r#"{"id":"bad","title":"Bad"}"#).unwrap();
+    assert_ne!(lumina_playback_play_async(bad_json.as_ptr(), 0), 0);
+
+    // Local stalled TCP listener to keep request_id = 1 in Loading while checking state.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stalled_port = listener.local_addr().unwrap().port();
+    let server_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_stop_bg = server_stop.clone();
+    listener.set_nonblocking(true).unwrap();
+    let server_handle = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while !server_stop_bg.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok((sock, _)) = listener.accept() {
+                held.push(sock);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    });
+
+    // After sync play calls, coordinator's first async request_id = 1 MUST still report Loading (5).
+    let async_json = serde_json::json!({
+        "id": "trk-async-1",
+        "title": "Async After Sync",
+        "stream_url": format!("http://127.0.0.1:{stalled_port}/stalled.flac"),
+        "duration_ms": 90_000,
+    })
+    .to_string();
+    let c_async = CString::new(async_json).unwrap();
+    assert_eq!(lumina_playback_play_async(c_async.as_ptr(), 1), 0);
+    assert_eq!(lumina_playback_get_active_request_id(), 1);
+    assert_eq!(lumina_playback_get_state(), 5);
+
+    let p = lumina_playback_get_state_json();
+    let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(p) };
+    let val: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(val["state_code"], 5);
+    assert_eq!(val["state_name"], "Loading");
+    assert_eq!(val["play_request_id"], 1);
+    assert_eq!(val["loaded_request_id"], 0);
+
+    assert_eq!(lumina_playback_cancel_pending(1), 0);
+    assert_eq!(lumina_playback_get_state(), 1);
+
+    server_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = server_handle.join();
     assert_eq!(lumina_shutdown(), 0);
     let _ = std::fs::remove_dir_all(tmp_dir);
 }

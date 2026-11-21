@@ -592,6 +592,22 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
       imageContent = _buildPlaceholder(radius);
     }
 
+    final wrappedContent = AnimatedSwitcher(
+      duration: const Duration(milliseconds: 380),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: KeyedSubtree(
+        key: ValueKey(
+          'art_img_${_resolvedCachePath ?? _resolvedCoverUrl ?? "placeholder"}',
+        ),
+        child: imageContent,
+      ),
+    );
+
     return Container(
       key: ValueKey('artwork_container_$_currentKey'),
       width: widget.size,
@@ -616,10 +632,10 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
                 : null),
       ),
       child: widget.circular
-          ? ClipOval(child: imageContent)
+          ? ClipOval(child: wrappedContent)
           : ClipRRect(
               borderRadius: radius,
-              child: imageContent,
+              child: wrappedContent,
             ),
     );
   }

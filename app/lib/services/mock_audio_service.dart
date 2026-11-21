@@ -2,6 +2,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/audio_format.dart';
 import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
@@ -10,6 +12,7 @@ import '../models/signal_path.dart';
 import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'per_device_playback_tracker.dart';
+import 'playback_persistence_service.dart';
 import 'server_audio_service.dart';
 
 class MockAudioService implements AudioService {
@@ -39,6 +42,8 @@ class MockAudioService implements AudioService {
   bool _systemOutputActive = false;
   String? _lastError;
   int _preferredBufferFrames = 512;
+  bool _needsLoadOnResume = false;
+  StreamingTrackHandler? _streamingTrackHandler;
   final Map<String, String> _userCovers = {};
   final Map<String, String> _userLyrics = {};
 
@@ -453,17 +458,98 @@ class MockAudioService implements AudioService {
   }
 
   @override
+  void setStreamingTrackHandler(StreamingTrackHandler? handler) {
+    _streamingTrackHandler = handler;
+  }
+
+  @override
+  void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {
+    if (queue != null && queue.isNotEmpty) {
+      _queue
+        ..clear()
+        ..addAll(queue);
+    }
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx < 0) {
+      _queue.insert(0, track);
+      _currentIndex = 0;
+    } else {
+      _currentIndex = idx;
+    }
+    _needsLoadOnResume = false;
+    _lastError = null;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.loading,
+        track: track,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+  }
+
+  @override
+  void failOptimisticTrackLoad(TrackInfo track, String message) {
+    _lastError = message;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.error,
+        track: track,
+        position: Duration.zero,
+        lastError: message,
+      ),
+    );
+  }
+
+  @override
+  Future<void> cancelPendingPlayback() async {
+    if (_state.status == PlaybackStatus.loading) {
+      _emitState(
+        _state.copyWith(
+          status: PlaybackStatus.stopped,
+          position: Duration.zero,
+        ),
+      );
+    }
+  }
+
+  @override
   Future<void> play({TrackInfo? track}) async {
+    if (_streamingTrackHandler != null) {
+      final candidate =
+          track ?? _state.track ?? (_queue.isNotEmpty ? _queue.first : null);
+      final needsFreshLoad = track != null ||
+          _needsLoadOnResume ||
+          _state.status == PlaybackStatus.stopped ||
+          _state.status == PlaybackStatus.error ||
+          _state.status == PlaybackStatus.ended;
+      if (candidate != null &&
+          needsFreshLoad &&
+          AudioService.isStreamingTrackId(candidate.id)) {
+        await _streamingTrackHandler!(
+          candidate,
+          queueContext: null,
+          debounce: false,
+        );
+        return;
+      }
+    }
+    _needsLoadOnResume = false;
     if (track != null) {
-      final idx = _queue.indexWhere((t) => t.id == track.id);
+      final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
       if (idx >= 0) {
         _currentIndex = idx;
       }
+      if (track.format.isDsd) {
+        _visualizerBandsNotifier.value = Float32List(64);
+      }
+      _lastError = null;
       _emitState(
         _state.copyWith(
           status: PlaybackStatus.playing,
           track: track,
           position: Duration.zero,
+          clearLastError: true,
         ),
       );
       _emitSignalPath();
@@ -473,12 +559,116 @@ class MockAudioService implements AudioService {
   }
 
   @override
+  Future<void> playStreamUrl({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+  }) async {
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx >= 0) {
+      _currentIndex = idx;
+    }
+    if (track.format.isDsd) {
+      _visualizerBandsNotifier.value = Float32List(64);
+    }
+    _needsLoadOnResume = false;
+    _lastError = null;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.playing,
+        track: track,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+    _emitSignalPath();
+  }
+
+  @override
+  Future<void> playStreamUrlAsync({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+    required int requestId,
+  }) => playStreamUrl(
+    track: track,
+    streamUrl: streamUrl,
+    headers: headers,
+    hintExtension: hintExtension,
+  );
+
+  @override
+  Future<void> restorePlaybackSession({
+    required TrackInfo track,
+    required Duration position,
+    List<TrackInfo>? queue,
+    int? queueIndex,
+    double? volume,
+    bool? isMuted,
+  }) async {
+    if (queue != null && queue.isNotEmpty) {
+      _queue
+        ..clear()
+        ..addAll(queue);
+    }
+    var idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx < 0) {
+      _queue.insert(0, track);
+      idx = 0;
+    }
+    _currentIndex = (queueIndex != null &&
+            queueIndex >= 0 &&
+            queueIndex < _queue.length &&
+            PlaybackPersistenceService.tracksMatch(_queue[queueIndex], track))
+        ? queueIndex
+        : idx;
+
+    final resolvedTrack = _queue[_currentIndex];
+    final maxDur = resolvedTrack.duration > Duration.zero
+        ? resolvedTrack.duration
+        : const Duration(hours: 24);
+    final clampedPos = position < Duration.zero
+        ? Duration.zero
+        : (position > maxDur ? maxDur : position);
+
+    final targetVol = (volume ?? _state.volume).clamp(0.0, 1.0);
+    _savedNormalVolume = targetVol;
+    final muted = _strictBitPerfect
+        ? false
+        : (isMuted ?? (targetVol == 0.0));
+    final effectiveVol = _strictBitPerfect ? 1.0 : targetVol;
+
+    _needsLoadOnResume = true;
+    _emitState(
+      PlaybackState(
+        status: PlaybackStatus.paused,
+        track: resolvedTrack,
+        position: clampedPos,
+        volume: effectiveVol,
+        isMuted: muted,
+        seekEpoch: _state.seekEpoch,
+        isSeeking: false,
+        lastError: null,
+        deviceLost: _state.deviceLost,
+        clockSource: _state.clockSource,
+      ),
+    );
+    _emitSignalPath();
+  }
+
+  @override
   Future<void> pause() async {
     _emitState(_state.copyWith(status: PlaybackStatus.paused));
   }
 
   @override
   Future<void> resume() async {
+    if (_needsLoadOnResume && _state.track != null) {
+      await play(track: null);
+      return;
+    }
     _emitState(_state.copyWith(status: PlaybackStatus.playing));
   }
 
@@ -487,7 +677,11 @@ class MockAudioService implements AudioService {
     if (_state.status == PlaybackStatus.playing) {
       await pause();
     } else if (_state.status == PlaybackStatus.paused) {
-      await resume();
+      if (_needsLoadOnResume && _state.track != null) {
+        await play(track: null);
+      } else {
+        await resume();
+      }
     } else {
       await play();
     }
@@ -655,7 +849,10 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> seek(Duration position) async {
-    final maxDur = _state.track?.duration ?? const Duration(minutes: 4);
+    final trackDur = _state.track?.duration;
+    final maxDur = (trackDur != null && trackDur > Duration.zero)
+        ? trackDur
+        : const Duration(hours: 24);
     final clamped = position < Duration.zero
         ? Duration.zero
         : (position > maxDur ? maxDur : position);
@@ -686,10 +883,21 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> next() async {
+    if (_queue.isEmpty) return;
     _currentIndex = (_currentIndex + 1) % _queue.length;
+    final target = _queue[_currentIndex];
+    if (_streamingTrackHandler != null &&
+        AudioService.isStreamingTrackId(target.id)) {
+      await _streamingTrackHandler!(
+        target,
+        queueContext: null,
+        debounce: true,
+      );
+      return;
+    }
     _emitState(
       _state.copyWith(
-        track: _queue[_currentIndex],
+        track: target,
         position: Duration.zero,
       ),
     );
@@ -698,10 +906,21 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> previous() async {
+    if (_queue.isEmpty) return;
     _currentIndex = (_currentIndex - 1 + _queue.length) % _queue.length;
+    final target = _queue[_currentIndex];
+    if (_streamingTrackHandler != null &&
+        AudioService.isStreamingTrackId(target.id)) {
+      await _streamingTrackHandler!(
+        target,
+        queueContext: null,
+        debounce: true,
+      );
+      return;
+    }
     _emitState(
       _state.copyWith(
-        track: _queue[_currentIndex],
+        track: target,
         position: Duration.zero,
       ),
     );
@@ -1540,8 +1759,37 @@ class MockAudioService implements AudioService {
     _activeServerUrl = null;
   }
 
+  final ValueNotifier<Float32List> _visualizerBandsNotifier =
+      ValueNotifier<Float32List>(Float32List(64));
+  bool _visualizerSettingEnabled = true;
+  bool _nowPlayingVisible = false;
+  bool _windowMinimized = false;
+  bool _disposed = false;
+
+  bool get visualizerSettingEnabled => _visualizerSettingEnabled;
+  bool get nowPlayingVisible => _nowPlayingVisible;
+  bool get windowMinimized => _windowMinimized;
+
+  ValueListenable<Float32List> get visualizerBandsNotifier =>
+      _visualizerBandsNotifier;
+
+  void setVisualizerSettingEnabled(bool enabled) {
+    _visualizerSettingEnabled = enabled;
+  }
+
+  void setNowPlayingVisible(bool visible) {
+    _nowPlayingVisible = visible;
+  }
+
+  void setWindowMinimized(bool minimized) {
+    _windowMinimized = minimized;
+  }
+
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _visualizerBandsNotifier.dispose();
     _stateController.close();
     _signalPathController.close();
     _positionController.close();

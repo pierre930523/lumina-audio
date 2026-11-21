@@ -1,16 +1,20 @@
-use crate::engine::get_engine;
+use crate::engine::{get_engine, EngineState};
 use crate::error::{
     catch_unwind_ffi, set_last_error, string_to_c_char, LUMINA_ERR_AUDIO_BACKEND,
     LUMINA_ERR_GENERAL, LUMINA_ERR_NOT_INITIALIZED, LUMINA_OK,
 };
-use core_audio::{device_manager::AudioDeviceManager, StreamSource};
+use core_audio::{
+    device_manager::AudioDeviceManager, open_decoder_for_stream_cancellable, StreamSource,
+};
 use core_db::LibraryRepository;
 use core_types::{AudioEngineOutputInfo, DsdOutputMode, OutputBackendKind};
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 fn demo_track_default_duration_ms(track_id: &str) -> u64 {
     match track_id {
@@ -24,6 +28,372 @@ fn demo_track_default_duration_ms(track_id: &str) -> u64 {
     }
 }
 
+fn cancel_active_play_token(engine: &EngineState) {
+    if let Ok(mut guard) = engine.active_play_cancel.write()
+        && let Some(flag) = guard.take()
+    {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
+fn resolve_candidate_stream(engine: &EngineState, s: &str) -> Result<(StreamSource, String), String> {
+    let mut candidate_stream: Option<(StreamSource, String)> = None;
+    let mut source_label = "Local Library".to_string();
+
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+        if let Some(src) = val
+            .get("source")
+            .or_else(|| val.get("provider"))
+            .and_then(|v| v.as_str())
+            && !src.trim().is_empty()
+        {
+            source_label = src.trim().to_string();
+        }
+
+        let hint = val
+            .get("hint_extension")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let headers: HashMap<String, String> = val
+            .get("headers")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let explicit_stream_url = val
+            .get("stream_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let explicit_file_path = val
+            .get("file_path")
+            .or_else(|| val.get("path"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        if let Some(url) = explicit_stream_url {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                candidate_stream = Some((
+                    StreamSource::http(url, headers, hint),
+                    if source_label == "Local Library" {
+                        "HTTP Stream".to_string()
+                    } else {
+                        source_label.clone()
+                    },
+                ));
+            } else {
+                return Err(format!("Unsupported stream URL: {url}"));
+            }
+        } else if let Some(fp) = explicit_file_path {
+            if fp.starts_with("http://") || fp.starts_with("https://") {
+                candidate_stream = Some((
+                    StreamSource::http(fp, headers, hint),
+                    if source_label == "Local Library" {
+                        "HTTP Stream".to_string()
+                    } else {
+                        source_label.clone()
+                    },
+                ));
+            } else if Path::new(fp).is_file() {
+                candidate_stream = Some((StreamSource::local_file(fp), source_label.clone()));
+            } else {
+                return Err(format!("Audio file not found: {fp}"));
+            }
+        } else {
+            if let Some(ext_id) = val
+                .get("external_track_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if ext_id.starts_with("http://") || ext_id.starts_with("https://") {
+                    candidate_stream = Some((
+                        StreamSource::http(ext_id, headers, hint),
+                        if source_label == "Local Library" {
+                            "HTTP Stream".to_string()
+                        } else {
+                            source_label.clone()
+                        },
+                    ));
+                } else if Path::new(ext_id).is_file() {
+                    candidate_stream = Some((StreamSource::local_file(ext_id), source_label.clone()));
+                }
+            }
+
+            if candidate_stream.is_none()
+                && let Some(track_id) = val.get("id").and_then(|v| v.as_str())
+                && let Ok(pool_guard) = engine.db_pool.read()
+                && let Some(ref pool) = *pool_guard
+                && let Ok(Some(trk)) = engine
+                    .runtime
+                    .block_on(LibraryRepository::find_track_source_by_id(pool, track_id))
+            {
+                if let Ok(resolved) =
+                    engine.runtime.block_on(engine.provider_manager.resolve_stream(&trk))
+                {
+                    let hdr_map: HashMap<String, String> =
+                        resolved.headers.into_iter().collect();
+                    let h = resolved
+                        .hint_extension
+                        .or_else(|| Some(trk.format.codec.as_str().to_string()));
+                    if resolved.url_or_path.starts_with("http://")
+                        || resolved.url_or_path.starts_with("https://")
+                    {
+                        let strm = StreamSource::http(resolved.url_or_path, hdr_map, h)
+                            .with_replay_gain(
+                                resolved.replay_gain_track_db,
+                                resolved.replay_gain_album_db,
+                                resolved.replay_gain_track_peak,
+                                resolved.replay_gain_album_peak,
+                            );
+                        candidate_stream = Some((strm, trk.provider.display_name().to_string()));
+                    } else if Path::new(&resolved.url_or_path).is_file() {
+                        let strm = StreamSource::local_file(&resolved.url_or_path)
+                            .with_replay_gain(
+                                resolved.replay_gain_track_db,
+                                resolved.replay_gain_album_db,
+                                resolved.replay_gain_track_peak,
+                                resolved.replay_gain_album_peak,
+                            );
+                        candidate_stream = Some((strm, trk.provider.display_name().to_string()));
+                    }
+                } else if Path::new(&trk.external_track_id).is_file() {
+                    let strm = StreamSource::local_file(&trk.external_track_id).with_replay_gain(
+                        trk.replay_gain_track_db,
+                        trk.replay_gain_album_db,
+                        trk.replay_gain_track_peak,
+                        trk.replay_gain_album_peak,
+                    );
+                    candidate_stream = Some((strm, trk.provider.display_name().to_string()));
+                }
+            }
+
+            if candidate_stream.is_none() {
+                let track_id = val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("trk-001");
+                let title = val
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("Lumina Demo Track");
+                let dur_ms = val
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .filter(|&d| d > 0)
+                    .unwrap_or_else(|| demo_track_default_duration_ms(track_id));
+                let label = if source_label == "Local Library" {
+                    "Lumina Demo Synth".to_string()
+                } else {
+                    source_label.clone()
+                };
+                candidate_stream = Some((StreamSource::synth(track_id, title, dur_ms), label));
+            }
+        }
+    } else if s.starts_with("http://") || s.starts_with("https://") {
+        candidate_stream = Some((
+            StreamSource::http(s, HashMap::new(), None),
+            "HTTP Stream".to_string(),
+        ));
+    } else if Path::new(s).is_file() {
+        candidate_stream = Some((StreamSource::local_file(s), source_label));
+    } else {
+        return Err(format!("Audio file not found: {s}"));
+    }
+
+    candidate_stream.ok_or_else(|| "No playable stream resolved".to_string())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lumina_playback_play_async(
+    track_json: *const c_char,
+    request_id: u64,
+) -> c_int {
+    catch_unwind_ffi(LUMINA_ERR_GENERAL, "lumina_playback_play_async", || {
+        let engine = get_engine();
+        if !engine.initialized.load(Ordering::SeqCst) {
+            set_last_error("Audio engine not initialized");
+            return Ok(LUMINA_ERR_NOT_INITIALIZED);
+        }
+        if track_json.is_null() {
+            set_last_error("track_json must not be null for lumina_playback_play_async");
+            return Ok(LUMINA_ERR_GENERAL);
+        }
+        if request_id == 0 {
+            set_last_error("request_id must be greater than 0 for lumina_playback_play_async");
+            return Ok(LUMINA_ERR_GENERAL);
+        }
+
+        let c_str = unsafe { CStr::from_ptr(track_json) };
+        let payload = match c_str.to_str() {
+            Ok(str_val) => str_val.trim().to_string(),
+            Err(e) => {
+                set_last_error(format!("Invalid UTF-8 in playback payload: {e}"));
+                return Ok(LUMINA_ERR_GENERAL);
+            }
+        };
+
+        cancel_active_play_token(&engine);
+        let generation = engine.async_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        engine.play_request_id.store(0, Ordering::SeqCst);
+        engine.loaded_request_id.store(0, Ordering::SeqCst);
+        engine.play_request_id.store(request_id, Ordering::SeqCst);
+        if let Ok(mut err_lock) = engine.async_last_error.write() {
+            *err_lock = None;
+        }
+        engine.has_real_stream.store(false, Ordering::SeqCst);
+        engine.position_ms.store(0, Ordering::Relaxed);
+        let hint_duration_ms = serde_json::from_str::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|v| v.get("duration_ms").and_then(|d| d.as_u64()))
+            .unwrap_or(0);
+        engine.duration_ms.store(hint_duration_ms, Ordering::Relaxed);
+        engine.playback_state.store(5, Ordering::SeqCst); // 5 = Loading
+
+        if let Ok(mut lock) = engine.active_track_json.write() {
+            *lock = Some(payload.clone());
+        }
+
+        if let Ok(player_guard) = engine.player.read()
+            && let Some(ref player) = *player_guard
+        {
+            player.stop();
+        }
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut guard) = engine.active_play_cancel.write() {
+            *guard = Some(cancel_flag.clone());
+        }
+
+        let engine_bg = engine.clone();
+        engine.runtime.spawn_blocking(move || {
+            let is_stale = || {
+                engine_bg.async_generation.load(Ordering::SeqCst) != generation
+                    || engine_bg.play_request_id.load(Ordering::SeqCst) != request_id
+                    || cancel_flag.load(Ordering::SeqCst)
+            };
+            let fail_current = |msg: String| {
+                if !is_stale() {
+                    if let Ok(mut err_lock) = engine_bg.async_last_error.write() {
+                        *err_lock = Some(msg.clone());
+                    }
+                    set_last_error(msg);
+                    engine_bg.has_real_stream.store(false, Ordering::SeqCst);
+                    engine_bg.playback_state.store(4, Ordering::SeqCst);
+                    engine_bg.loaded_request_id.store(request_id, Ordering::SeqCst);
+                }
+            };
+
+            if is_stale() {
+                return;
+            }
+
+            let (stream, label) = match resolve_candidate_stream(&engine_bg, &payload) {
+                Ok(pair) => pair,
+                Err(msg) => {
+                    let _commit_guard = engine_bg
+                        .async_commit_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    fail_current(msg);
+                    return;
+                }
+            };
+
+            if is_stale() {
+                return;
+            }
+
+            let decoder = match open_decoder_for_stream_cancellable(
+                &stream,
+                Some(cancel_flag.clone()),
+                Duration::from_secs(10),
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _commit_guard = engine_bg
+                        .async_commit_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    fail_current(format!("Failed to open stream ({label}): {e}"));
+                    return;
+                }
+            };
+
+            let _commit_guard = engine_bg
+                .async_commit_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if is_stale() {
+                return;
+            }
+
+            if let Ok(player_guard) = engine_bg.player.read()
+                && let Some(ref player) = *player_guard
+            {
+                if let Err(e) = player.start_opened_decoder(&stream, decoder, &label) {
+                    fail_current(format!("Failed to play stream ({label}): {e}"));
+                    return;
+                }
+                if is_stale() {
+                    player.stop();
+                    return;
+                }
+                engine_bg.has_real_stream.store(true, Ordering::SeqCst);
+                engine_bg
+                    .duration_ms
+                    .store(player.duration_ms(), Ordering::Relaxed);
+                engine_bg.position_ms.store(0, Ordering::Relaxed);
+                engine_bg.playback_state.store(2, Ordering::SeqCst);
+                engine_bg.loaded_request_id.store(request_id, Ordering::SeqCst);
+            } else {
+                fail_current("Audio player not initialized".to_string());
+            }
+        });
+
+        Ok(LUMINA_OK)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lumina_playback_cancel_pending(min_request_id: u64) -> c_int {
+    catch_unwind_ffi(
+        LUMINA_ERR_GENERAL,
+        "lumina_playback_cancel_pending",
+        || {
+            let engine = get_engine();
+            let active_id = engine.play_request_id.load(Ordering::SeqCst);
+            let loaded_id = engine.loaded_request_id.load(Ordering::SeqCst);
+            if active_id > loaded_id && active_id >= min_request_id {
+                engine.async_generation.fetch_add(1, Ordering::SeqCst);
+                cancel_active_play_token(&engine);
+                let _commit_guard = engine
+                    .async_commit_lock
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                engine.loaded_request_id.store(active_id, Ordering::SeqCst);
+                engine.has_real_stream.store(false, Ordering::SeqCst);
+                engine.playback_state.store(1, Ordering::SeqCst);
+                if let Ok(player_guard) = engine.player.read()
+                    && let Some(ref player) = *player_guard
+                {
+                    player.stop();
+                }
+            }
+            Ok(LUMINA_OK)
+        },
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lumina_playback_get_active_request_id() -> u64 {
+    get_engine().play_request_id.load(Ordering::SeqCst)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
     catch_unwind_ffi(LUMINA_ERR_GENERAL, "lumina_playback_play", || {
@@ -34,6 +404,10 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
         }
 
         if track_json.is_null() {
+            cancel_active_play_token(&engine);
+            engine.async_generation.fetch_add(1, Ordering::SeqCst);
+            engine.play_request_id.store(0, Ordering::SeqCst);
+            engine.loaded_request_id.store(0, Ordering::SeqCst);
             if let Ok(player_guard) = engine.player.read()
                 && let Some(ref player) = *player_guard
             {
@@ -106,9 +480,6 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         }
 
-        let mut candidate_stream: Option<(StreamSource, String)> = None;
-        let mut source_label = "Local Library".to_string();
-
         let c_str = unsafe { CStr::from_ptr(track_json) };
         let s = match c_str.to_str() {
             Ok(str_val) => str_val.trim(),
@@ -118,193 +489,32 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
             }
         };
 
+        cancel_active_play_token(&engine);
+        engine.async_generation.fetch_add(1, Ordering::SeqCst);
+        engine.play_request_id.store(0, Ordering::SeqCst);
+        engine.loaded_request_id.store(0, Ordering::SeqCst);
+        if let Ok(mut err_lock) = engine.async_last_error.write() {
+            *err_lock = None;
+        }
         if let Ok(mut lock) = engine.active_track_json.write() {
             *lock = Some(s.to_string());
         }
 
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-            if let Some(src) = val
-                .get("source")
-                .or_else(|| val.get("provider"))
-                .and_then(|v| v.as_str())
-                && !src.trim().is_empty()
-            {
-                source_label = src.trim().to_string();
+        let (stream, label) = match resolve_candidate_stream(&engine, s) {
+            Ok(pair) => pair,
+            Err(msg) => {
+                engine.has_real_stream.store(false, Ordering::SeqCst);
+                engine.playback_state.store(4, Ordering::SeqCst);
+                set_last_error(msg);
+                return Ok(LUMINA_ERR_AUDIO_BACKEND);
             }
+        };
 
-            let hint = val
-                .get("hint_extension")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let headers: HashMap<String, String> = val
-                .get("headers")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-
-            let explicit_stream_url = val
-                .get("stream_url")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|v| !v.is_empty());
-            let explicit_file_path = val
-                .get("file_path")
-                .or_else(|| val.get("path"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|v| !v.is_empty());
-
-            if let Some(url) = explicit_stream_url {
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    candidate_stream = Some((
-                        StreamSource::http(url, headers, hint),
-                        if source_label == "Local Library" {
-                            "HTTP Stream".to_string()
-                        } else {
-                            source_label.clone()
-                        },
-                    ));
-                } else {
-                    engine.has_real_stream.store(false, Ordering::SeqCst);
-                    engine.playback_state.store(4, Ordering::SeqCst);
-                    set_last_error(format!("Unsupported stream URL: {url}"));
-                    return Ok(LUMINA_ERR_AUDIO_BACKEND);
-                }
-            } else if let Some(fp) = explicit_file_path {
-                if fp.starts_with("http://") || fp.starts_with("https://") {
-                    candidate_stream = Some((
-                        StreamSource::http(fp, headers, hint),
-                        if source_label == "Local Library" {
-                            "HTTP Stream".to_string()
-                        } else {
-                            source_label.clone()
-                        },
-                    ));
-                } else if Path::new(fp).is_file() {
-                    candidate_stream =
-                        Some((StreamSource::local_file(fp), source_label.clone()));
-                } else {
-                    engine.has_real_stream.store(false, Ordering::SeqCst);
-                    engine.playback_state.store(4, Ordering::SeqCst);
-                    set_last_error(format!("Audio file not found: {fp}"));
-                    return Ok(LUMINA_ERR_AUDIO_BACKEND);
-                }
-            } else {
-                if let Some(ext_id) = val
-                    .get("external_track_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    if ext_id.starts_with("http://") || ext_id.starts_with("https://") {
-                        candidate_stream = Some((
-                            StreamSource::http(ext_id, headers, hint),
-                            if source_label == "Local Library" {
-                                "HTTP Stream".to_string()
-                            } else {
-                                source_label.clone()
-                            },
-                        ));
-                    } else if Path::new(ext_id).is_file() {
-                        candidate_stream =
-                            Some((StreamSource::local_file(ext_id), source_label.clone()));
-                    }
-                }
-
-                if candidate_stream.is_none()
-                    && let Some(track_id) = val.get("id").and_then(|v| v.as_str())
-                    && let Ok(pool_guard) = engine.db_pool.read()
-                    && let Some(ref pool) = *pool_guard
-                    && let Ok(Some(trk)) = engine
-                        .runtime
-                        .block_on(LibraryRepository::find_track_source_by_id(pool, track_id))
-                {
-                    if let Ok(resolved) =
-                        engine.runtime.block_on(engine.provider_manager.resolve_stream(&trk))
-                    {
-                        let hdr_map: HashMap<String, String> =
-                            resolved.headers.into_iter().collect();
-                        let h = resolved
-                            .hint_extension
-                            .or_else(|| Some(trk.format.codec.as_str().to_string()));
-                        if resolved.url_or_path.starts_with("http://")
-                            || resolved.url_or_path.starts_with("https://")
-                        {
-                            let strm = StreamSource::http(resolved.url_or_path, hdr_map, h)
-                                .with_replay_gain(
-                                    resolved.replay_gain_track_db,
-                                    resolved.replay_gain_album_db,
-                                    resolved.replay_gain_track_peak,
-                                    resolved.replay_gain_album_peak,
-                                );
-                            candidate_stream =
-                                Some((strm, trk.provider.display_name().to_string()));
-                        } else if Path::new(&resolved.url_or_path).is_file() {
-                            let strm = StreamSource::local_file(&resolved.url_or_path)
-                                .with_replay_gain(
-                                    resolved.replay_gain_track_db,
-                                    resolved.replay_gain_album_db,
-                                    resolved.replay_gain_track_peak,
-                                    resolved.replay_gain_album_peak,
-                                );
-                            candidate_stream =
-                                Some((strm, trk.provider.display_name().to_string()));
-                        }
-                    } else if Path::new(&trk.external_track_id).is_file() {
-                        let strm = StreamSource::local_file(&trk.external_track_id)
-                            .with_replay_gain(
-                                trk.replay_gain_track_db,
-                                trk.replay_gain_album_db,
-                                trk.replay_gain_track_peak,
-                                trk.replay_gain_album_peak,
-                            );
-                        candidate_stream =
-                            Some((strm, trk.provider.display_name().to_string()));
-                    }
-                }
-
-                if candidate_stream.is_none() {
-                    let track_id = val
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .unwrap_or("trk-001");
-                    let title = val
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .unwrap_or("Lumina Demo Track");
-                    let dur_ms = val
-                        .get("duration_ms")
-                        .and_then(|v| v.as_u64())
-                        .filter(|&d| d > 0)
-                        .unwrap_or_else(|| demo_track_default_duration_ms(track_id));
-                    let label = if source_label == "Local Library" {
-                        "Lumina Demo Synth".to_string()
-                    } else {
-                        source_label.clone()
-                    };
-                    candidate_stream =
-                        Some((StreamSource::synth(track_id, title, dur_ms), label));
-                }
-            }
-        } else if s.starts_with("http://") || s.starts_with("https://") {
-            candidate_stream = Some((
-                StreamSource::http(s, HashMap::new(), None),
-                "HTTP Stream".to_string(),
-            ));
-        } else if Path::new(s).is_file() {
-            candidate_stream = Some((StreamSource::local_file(s), source_label));
-        } else {
-            engine.has_real_stream.store(false, Ordering::SeqCst);
-            engine.playback_state.store(4, Ordering::SeqCst);
-            set_last_error(format!("Audio file not found: {s}"));
-            return Ok(LUMINA_ERR_AUDIO_BACKEND);
-        }
-
-        if let Some((stream, label)) = candidate_stream
-            && let Ok(player_guard) = engine.player.read()
+        let _commit_guard = engine
+            .async_commit_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Ok(player_guard) = engine.player.read()
             && let Some(ref player) = *player_guard
         {
             if let Err(e) = player.play_stream(stream, &label) {
@@ -360,6 +570,15 @@ pub extern "C" fn lumina_playback_stop() -> c_int {
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         }
 
+        engine.async_generation.fetch_add(1, Ordering::SeqCst);
+        cancel_active_play_token(&engine);
+        let _commit_guard = engine
+            .async_commit_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        engine
+            .loaded_request_id
+            .store(engine.play_request_id.load(Ordering::SeqCst), Ordering::SeqCst);
         if let Ok(player_guard) = engine.player.read()
             && let Some(ref player) = *player_guard
         {
@@ -455,18 +674,20 @@ pub extern "C" fn lumina_playback_reconnect_device() -> c_int {
 pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
     catch_unwind_ffi(std::ptr::null_mut(), "lumina_playback_get_state_json", || {
         let engine = get_engine();
+        let play_request_id = engine.play_request_id.load(Ordering::SeqCst);
+        let loaded_request_id = engine.loaded_request_id.load(Ordering::SeqCst);
         let (
-            state_code,
-            state_name,
-            position_ms,
-            duration_ms,
+            mut state_code,
+            mut state_name,
+            mut position_ms,
+            mut duration_ms,
             clock_source,
             seek_epoch,
             is_seeking,
             dsp_bypassed,
             strict_bit_perfect,
             volume,
-            last_error,
+            mut last_error,
             device_lost,
         ) = if let Ok(player_guard) = engine.player.read()
             && let Some(ref player) = *player_guard
@@ -537,6 +758,24 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             )
         };
 
+        if play_request_id > loaded_request_id {
+            state_code = 5;
+            state_name = "Loading";
+            position_ms = 0;
+            duration_ms = engine.duration_ms.load(Ordering::Relaxed);
+        } else if !engine.has_real_stream.load(Ordering::SeqCst)
+            && engine.playback_state.load(Ordering::SeqCst) == 4
+        {
+            state_code = 4;
+            state_name = "Error";
+            duration_ms = 0;
+            if last_error.is_none()
+                && let Ok(g) = engine.async_last_error.read()
+            {
+                last_error = g.clone();
+            }
+        }
+
         let current_track_id = engine.active_track_json.read().ok().and_then(|g| {
             g.as_ref().and_then(|raw| {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
@@ -566,6 +805,8 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             "last_error": last_error,
             "device_lost": device_lost,
             "current_track_id": current_track_id,
+            "play_request_id": play_request_id,
+            "loaded_request_id": loaded_request_id,
         });
 
         let json_str = serde_json::to_string(&json_val)?;
@@ -595,6 +836,16 @@ pub extern "C" fn lumina_playback_get_volume() -> f32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn lumina_playback_get_state() -> c_int {
     let engine = get_engine();
+    let play_req = engine.play_request_id.load(Ordering::SeqCst);
+    let loaded_req = engine.loaded_request_id.load(Ordering::SeqCst);
+    if play_req > loaded_req {
+        return 5;
+    }
+    if !engine.has_real_stream.load(Ordering::SeqCst)
+        && engine.playback_state.load(Ordering::SeqCst) == 4
+    {
+        return 4;
+    }
     if engine.initialized.load(Ordering::SeqCst)
         && engine.has_real_stream.load(Ordering::SeqCst)
         && let Ok(player_guard) = engine.player.read()
@@ -608,6 +859,10 @@ pub extern "C" fn lumina_playback_get_state() -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn lumina_playback_get_position_ms() -> u64 {
     let engine = get_engine();
+    if engine.play_request_id.load(Ordering::SeqCst) > engine.loaded_request_id.load(Ordering::SeqCst)
+    {
+        return 0;
+    }
     if engine.initialized.load(Ordering::SeqCst)
         && engine.has_real_stream.load(Ordering::SeqCst)
         && let Ok(player_guard) = engine.player.read()

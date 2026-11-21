@@ -165,6 +165,7 @@ class PlaybackState {
     int? seekEpoch,
     bool? isSeeking,
     String? lastError,
+    bool clearLastError = false,
     bool? deviceLost,
     String? clockSource,
   }) {
@@ -176,7 +177,7 @@ class PlaybackState {
       isMuted: isMuted ?? this.isMuted,
       seekEpoch: seekEpoch ?? this.seekEpoch,
       isSeeking: isSeeking ?? this.isSeeking,
-      lastError: lastError ?? this.lastError,
+      lastError: clearLastError ? null : (lastError ?? this.lastError),
       deviceLost: deviceLost ?? this.deviceLost,
       clockSource: clockSource ?? this.clockSource,
     );

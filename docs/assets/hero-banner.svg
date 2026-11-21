@@ -1,0 +1,212 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070A12"/>
+      <stop offset="45%" stop-color="#0D1324"/>
+      <stop offset="100%" stop-color="#11182E"/>
+    </linearGradient>
+    <radialGradient id="glowBlue" cx="25%" cy="22%" r="48%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.24"/>
+      <stop offset="60%" stop-color="#6366F1" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#070A12" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowPurple" cx="80%" cy="75%" r="45%">
+      <stop offset="0%" stop-color="#A855F7" stop-opacity="0.22"/>
+      <stop offset="65%" stop-color="#EC4899" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#070A12" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="50%" stop-color="#818CF8"/>
+      <stop offset="100%" stop-color="#C084FC"/>
+    </linearGradient>
+    <linearGradient id="cardGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E3A8A"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="cardGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#581C87"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+    <linearGradient id="cardGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#065F46"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+    <linearGradient id="cardGrad4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C2D12"/>
+      <stop offset="100%" stop-color="#F59E0B"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base Canvas -->
+  <rect width="1200" height="540" rx="20" fill="url(#bgGrad)"/>
+  <rect width="1200" height="540" rx="20" fill="url(#glowBlue)"/>
+  <rect width="1200" height="540" rx="20" fill="url(#glowPurple)"/>
+  <rect x="1" y="1" width="1198" height="538" rx="19" fill="none" stroke="#334155" stroke-opacity="0.55" stroke-width="1.5"/>
+
+  <!-- Left Hero Brand Section -->
+  <g transform="translate(52, 54)">
+    <!-- Pill Badge -->
+    <rect x="0" y="0" width="295" height="30" rx="15" fill="#0F172A" stroke="#38BDF8" stroke-opacity="0.45"/>
+    <circle cx="16" cy="15" r="4.5" fill="#22C55E"/>
+    <text x="30" y="19.5" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="12" font-weight="600">v0.2.2 • Bit-Perfect Rust Core + Flutter Desktop</text>
+
+    <!-- Title -->
+    <text x="0" y="84" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="48" font-weight="800" letter-spacing="-0.8">Lumina Audio</text>
+    <text x="0" y="120" fill="url(#accentGrad)" font-family="Segoe UI, Inter, sans-serif" font-size="20" font-weight="700">Audiophile Lossless Music Player for Windows</text>
+    <text x="0" y="152" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="14">原生 WASAPI Exclusive / Win64 ASIO 直通 • 64-bit 浮點錄音室 DSP</text>
+    <text x="0" y="174" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="14">五大串流平台 WebView2 自動登入 (DPAPI 加密) 與智慧首頁推薦</text>
+
+    <!-- Tech Spec Grid Cards -->
+    <g transform="translate(0, 202)">
+      <rect x="0" y="0" width="210" height="72" rx="12" fill="#111827" fill-opacity="0.85" stroke="#1E293B"/>
+      <text x="16" y="26" fill="#38BDF8" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">BIT-PERFECT OUTPUT</text>
+      <text x="16" y="48" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="16" font-weight="800">32-bit / 768kHz • DSD512</text>
+      <text x="16" y="63" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="11">WASAPI Exclusive / Native ASIO</text>
+
+      <rect x="224" y="0" width="210" height="72" rx="12" fill="#111827" fill-opacity="0.85" stroke="#1E293B"/>
+      <text x="240" y="26" fill="#A855F7" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">STUDIO 64-BIT DSP</text>
+      <text x="240" y="48" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="16" font-weight="800">10-Band PEQ + AutoEQ</text>
+      <text x="240" y="63" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="11">Bauer Crossfeed • ReplayGain 2.0</text>
+
+      <rect x="0" y="84" width="210" height="72" rx="12" fill="#111827" fill-opacity="0.85" stroke="#1E293B"/>
+      <text x="16" y="110" fill="#10B981" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">ZERO-JANK 60FPS+ UI</text>
+      <text x="16" y="132" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="16" font-weight="800">64-Band FFT • Synced LRC</text>
+      <text x="16" y="147" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="11">3-Layer GPU Stack • 5-Level Esc</text>
+
+      <rect x="224" y="84" width="210" height="72" rx="12" fill="#111827" fill-opacity="0.85" stroke="#1E293B"/>
+      <text x="240" y="110" fill="#F59E0B" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">5 STREAMING SERVICES</text>
+      <text x="240" y="132" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="16" font-weight="800">WebView2 + Win32 DPAPI</text>
+      <text x="240" y="147" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="11">&lt;16ms Optimistic Switch • Preload</text>
+    </g>
+
+    <!-- 5 Streaming Badges Row -->
+    <g transform="translate(0, 382)">
+      <text x="0" y="15" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="12" font-weight="600">支援串流平台：</text>
+      <rect x="92" y="0" width="76" height="24" rx="6" fill="#FA243C" fill-opacity="0.2" stroke="#FA243C" stroke-opacity="0.6"/>
+      <text x="130" y="16" text-anchor="middle" fill="#FDA4AF" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">Apple Music</text>
+
+      <rect x="176" y="0" width="66" height="24" rx="6" fill="#FF0033" fill-opacity="0.2" stroke="#FF0033" stroke-opacity="0.6"/>
+      <text x="209" y="16" text-anchor="middle" fill="#FCA5A5" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">YT Music</text>
+
+      <rect x="250" y="0" width="58" height="24" rx="6" fill="#0070F3" fill-opacity="0.2" stroke="#38BDF8" stroke-opacity="0.6"/>
+      <text x="279" y="16" text-anchor="middle" fill="#7DD3FC" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">Qobuz</text>
+
+      <rect x="316" y="0" width="54" height="24" rx="6" fill="#14B8A6" fill-opacity="0.2" stroke="#2DD4BF" stroke-opacity="0.6"/>
+      <text x="343" y="16" text-anchor="middle" fill="#5EEAD4" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">TIDAL</text>
+
+      <rect x="378" y="0" width="56" height="24" rx="6" fill="#A855F7" fill-opacity="0.2" stroke="#C084FC" stroke-opacity="0.6"/>
+      <text x="406" y="16" text-anchor="middle" fill="#E9D5FF" font-family="Segoe UI, Inter, sans-serif" font-size="11" font-weight="700">Deezer</text>
+    </g>
+  </g>
+
+  <!-- Right Desktop Application Window Mockup -->
+  <g transform="translate(520, 38)">
+    <!-- App Window Frame -->
+    <rect x="0" y="0" width="636" height="464" rx="14" fill="#0B0F19" stroke="#334155" stroke-width="1.5"/>
+
+    <!-- Top Window Drag Bar (48px) -->
+    <rect x="1" y="1" width="634" height="38" rx="13" fill="#0F172A"/>
+    <text x="18" y="25" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="13" font-weight="700">Lumina Audio</text>
+    <!-- Nav arrows -->
+    <text x="138" y="25" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="14" font-weight="700">&lt;   &gt;</text>
+    <!-- Quality Signal Pill -->
+    <rect x="360" y="8" width="178" height="22" rx="11" fill="#064E3B" stroke="#10B981" stroke-opacity="0.7"/>
+    <circle cx="373" cy="19" r="3.5" fill="#34D399"/>
+    <text x="383" y="23" fill="#A7F3D0" font-family="Segoe UI, Inter, sans-serif" font-size="10.5" font-weight="700">Bit-Perfect • ASIO 192kHz</text>
+    <!-- Window Controls -->
+    <circle cx="574" cy="19" r="4.5" fill="#475569"/>
+    <circle cx="594" cy="19" r="4.5" fill="#475569"/>
+    <circle cx="614" cy="19" r="4.5" fill="#EF4444"/>
+
+    <!-- Left Sidebar -->
+    <rect x="1" y="39" width="124" height="360" fill="#0D1322"/>
+    <line x1="125" y1="39" x2="125" y2="399" stroke="#1E293B"/>
+    <text x="14" y="60" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="9.5" font-weight="700">瀏覽與資料庫</text>
+    <rect x="8" y="68" width="108" height="24" rx="5" fill="#38BDF8" fill-opacity="0.16"/>
+    <text x="20" y="84" fill="#38BDF8" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">●  主頁推薦</text>
+    <text x="20" y="110" fill="#CBD5E1" font-family="Segoe UI, Inter, sans-serif" font-size="11.5">◎  無損專輯</text>
+    <text x="20" y="134" fill="#CBD5E1" font-family="Segoe UI, Inter, sans-serif" font-size="11.5">♪  所有曲目</text>
+    <text x="20" y="158" fill="#CBD5E1" font-family="Segoe UI, Inter, sans-serif" font-size="11.5">✦  智慧歌單</text>
+
+    <text x="14" y="190" fill="#64748B" font-family="Segoe UI, Inter, sans-serif" font-size="9.5" font-weight="700">已連線串流</text>
+    <circle cx="20" cy="208" r="3" fill="#22C55E"/><text x="30" y="212" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11">Qobuz Hi-Res</text>
+    <circle cx="20" cy="230" r="3" fill="#22C55E"/><text x="30" y="234" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11">TIDAL Max</text>
+    <circle cx="20" cy="252" r="3" fill="#22C55E"/><text x="30" y="256" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11">YouTube Music</text>
+    <circle cx="20" cy="274" r="3" fill="#22C55E"/><text x="30" y="278" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11">Deezer HiFi</text>
+    <circle cx="20" cy="296" r="3" fill="#22C55E"/><text x="30" y="300" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11">Apple Music</text>
+
+    <!-- Main Content Dashboard -->
+    <g transform="translate(142, 54)">
+      <text x="0" y="18" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="18" font-weight="800">為你推薦的無損專輯</text>
+      <rect x="380" y="2" width="96" height="22" rx="11" fill="#1E293B" stroke="#38BDF8" stroke-opacity="0.5"/>
+      <text x="428" y="16.5" text-anchor="middle" fill="#38BDF8" font-family="Segoe UI, Inter, sans-serif" font-size="10.5" font-weight="600">↻ 重新整理推薦</text>
+
+      <!-- 4 Album Cards -->
+      <g transform="translate(0, 34)">
+        <rect x="0" y="0" width="110" height="110" rx="10" fill="url(#cardGrad1)"/>
+        <rect x="74" y="6" width="30" height="15" rx="4" fill="#0B0F19" fill-opacity="0.75"/>
+        <text x="89" y="16.5" text-anchor="middle" fill="#38BDF8" font-family="Segoe UI, Inter, sans-serif" font-size="8.5" font-weight="700">QOBUZ</text>
+        <text x="0" y="126" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">Random Access</text>
+        <text x="0" y="141" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="10">Daft Punk • 24/88.2</text>
+
+        <rect x="122" y="0" width="110" height="110" rx="10" fill="url(#cardGrad2)"/>
+        <rect x="196" y="6" width="30" height="15" rx="4" fill="#0B0F19" fill-opacity="0.75"/>
+        <text x="211" y="16.5" text-anchor="middle" fill="#2DD4BF" font-family="Segoe UI, Inter, sans-serif" font-size="8.5" font-weight="700">TIDAL</text>
+        <text x="122" y="126" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">Dark Side (50th)</text>
+        <text x="122" y="141" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="10">Pink Floyd • 24/192</text>
+
+        <rect x="244" y="0" width="110" height="110" rx="10" fill="url(#cardGrad3)"/>
+        <rect x="318" y="6" width="30" height="15" rx="4" fill="#0B0F19" fill-opacity="0.75"/>
+        <text x="333" y="16.5" text-anchor="middle" fill="#F87171" font-family="Segoe UI, Inter, sans-serif" font-size="8.5" font-weight="700">YTM</text>
+        <text x="244" y="126" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">In Rainbows</text>
+        <text x="244" y="141" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="10">Radiohead • Lossless</text>
+
+        <rect x="366" y="0" width="110" height="110" rx="10" fill="url(#cardGrad4)"/>
+        <rect x="434" y="6" width="36" height="15" rx="4" fill="#0B0F19" fill-opacity="0.75"/>
+        <text x="452" y="16.5" text-anchor="middle" fill="#C084FC" font-family="Segoe UI, Inter, sans-serif" font-size="8.5" font-weight="700">DEEZER</text>
+        <text x="366" y="126" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">Kind of Blue</text>
+        <text x="366" y="141" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="10">Miles Davis • DSD64</text>
+      </g>
+
+      <!-- Real-Time 64-Band FFT Spectrum Strip -->
+      <g transform="translate(0, 196)">
+        <rect x="0" y="0" width="476" height="128" rx="10" fill="#111827" stroke="#1E293B"/>
+        <text x="14" y="22" fill="#E2E8F0" font-family="Segoe UI, Inter, sans-serif" font-size="11.5" font-weight="700">即時 64-Band FFT 頻譜分析與 64-bit DSP 引擎</text>
+        <text x="348" y="22" fill="#38BDF8" font-family="Segoe UI, Inter, sans-serif" font-size="10.5" font-weight="600">Lock-Free RingBuffer • 60Hz</text>
+        <!-- Spectrum Bars -->
+        <g transform="translate(16, 114) scale(1, -1)" fill="url(#accentGrad)">
+          <rect x="0" y="0" width="8" height="32" rx="2"/><rect x="14" y="0" width="8" height="48" rx="2"/>
+          <rect x="28" y="0" width="8" height="68" rx="2"/><rect x="42" y="0" width="8" height="58" rx="2"/>
+          <rect x="56" y="0" width="8" height="74" rx="2"/><rect x="70" y="0" width="8" height="62" rx="2"/>
+          <rect x="84" y="0" width="8" height="44" rx="2"/><rect x="98" y="0" width="8" height="54" rx="2"/>
+          <rect x="112" y="0" width="8" height="72" rx="2"/><rect x="126" y="0" width="8" height="64" rx="2"/>
+          <rect x="140" y="0" width="8" height="50" rx="2"/><rect x="154" y="0" width="8" height="38" rx="2"/>
+          <rect x="168" y="0" width="8" height="58" rx="2"/><rect x="182" y="0" width="8" height="76" rx="2"/>
+          <rect x="196" y="0" width="8" height="66" rx="2"/><rect x="210" y="0" width="8" height="48" rx="2"/>
+          <rect x="224" y="0" width="8" height="36" rx="2"/><rect x="238" y="0" width="8" height="52" rx="2"/>
+          <rect x="252" y="0" width="8" height="64" rx="2"/><rect x="266" y="0" width="8" height="46" rx="2"/>
+          <rect x="280" y="0" width="8" height="34" rx="2"/><rect x="294" y="0" width="8" height="42" rx="2"/>
+          <rect x="308" y="0" width="8" height="56" rx="2"/><rect x="322" y="0" width="8" height="49" rx="2"/>
+          <rect x="336" y="0" width="8" height="38" rx="2"/><rect x="350" y="0" width="8" height="30" rx="2"/>
+          <rect x="364" y="0" width="8" height="44" rx="2"/><rect x="378" y="0" width="8" height="52" rx="2"/>
+          <rect x="392" y="0" width="8" height="36" rx="2"/><rect x="406" y="0" width="8" height="26" rx="2"/>
+          <rect x="420" y="0" width="8" height="20" rx="2"/><rect x="434" y="0" width="8" height="14" rx="2"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- Bottom Floating Capsule Mini Player -->
+    <rect x="1" y="399" width="634" height="64" rx="12" fill="#131C31" stroke="#334155"/>
+    <rect x="14" y="411" width="40" height="40" rx="6" fill="url(#cardGrad2)"/>
+    <text x="64" y="428" fill="#F8FAFC" font-family="Segoe UI, Inter, sans-serif" font-size="12.5" font-weight="700">Time (2023 Remaster)</text>
+    <text x="64" y="445" fill="#94A3B8" font-family="Segoe UI, Inter, sans-serif" font-size="11">Pink Floyd • FLAC 24-bit / 192 kHz</text>
+
+    <!-- Transport Controls & Progress -->
+    <circle cx="318" cy="422" r="14" fill="#38BDF8"/>
+    <polygon points="315,416 315,428 325,422" fill="#0B0F19"/>
+    <rect x="230" y="444" width="176" height="4" rx="2" fill="#1E293B"/>
+    <rect x="230" y="444" width="108" height="4" rx="2" fill="#38BDF8"/>
+    <text x="488" y="435" fill="#34D399" font-family="Segoe UI, Inter, sans-serif" font-size="10.5" font-weight="700">● Bit-Perfect Unity</text>
+  </g>
+</svg>

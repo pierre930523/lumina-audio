@@ -39,11 +39,14 @@ class PlaybackControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isPlaying = status == PlaybackStatus.playing;
+    final isLoading =
+        status == PlaybackStatus.loading || status == PlaybackStatus.buffering;
     final density = compact ? VisualDensity.compact : VisualDensity.standard;
     final padding = compact ? const EdgeInsets.all(4) : const EdgeInsets.all(8);
     final btnConstraints = compact
         ? const BoxConstraints(minWidth: 36, minHeight: 36)
         : const BoxConstraints(minWidth: 40, minHeight: 40);
+    final spinnerSize = compact ? 20.0 : 24.0;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -69,13 +72,23 @@ class PlaybackControls extends StatelessWidget {
               ? const BoxConstraints(minWidth: 40, minHeight: 40)
               : const BoxConstraints(minWidth: 44, minHeight: 44),
           style: _transportStyle(isPrimary: true),
-          icon: Icon(
-            isPlaying
-                ? Icons.pause_circle_filled_rounded
-                : Icons.play_circle_fill_rounded,
-            size: compact ? 30 : 34,
-          ),
-          tooltip: isPlaying ? '暫停' : '播放',
+          icon: isLoading
+              ? SizedBox(
+                  width: spinnerSize,
+                  height: spinnerSize,
+                  child: const CircularProgressIndicator(
+                    key: Key('btn_play_pause_loading'),
+                    strokeWidth: 2.2,
+                    color: LuminaTokens.accentBlue,
+                  ),
+                )
+              : Icon(
+                  isPlaying
+                      ? Icons.pause_circle_filled_rounded
+                      : Icons.play_circle_fill_rounded,
+                  size: compact ? 30 : 34,
+                ),
+          tooltip: isLoading ? '載入串流中...' : (isPlaying ? '暫停' : '播放'),
           onPressed: onPlayPause,
         ),
         IconButton(

@@ -13,11 +13,21 @@ app/.packages
 app/pubspec.lock
 **/GeneratedPluginRegistrant.*
 
-# Python
+# Python / Test Harnesses & Workspace Planning Notes (keep repo source-only)
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
+HANDOFF.md
+PROJECT.md
+TEST_INFRA.md
+design-system/
+docs/ixd/
+docs/PROGRESS.md
+docs/ARCHITECTURE.md
+tests/
+run_e2e_tests.ps1
+installer/*.iss
 
 # IDE / OS
 .vscode/

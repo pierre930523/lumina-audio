@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -7,16 +8,23 @@ import 'package:material_ui/material_ui.dart';
 
 import '../models/nav_entry.dart';
 import '../models/playback_state.dart';
+import '../models/streaming_models.dart';
 import '../models/streaming_provider_meta.dart';
 import '../models/studio_models.dart';
 import '../services/album_layout_settings_controller.dart';
 import '../services/artwork_palette_service.dart';
 import '../services/audio_service.dart';
+import '../services/desktop_window_controller.dart';
+import '../services/escape_dismiss_registry.dart';
 import '../services/library_index_cache.dart';
 import '../services/library_settings_controller.dart';
 import '../services/now_playing_view_controller.dart';
 import '../services/playback_persistence_service.dart';
 import '../services/smart_playlist_service.dart';
+import '../services/streaming/oauth_helper.dart';
+import '../services/streaming/secure_credential_store.dart';
+import '../services/streaming/streaming_manager.dart';
+import '../services/streaming/streaming_playback_coordinator.dart';
 import '../services/ui_scale_controller.dart';
 import '../shaders/shader_loader.dart';
 import 'albums/album_detail_page.dart';
@@ -67,6 +75,9 @@ class HomeScreen extends StatefulWidget {
   final NavHistoryController? navHistoryController;
   final NowPlayingViewController? nowPlayingController;
   final ArtworkPaletteService? artworkPaletteService;
+  final DesktopWindowController? windowController;
+  final StreamingManager? streamingManager;
+  final PlaybackPersistenceService? playbackPersistenceService;
 
   const HomeScreen({
     super.key,
@@ -76,6 +87,9 @@ class HomeScreen extends StatefulWidget {
     this.navHistoryController,
     this.nowPlayingController,
     this.artworkPaletteService,
+    this.windowController,
+    this.streamingManager,
+    this.playbackPersistenceService,
   });
 
   @override
@@ -84,6 +98,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with TickerProviderStateMixin {
+  late final DesktopWindowController _windowController =
+      widget.windowController ?? DesktopWindowController.instance;
   static const _canvasBg = LuminaTokens.canvasBg;
   static const _sidebarBg = LuminaTokens.sidebarBg;
   static const _settingsRailBg = LuminaTokens.sidebarBg;
@@ -246,7 +262,20 @@ class _HomeScreenState extends State<HomeScreen>
   late final LibrarySettingsController _librarySettingsController;
   late final AlbumLayoutSettingsController _albumLayoutController;
   late final PlaybackPersistenceService _playbackPersistenceService;
+  late final bool _ownsPlaybackPersistenceService;
+  late final StreamingManager _streamingManager;
+  late final bool _ownsStreamingManager;
+  late final StreamingPlaybackCoordinator _streamingCoordinator;
   StreamSubscription<PlaybackState>? _playbackStateSub;
+
+  bool _isStartupRestoring = true;
+  bool _isHiddenToTray = false;
+  bool _isExiting = false;
+  PlaybackStatus? _lastPersistedStatus;
+  String? _lastPersistedTrackId;
+  String? _lastTrayTrackKey;
+  bool? _lastTrayPlaying;
+  bool? _lastTrayIdle;
 
   HomeTab get _activeTab => _navController.current.tab;
 
@@ -273,7 +302,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     _nowPlayingAnimController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 220),
+      duration: const Duration(milliseconds: 300),
     );
     _nowPlayingCurvedAnim = CurvedAnimation(
       parent: _nowPlayingAnimController,
@@ -281,7 +310,7 @@ class _HomeScreenState extends State<HomeScreen>
       reverseCurve: Curves.easeInCubic,
     );
     _nowPlayingSlideAnim = Tween<Offset>(
-      begin: const Offset(0, 0.06),
+      begin: const Offset(0, 0.08),
       end: Offset.zero,
     ).animate(_nowPlayingCurvedAnim);
     _nowPlayingAnimController.addStatusListener(_onNowPlayingAnimStatus);
@@ -298,39 +327,384 @@ class _HomeScreenState extends State<HomeScreen>
 
     _ownsScaleController = widget.uiScaleController == null;
     _scaleController = widget.uiScaleController ?? UiScaleController();
+    widget.audioService.setVisualizerSettingEnabled(false);
+    _scaleController.addListener(_onScaleControllerVisualizerChanged);
     _playlistService = SmartPlaylistService()..load();
     _librarySettingsController = LibrarySettingsController()..load();
     _albumLayoutController = AlbumLayoutSettingsController()..load();
     _selectedSmartPlaylistId = _playlistService.playlists.firstOrNull?.id;
     _syncStateFromEntry(_navController.current);
-    _refreshProviders();
     _initShaders();
 
-    _playbackPersistenceService = PlaybackPersistenceService();
-    _playbackPersistenceService.restoreSession(widget.audioService);
-    PlaybackStatus? lastPersistedStatus;
-    String? lastPersistedTrackId;
-    _playbackStateSub = widget.audioService.stateStream.listen((state) {
-      final isPlaying = state.status == PlaybackStatus.playing;
-      final statusChanged = state.status != lastPersistedStatus;
-      final trackChanged = state.track?.id != lastPersistedTrackId;
-      lastPersistedStatus = state.status;
-      lastPersistedTrackId = state.track?.id;
+    _ownsStreamingManager = widget.streamingManager == null;
+    _streamingManager = widget.streamingManager ??
+        StreamingManager(
+          credentialStore: Platform.environment.containsKey('FLUTTER_TEST')
+              ? MemorySecureCredentialStore()
+              : null,
+        );
+    _streamingManager.addListener(_onStreamingManagerChanged);
+    _syncStreamingProvidersFromManager(notify: false);
+    _streamingCoordinator = StreamingPlaybackCoordinator(
+      audioService: widget.audioService,
+      streamingManager: _streamingManager,
+      onNotice: _showStreamingNoticeSnackBar,
+      onError: _showStreamingErrorSnackBar,
+    );
 
-      if (isPlaying) {
-        final snapshot = _playbackPersistenceService.buildSnapshot(
-          state: state,
-          queue: widget.audioService.queue,
-        );
-        _playbackPersistenceService.saveThrottled(snapshot);
-      } else if (statusChanged || trackChanged) {
-        final snapshot = _playbackPersistenceService.buildSnapshot(
-          state: state,
-          queue: widget.audioService.queue,
-        );
-        _playbackPersistenceService.saveImmediate(snapshot);
+    _ownsPlaybackPersistenceService = widget.playbackPersistenceService == null;
+    _playbackPersistenceService =
+        widget.playbackPersistenceService ?? PlaybackPersistenceService();
+
+    _windowController.setPreventClose(true);
+    _windowController.onWindowClose = _handleWindowClose;
+    _windowController.onTrayClick = _handleRestoreFromTray;
+    _windowController.onTrayMenuAction = _handleTrayMenuAction;
+    final initialTray = _trayInfoFor(widget.audioService.currentState);
+    _lastTrayTrackKey = _trayTrackKeyFor(widget.audioService.currentState);
+    _lastTrayPlaying = initialTray.isPlaying;
+    _lastTrayIdle = _isTrayIdleState(widget.audioService.currentState);
+    _windowController.initTray(
+      tooltip: initialTray.tooltip,
+      nowPlayingLabel: initialTray.nowPlayingLabel,
+      isPlaying: initialTray.isPlaying,
+    );
+
+    _playbackStateSub = widget.audioService.stateStream.listen(_onPlaybackState);
+    EscapeDismissRegistry.instance.registerGlobalHost();
+    HardwareKeyboard.instance.addHandler(_handleHardwareKey);
+    _initializeStartupSession();
+  }
+
+  Future<void> _initializeStartupSession() async {
+    try {
+      await _scaleController.load(
+        audioService: _ownsScaleController ? widget.audioService : null,
+      );
+      if (!mounted || _isExiting) return;
+
+      await _playbackPersistenceService.restoreSession(
+        widget.audioService,
+        rememberPosition: _scaleController.rememberPlaybackPosition,
+      );
+    } catch (_) {
+      // Keep startup resilient if preferences or session file fail to read.
+    } finally {
+      _isStartupRestoring = false;
+      final cur = widget.audioService.currentState;
+      _lastPersistedStatus = cur.status;
+      _lastPersistedTrackId = cur.track?.id;
+      _syncTrayFromState(cur);
+    }
+
+    if (!mounted || _isExiting) return;
+    try {
+      await _streamingManager.initialize();
+    } catch (_) {
+      // Provider errors remain visible on each provider's authState/lastError.
+    }
+    if (!mounted || _isExiting) return;
+    _syncStreamingProvidersFromManager();
+  }
+
+  void _onStreamingManagerChanged() {
+    _syncStreamingProvidersFromManager();
+  }
+
+  void _syncStreamingProvidersFromManager({bool notify = true}) {
+    final streaming = _streamingManager.connectedProviders
+        .map(
+          (p) => ProviderStatusInfo(
+            kind: p.kind,
+            isConfigured: true,
+            isOnline: true,
+          ),
+        )
+        .toList(growable: false);
+    if (!notify) {
+      _loggedInStreamingProviders = streaming;
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _loggedInStreamingProviders = streaming;
+      if (_activeTab == HomeTab.streamingProvider &&
+          !streaming.any((p) => p.kind == _selectedStreamingKind)) {
+        _selectedStreamingKind = null;
+        _navController.replaceCurrent(NavEntry.tab(HomeTab.settings));
       }
     });
+  }
+
+  bool _isTrayIdleState(PlaybackState state) =>
+      state.track == null ||
+      state.status == PlaybackStatus.stopped ||
+      state.status == PlaybackStatus.uninitialized;
+
+  String _trayTrackKeyFor(PlaybackState state) {
+    final t = state.track;
+    if (t == null) return 'none';
+    return '${t.id}|${t.title}|${t.artist}';
+  }
+
+  ({String tooltip, String nowPlayingLabel, bool isPlaying}) _trayInfoFor(
+    PlaybackState state,
+  ) {
+    final track = state.track;
+    final isPlaying = state.status == PlaybackStatus.playing;
+    if (_isTrayIdleState(state) || track == null) {
+      return (
+        tooltip: 'Lumina Audio — 待機中',
+        nowPlayingLabel: 'Lumina Audio — 待機中',
+        isPlaying: false,
+      );
+    }
+    return (
+      tooltip: 'Lumina Audio — ${track.title} - ${track.artist}',
+      nowPlayingLabel: '正在播放：${track.title} - ${track.artist}',
+      isPlaying: isPlaying,
+    );
+  }
+
+  void _syncTrayFromState(PlaybackState state) {
+    final trackKey = _trayTrackKeyFor(state);
+    final isPlaying = state.status == PlaybackStatus.playing;
+    final isIdle = _isTrayIdleState(state);
+    if (trackKey == _lastTrayTrackKey &&
+        isPlaying == _lastTrayPlaying &&
+        isIdle == _lastTrayIdle) {
+      return;
+    }
+    _lastTrayTrackKey = trackKey;
+    _lastTrayPlaying = isPlaying;
+    _lastTrayIdle = isIdle;
+    final info = _trayInfoFor(state);
+    unawaited(
+      _windowController.updateTray(
+        tooltip: info.tooltip,
+        nowPlayingLabel: info.nowPlayingLabel,
+        isPlaying: info.isPlaying,
+      ),
+    );
+  }
+
+  void _onPlaybackState(PlaybackState state) {
+    _syncTrayFromState(state);
+    if (_isStartupRestoring ||
+        _playbackPersistenceService.isRestoring ||
+        _isExiting) {
+      return;
+    }
+
+    final isPlaying = state.status == PlaybackStatus.playing;
+    final statusChanged = state.status != _lastPersistedStatus;
+    final trackChanged = state.track?.id != _lastPersistedTrackId;
+    _lastPersistedStatus = state.status;
+    _lastPersistedTrackId = state.track?.id;
+
+    if (isPlaying) {
+      final snapshot = _playbackPersistenceService.buildSnapshot(
+        state: state,
+        queue: widget.audioService.queue,
+      );
+      _playbackPersistenceService.saveThrottled(snapshot);
+    } else if (statusChanged || trackChanged) {
+      final snapshot = _playbackPersistenceService.buildSnapshot(
+        state: state,
+        queue: widget.audioService.queue,
+      );
+      unawaited(_playbackPersistenceService.saveImmediate(snapshot));
+    }
+  }
+
+  void _handleWindowClose() {
+    if (_isExiting) return;
+    if (_scaleController.minimizeToTrayOnClose) {
+      final snap = _playbackPersistenceService.buildSnapshot(
+        state: widget.audioService.currentState,
+        queue: widget.audioService.queue,
+      );
+      unawaited(_playbackPersistenceService.saveImmediate(snap));
+      if (mounted) {
+        setState(() {
+          _isHiddenToTray = true;
+        });
+      } else {
+        _isHiddenToTray = true;
+      }
+      widget.audioService.setWindowMinimized(true);
+      unawaited(_windowController.hide());
+      return;
+    }
+    unawaited(_performCleanExit());
+  }
+
+  void _handleRestoreFromTray() {
+    if (_isExiting) return;
+    _isHiddenToTray = false;
+    widget.audioService.setWindowMinimized(false);
+    unawaited(() async {
+      await _windowController.show();
+      await _windowController.focus();
+      if (mounted) {
+        setState(() {});
+      }
+    }());
+  }
+
+  void _handleTrayMenuAction(String action) {
+    switch (action) {
+      case 'show':
+        _handleRestoreFromTray();
+      case 'toggle_play_pause':
+        unawaited(widget.audioService.togglePlayPause());
+      case 'previous':
+        unawaited(widget.audioService.previous());
+      case 'next':
+        unawaited(widget.audioService.next());
+      case 'quit':
+        unawaited(_performCleanExit());
+    }
+  }
+
+  Future<void> _performCleanExit() async {
+    if (_isExiting) return;
+    _isExiting = true;
+    try {
+      final baseState = widget.audioService.currentState;
+      var effectiveState = baseState;
+      try {
+        final liveMap = await widget.audioService.getPlaybackState();
+        if (liveMap != null) {
+          final livePosMs = (liveMap['position_ms'] as num?)?.toInt();
+          final liveVol = (liveMap['volume'] as num?)?.toDouble();
+          final liveCode = (liveMap['state_code'] as num?)?.toInt();
+          effectiveState = baseState.copyWith(
+            position: livePosMs != null && livePosMs >= 0
+                ? Duration(milliseconds: livePosMs)
+                : baseState.position,
+            volume: liveVol != null && liveVol.isFinite
+                ? liveVol.clamp(0.0, 1.0)
+                : baseState.volume,
+            status: liveCode != null
+                ? PlaybackStatus.fromCode(liveCode)
+                : baseState.status,
+          );
+        }
+      } catch (_) {
+        effectiveState = widget.audioService.currentState;
+      }
+
+      final snapshot = _playbackPersistenceService.buildSnapshot(
+        state: effectiveState,
+        queue: widget.audioService.queue,
+      );
+      await _playbackPersistenceService.saveAndFlushForExit(snapshot);
+
+      await _playbackStateSub?.cancel();
+      _playbackStateSub = null;
+      widget.audioService.dispose();
+      await _windowController.destroyTray();
+      await _windowController.destroy();
+    } catch (_) {
+      try {
+        await _windowController.destroyTray();
+      } catch (_) {}
+      try {
+        await _windowController.destroy();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _openExternalUrl(String url) async {
+    try {
+      await openSystemBrowser(
+        url,
+        urlOpener: _windowController.isSupported ? _windowController.openUrl : null,
+      );
+    } catch (_) {}
+  }
+
+  String? _fallbackWebUrlForTrack(TrackInfo track) {
+    final id = track.id;
+    if (id.startsWith('apple:')) {
+      return 'https://music.apple.com';
+    }
+    if (id.startsWith('tidal:')) {
+      return 'https://listen.tidal.com/track/${id.substring(6)}';
+    }
+    if (id.startsWith('deezer:')) {
+      return 'https://www.deezer.com/track/${id.substring(7)}';
+    }
+    if (id.startsWith('ytm:')) {
+      return 'https://music.youtube.com/watch?v=${id.substring(4)}';
+    }
+    if (id.startsWith('qobuz:')) {
+      return 'https://play.qobuz.com';
+    }
+    return null;
+  }
+
+  void _showStreamingNoticeSnackBar(
+    TrackInfo track,
+    ResolvedStreamResult result,
+  ) {
+    if (!mounted) return;
+    final notice =
+        result.drmNotice ?? '目前播放為官方試聽片段（${result.format.label}）';
+    final webUrl = result.externalWebUrl;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(notice),
+          action: webUrl != null && webUrl.isNotEmpty
+              ? SnackBarAction(
+                  label: '於瀏覽器開啟',
+                  textColor: LuminaTokens.accentBlue,
+                  onPressed: () => _openExternalUrl(webUrl),
+                )
+              : null,
+        ),
+      );
+  }
+
+  void _showStreamingErrorSnackBar(
+    TrackInfo track,
+    String message,
+    bool isDrmRestricted,
+  ) {
+    if (!mounted) return;
+    final webUrl = isDrmRestricted ? _fallbackWebUrlForTrack(track) : null;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          backgroundColor: LuminaTokens.statusErrorBg,
+          content: Text(
+            message,
+            style: const TextStyle(color: Color(0xFFFECACA)),
+          ),
+          action: webUrl != null
+              ? SnackBarAction(
+                  label: '於瀏覽器開啟',
+                  textColor: LuminaTokens.accentBlue,
+                  onPressed: () => _openExternalUrl(webUrl),
+                )
+              : null,
+        ),
+      );
+  }
+
+  Future<void> _playStreamingTrack(
+    TrackInfo track, {
+    List<TrackInfo>? queueContext,
+  }) async {
+    await _streamingCoordinator.playTrack(track, queueContext: queueContext);
+  }
+
+  void _onScaleControllerVisualizerChanged() {
+    widget.audioService.setVisualizerSettingEnabled(false);
   }
 
   void _onNavChanged() {
@@ -443,23 +817,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _refreshProviders() async {
-    final list = await widget.audioService.listProviders();
+    await widget.audioService.listProviders();
     if (!mounted) return;
-    final streaming = list
-        .where(
-          (p) =>
-              StreamingProviderMeta.isStreamingKind(p.kind) &&
-              (p.isOnline || p.isConfigured),
-        )
-        .toList();
-    setState(() {
-      _loggedInStreamingProviders = streaming;
-      if (_activeTab == HomeTab.streamingProvider &&
-          !streaming.any((p) => p.kind == _selectedStreamingKind)) {
-        _selectedStreamingKind = null;
-        _navController.replaceCurrent(NavEntry.tab(HomeTab.settings));
-      }
-    });
+    _syncStreamingProvidersFromManager();
   }
 
   Future<void> _initShaders() async {
@@ -473,6 +833,22 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
+    EscapeDismissRegistry.instance.unregisterGlobalHost();
+    if (_windowController.onWindowClose == _handleWindowClose) {
+      _windowController.onWindowClose = null;
+    }
+    if (_windowController.onTrayClick == _handleRestoreFromTray) {
+      _windowController.onTrayClick = null;
+    }
+    if (_windowController.onTrayMenuAction == _handleTrayMenuAction) {
+      _windowController.onTrayMenuAction = null;
+    }
+    _streamingCoordinator.dispose();
+    _streamingManager.removeListener(_onStreamingManagerChanged);
+    if (_ownsStreamingManager) {
+      _streamingManager.dispose();
+    }
     _nowPlayingAnimController.removeStatusListener(_onNowPlayingAnimStatus);
     _nowPlayingAnimController.dispose();
     if (_ownsNowPlayingController) {
@@ -487,6 +863,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (_ownsLibraryCache) {
       _libraryCache.dispose();
     }
+    _scaleController.removeListener(_onScaleControllerVisualizerChanged);
     if (_ownsScaleController) {
       _scaleController.dispose();
     }
@@ -494,8 +871,13 @@ class _HomeScreenState extends State<HomeScreen>
     _librarySettingsController.dispose();
     _albumLayoutController.dispose();
     _playbackStateSub?.cancel();
-    _playbackPersistenceService.flush();
-    _playbackPersistenceService.dispose();
+    _playbackStateSub = null;
+    if (!_isExiting) {
+      unawaited(_playbackPersistenceService.flush(syncFlush: true));
+    }
+    if (_ownsPlaybackPersistenceService) {
+      _playbackPersistenceService.dispose();
+    }
     _glassShader?.dispose();
     _shaders.backdropImage?.dispose();
     super.dispose();
@@ -551,8 +933,26 @@ class _HomeScreenState extends State<HomeScreen>
   void _openAlbumDetail(String albumId) {
     if (albumId.isEmpty) return;
     _selectedAlbumId = albumId;
-    _libraryCache.loadAlbumDetail(widget.audioService, albumId);
+    if (!albumId.startsWith('streaming:')) {
+      _libraryCache.loadAlbumDetail(widget.audioService, albumId);
+    }
     _pushEntry(NavEntry.album(albumId));
+  }
+
+  void _openStreamingAlbum(StreamingAlbum album) {
+    final fullId = 'streaming:${album.providerKind}:${album.id}';
+    _selectedAlbumId = fullId;
+    _libraryCache.putAlbumSummarySync(
+      CanonicalAlbumSummary(
+        id: fullId,
+        title: album.title,
+        artist: album.artist,
+        year: album.year,
+        availableProviders: <String>[album.providerKind],
+        coverUrl: album.coverUrl,
+      ),
+    );
+    _pushEntry(NavEntry.album(fullId));
   }
 
   void _openArtist(String artistName) {
@@ -621,16 +1021,63 @@ class _HomeScreenState extends State<HomeScreen>
     return context.findAncestorWidgetOfExactType<EditableText>() != null;
   }
 
-  void _handleEscape() {
-    if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
-      return;
+  bool _handleHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    if (event is KeyRepeatEvent) {
+      return event.logicalKey == LogicalKeyboardKey.escape;
     }
+    if (event is! KeyDownEvent) return false;
+    if (event.logicalKey == LogicalKeyboardKey.f11) {
+      unawaited(_windowController.toggleFullScreen());
+      return true;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      return _handleEscape();
+    }
+    return false;
+  }
+
+  bool _handleEscape() {
+    // 1. Active text input focus -> unfocus only.
+    if (_isTextEditingFocused()) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      return true;
+    }
+
+    // 2. Floating layers (non-Navigator popovers -> root Navigator dialogs ->
+    //    Now Playing lyrics settings toolbar).
+    if (EscapeDismissRegistry.instance.dismissTopmost()) {
+      return true;
+    }
+    final rootNav = Navigator.maybeOf(context, rootNavigator: true);
+    if (rootNav != null && rootNav.canPop()) {
+      unawaited(rootNav.maybePop());
+      return true;
+    }
+    if (_isNowPlayingExpanded && _nowPlayingController.lyricsSettingsExpanded) {
+      _nowPlayingController.setLyricsSettingsExpanded(false);
+      return true;
+    }
+
+    // 3. Exit fullscreen mode.
+    if (_windowController.isFullScreenNotifier.value) {
+      unawaited(_windowController.setFullScreen(false));
+      return true;
+    }
+
+    // 4. Collapse Now Playing overlay.
     if (_isNowPlayingExpanded) {
       _setNowPlayingExpanded(false);
-      return;
+      return true;
     }
-    FocusManager.instance.primaryFocus?.unfocus();
+
+    // 5. Step back in workspace navigation history.
+    if (_navController.canGoBack) {
+      _goBack();
+      return true;
+    }
+
+    return false;
   }
 
   @override
@@ -662,208 +1109,168 @@ class _HomeScreenState extends State<HomeScreen>
             if (_isTextEditingFocused()) return;
             widget.audioService.toggleMute();
           },
-          const SingleActivator(LogicalKeyboardKey.escape): _handleEscape,
         },
         child: Focus(
           autofocus: true,
           child: Scaffold(
             backgroundColor: _canvasBg,
-            body: SafeArea(
-              child: LayoutBuilder(
+            body: TickerMode(
+              enabled: !_isHiddenToTray,
+              child: SafeArea(
+                child: LayoutBuilder(
                 builder: (context, constraints) {
                   final availWidth = constraints.maxWidth;
                   final isDesktop =
                       LuminaResponsive.showDesktopSidebar(availWidth);
                   final sidebarWidth =
                       LuminaResponsive.sidebarWidth(availWidth);
+                  final miniPlayerClearance = availWidth >= 740
+                      ? 99.0
+                      : (availWidth >= 480 ? 116.0 : 138.0);
                   final showOverlay = _hasEverExpandedNowPlaying &&
                       (_isNowPlayingExpanded ||
                           !_nowPlayingAnimController.isDismissed);
-                  final showWorkspace = !_isNowPlayingExpanded ||
-                      !_nowPlayingAnimController.isCompleted;
-
-                  if (!showOverlay) {
-                    return Column(
-                      children: [
-                        _buildTopBar(
-                          isDesktop: isDesktop,
-                          availWidth: availWidth,
-                          sidebarWidth: sidebarWidth,
-                        ),
-                        Expanded(
-                          child: KeyedSubtree(
-                            key: const ValueKey('workspace_stage'),
-                            child: isDesktop
-                                ? Row(
-                                    children: [
-                                      ClipRect(
-                                        child: AnimatedAlign(
-                                          duration: const Duration(
-                                            milliseconds: 220,
-                                          ),
-                                          curve: Curves.easeOutCubic,
-                                          alignment: Alignment.centerRight,
-                                          widthFactor:
-                                              _sidebarCollapsed ? 0.0 : 1.0,
-                                          child: _buildSidebar(
-                                            width: sidebarWidth,
-                                          ),
-                                        ),
-                                      ),
-                                      Expanded(
-                                        child: _buildMainColumn(
-                                          isDesktop: true,
-                                          availWidth: availWidth -
-                                              (_sidebarCollapsed
-                                                  ? 0.0
-                                                  : sidebarWidth),
-                                        ),
-                                      ),
-                                    ],
-                                  )
-                                : _buildMainColumn(
-                                    isDesktop: false,
-                                    availWidth: availWidth,
-                                  ),
-                          ),
-                        ),
-                        FloatingCapsuleMiniPlayer(
-                          audioService: widget.audioService,
-                          uiScaleController: _scaleController,
-                          showLyrics: false,
-                          isNowPlayingExpanded: false,
-                          glassShader: _glassShader,
-                          backdropImage: _shaders.backdropImage,
-                          onToggleLyrics: _toggleNowPlaying,
-                          onToggleNowPlaying: _toggleNowPlaying,
-                          onOpenZones: () => _selectTab(HomeTab.zones),
-                          onOpenLibrary: () => _selectTab(HomeTab.library),
-                        ),
-                      ],
-                    );
-                  }
+                  final isNowPlayingFullyCovered = _isNowPlayingExpanded &&
+                      _nowPlayingAnimController.isCompleted &&
+                      !_isHiddenToTray;
 
                   return Stack(
                     fit: StackFit.expand,
                     children: [
-                      // Layer 0: Workspace (if animating out)
-                      if (showWorkspace)
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            ignoring: true,
-                            child: FadeTransition(
-                              opacity: ReverseAnimation(_nowPlayingCurvedAnim),
-                              child: Column(
-                                children: [
-                                  _buildTopBar(
-                                    isDesktop: isDesktop,
-                                    availWidth: availWidth,
-                                    sidebarWidth: sidebarWidth,
+                      // Layer 0: Persistent Workspace (never torn down on Now Playing open/close)
+                      Positioned.fill(
+                        key: const ValueKey('home_workspace_layer'),
+                        child: RepaintBoundary(
+                          key: const Key('workspace_repaint_boundary'),
+                          child: TickerMode(
+                            enabled:
+                                !_isHiddenToTray && !isNowPlayingFullyCovered,
+                            child: Visibility(
+                              visible: !isNowPlayingFullyCovered,
+                              maintainState: true,
+                              maintainAnimation: true,
+                              maintainSize: true,
+                              child: IgnorePointer(
+                                ignoring: _isNowPlayingExpanded,
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    bottom: miniPlayerClearance,
                                   ),
-                                  Expanded(
-                                    child: KeyedSubtree(
-                                      key: const ValueKey('workspace_stage'),
-                                      child: isDesktop
-                                          ? Row(
-                                              children: [
-                                                ClipRect(
-                                                  child: AnimatedAlign(
-                                                    duration: const Duration(
-                                                      milliseconds: 220,
-                                                    ),
-                                                    curve: Curves.easeOutCubic,
-                                                    alignment:
-                                                        Alignment.centerRight,
-                                                    widthFactor:
-                                                        _sidebarCollapsed
-                                                            ? 0.0
-                                                            : 1.0,
-                                                    child: _buildSidebar(
-                                                      width: sidebarWidth,
-                                                    ),
-                                                  ),
-                                                ),
-                                                Expanded(
-                                                  child: _buildMainColumn(
-                                                    isDesktop: true,
-                                                    availWidth: availWidth -
-                                                        (_sidebarCollapsed
-                                                            ? 0.0
-                                                            : sidebarWidth),
-                                                  ),
-                                                ),
-                                              ],
-                                            )
-                                          : _buildMainColumn(
-                                              isDesktop: false,
-                                              availWidth: availWidth,
-                                            ),
-                                    ),
-                                  ),
-                                  Opacity(
-                                    opacity: 0.0,
-                                    child: IgnorePointer(
-                                      child: FloatingCapsuleMiniPlayer(
-                                        audioService: widget.audioService,
-                                        uiScaleController: _scaleController,
-                                        showLyrics: false,
-                                        isNowPlayingExpanded: false,
-                                        glassShader: _glassShader,
-                                        backdropImage: _shaders.backdropImage,
-                                        onToggleLyrics: _toggleNowPlaying,
+                                  child: Column(
+                                    children: [
+                                      _buildTopBar(
+                                        isDesktop: isDesktop,
+                                        availWidth: availWidth,
+                                        sidebarWidth: sidebarWidth,
                                       ),
-                                    ),
+                                      Expanded(
+                                        child: KeyedSubtree(
+                                          key: const ValueKey('workspace_stage'),
+                                          child: isDesktop
+                                              ? Row(
+                                                  children: [
+                                                    ClipRect(
+                                                      child: AnimatedAlign(
+                                                        duration: const Duration(
+                                                          milliseconds: 220,
+                                                        ),
+                                                        curve: Curves.easeOutCubic,
+                                                        alignment:
+                                                            Alignment.centerRight,
+                                                        widthFactor:
+                                                            _sidebarCollapsed
+                                                                ? 0.0
+                                                                : 1.0,
+                                                        child: _buildSidebar(
+                                                          width: sidebarWidth,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    Expanded(
+                                                      child: _buildMainColumn(
+                                                        isDesktop: true,
+                                                        availWidth: availWidth -
+                                                            (_sidebarCollapsed
+                                                                ? 0.0
+                                                                : sidebarWidth),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                )
+                                              : _buildMainColumn(
+                                                  isDesktop: false,
+                                                  availWidth: availWidth,
+                                                ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      // Layer 1: Fullscreen NowPlayingOverlay (spans 100% height from top: 0 to bottom: 0)
+                      if (showOverlay)
+                        Positioned.fill(
+                          key: const ValueKey('home_now_playing_layer'),
+                          child: RepaintBoundary(
+                            key: const Key(
+                              'now_playing_overlay_repaint_boundary',
+                            ),
+                            child: SlideTransition(
+                              position: _nowPlayingSlideAnim,
+                              child: FadeTransition(
+                                opacity: _nowPlayingCurvedAnim,
+                                child: NowPlayingOverlay(
+                                  key: const ValueKey('now_playing_stage'),
+                                  audioService: widget.audioService,
+                                  libraryCache: _libraryCache,
+                                  controller: _nowPlayingController,
+                                  paletteService: _paletteService,
+                                  meshFluidProgram: _shaders.meshFluidProgram,
+                                  isVisible:
+                                      _isNowPlayingExpanded && !_isHiddenToTray,
+                                  isTransitionSettled:
+                                      isNowPlayingFullyCovered,
+                                  bottomClearance: miniPlayerClearance,
+                                  onCollapse: () =>
+                                      _setNowPlayingExpanded(false),
+                                ),
                               ),
                             ),
                           ),
                         ),
 
-                      // Layer 1: Fullscreen NowPlayingOverlay (spans 100% height from top: 0 to bottom: 0)
-                      Positioned.fill(
-                        child: FadeTransition(
-                          opacity: _nowPlayingCurvedAnim,
-                          child: SlideTransition(
-                            position: _nowPlayingSlideAnim,
-                            child: NowPlayingOverlay(
-                              key: const ValueKey('now_playing_stage'),
-                              audioService: widget.audioService,
-                              libraryCache: _libraryCache,
-                              controller: _nowPlayingController,
-                              paletteService: _paletteService,
-                              meshFluidProgram: _shaders.meshFluidProgram,
-                              isVisible: showOverlay,
-                              bottomClearance: availWidth >= 1024
-                                  ? 98.0
-                                  : (availWidth >= 640 ? 116.0 : 138.0),
-                              onCollapse: () => _setNowPlayingExpanded(false),
-                            ),
-                          ),
-                        ),
-                      ),
-
-                      // Layer 2: Floating capsule mini player pinned at bottom edge
+                      // Layer 2: Single persistent floating capsule mini player pinned at bottom edge
                       Positioned(
+                        key: const ValueKey('home_mini_player_layer'),
                         left: 0,
                         right: 0,
                         bottom: 0,
-                        child: FloatingCapsuleMiniPlayer(
-                          audioService: widget.audioService,
-                          uiScaleController: _scaleController,
-                          showLyrics: _isNowPlayingExpanded,
-                          isNowPlayingExpanded: _isNowPlayingExpanded,
-                          glassShader: _glassShader,
-                          backdropImage: _shaders.backdropImage,
-                          onToggleLyrics: _toggleNowPlaying,
-                          onToggleNowPlaying: _toggleNowPlaying,
-                          onOpenZones: () => _selectTab(HomeTab.zones),
-                          onOpenLibrary: () => _selectTab(HomeTab.library),
+                        child: RepaintBoundary(
+                          key: const Key('mini_player_repaint_boundary'),
+                          child: FloatingCapsuleMiniPlayer(
+                            audioService: widget.audioService,
+                            libraryCache: _libraryCache,
+                            uiScaleController: _scaleController,
+                            showLyrics: _isNowPlayingExpanded,
+                            isNowPlayingExpanded: _isNowPlayingExpanded,
+                            glassShader: _glassShader,
+                            backdropImage: _shaders.backdropImage,
+                            onToggleLyrics: _toggleNowPlaying,
+                            onToggleNowPlaying: _toggleNowPlaying,
+                            onOpenZones: () => _selectTab(HomeTab.zones),
+                            onOpenLibrary: () => _selectTab(HomeTab.library),
+                          ),
                         ),
                       ),
                     ],
                   );
                 },
+              ),
               ),
             ),
           ),
@@ -1255,6 +1662,7 @@ class _HomeScreenState extends State<HomeScreen>
     final isCompactProfile = contentAvailWidth < (isDesktop ? 720 : 520);
 
     return WindowDragBar(
+      controller: _windowController,
       height: 48.0,
       border: inSettings
           ? const Border(
@@ -1417,7 +1825,11 @@ class _HomeScreenState extends State<HomeScreen>
           ],
           if (isDesktop) ...[
             const SizedBox(width: 8),
-            const DesktopWindowCaptionButtons(height: 48.0),
+            DesktopWindowCaptionButtons(
+              height: 48.0,
+              controller: _windowController,
+              audioService: widget.audioService,
+            ),
           ],
         ],
       ),
@@ -1593,6 +2005,7 @@ class _HomeScreenState extends State<HomeScreen>
       HomeTab.zones => OutputZonePanel(audioService: widget.audioService),
       HomeTab.settings => ProvidersAndRemotePanel(
         audioService: widget.audioService,
+        streamingManager: _streamingManager,
         onProvidersChanged: _refreshProviders,
       ),
       HomeTab.about => AboutSettingsPanel(audioService: widget.audioService),
@@ -1800,6 +2213,7 @@ class _HomeScreenState extends State<HomeScreen>
       return HomeDashboardView(
         audioService: widget.audioService,
         libraryCache: _libraryCache,
+        streamingManager: _streamingManager,
         initialScrollOffset: savedOffset,
         onScrollOffsetChanged: onOffsetChanged,
         onOpenAlbums: () => _selectTab(HomeTab.albums),
@@ -1809,7 +2223,10 @@ class _HomeScreenState extends State<HomeScreen>
         onOpenZones: () => _selectTab(HomeTab.zones),
         onOpenAppearance: () => _selectTab(HomeTab.appearance),
         onOpenLibrarySettings: () => _selectTab(HomeTab.librarySettings),
+        onOpenProviderSettings: () => _selectTab(HomeTab.settings),
         onOpenAlbumDetail: _openAlbumDetail,
+        onOpenStreamingAlbum: _openStreamingAlbum,
+        onPlayStreamingTrack: _playStreamingTrack,
       );
     }
 
@@ -1856,6 +2273,8 @@ class _HomeScreenState extends State<HomeScreen>
           key: ValueKey('album_detail_$entryId'),
           albumId: entry.albumId ?? _selectedAlbumId ?? '',
           audioService: widget.audioService,
+          streamingManager: _streamingManager,
+          onPlayStreamingTrack: _playStreamingTrack,
           libraryCache: _libraryCache,
           onBack: _goBack,
           showInlineBackButton: false,
@@ -1925,6 +2344,11 @@ class _HomeScreenState extends State<HomeScreen>
               key: ValueKey('streaming_view_${meta.kind}'),
               audioService: widget.audioService,
               provider: meta,
+              streamingManager: _streamingManager,
+              onPlayStreamingTrack: _playStreamingTrack,
+              onPlayStreamingTrackWithContext: (track, queue) =>
+                  _playStreamingTrack(track, queueContext: queue),
+              onOpenStreamingAlbum: _openStreamingAlbum,
               activeTrackId: state.track?.id,
               onOpenProviderSettings: () => _selectTab(HomeTab.settings),
               onLibraryUpdated: () {

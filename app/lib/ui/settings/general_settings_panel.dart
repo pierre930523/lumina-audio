@@ -48,6 +48,15 @@ class GeneralSettingsPanel extends StatelessWidget {
                       value: scaleController.notifyOnResample,
                       onChanged: scaleController.setNotifyOnResample,
                     ),
+                    const Divider(color: LuminaTokens.borderSubtle, height: 1),
+                    SettingsSwitchRow(
+                      key: const Key('switch_minimize_to_tray_on_close'),
+                      title: '關閉視窗時縮小至系統匣並繼續背景播放',
+                      subtitle:
+                          '開啟後，點擊右上角關閉按鈕將隱藏視窗並保持音樂播放，可從右下角系統匣還原或完全結束程式',
+                      value: scaleController.minimizeToTrayOnClose,
+                      onChanged: scaleController.setMinimizeToTrayOnClose,
+                    ),
                   ],
                 ),
                 const SizedBox(height: LuminaTokens.spaceMd),

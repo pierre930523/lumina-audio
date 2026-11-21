@@ -39,8 +39,23 @@ class Win32Window {
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();
 
+  // Hides the current window without destroying it (for minimize-to-tray).
+  void Hide();
+
+  // Shows (restoring if minimized) and focuses the window.
+  void ShowAndFocus();
+
   // Release OS resources associated with window.
   void Destroy();
+
+  // Sets whether WM_CLOSE should be intercepted via OnWindowCloseRequested().
+  void SetPreventClose(bool prevent);
+
+  // Returns true if close prevention is enabled.
+  bool PreventClose() const;
+
+  // Forces window destruction and application exit regardless of prevent_close_.
+  void ForceDestroy();
 
   // Inserts |content| into the window tree.
   void SetChildContent(HWND content);
@@ -54,6 +69,12 @@ class Win32Window {
 
   // Return a RECT representing the bounds of the current client area.
   RECT GetClientArea();
+
+  // Sets whether the window is in true Win32 fullscreen mode.
+  void SetFullScreen(bool fullscreen);
+
+  // Returns true if the window is currently in fullscreen mode.
+  bool IsFullScreen() const;
 
  protected:
   // Processes and route salient window messages for mouse handling,
@@ -74,6 +95,10 @@ class Win32Window {
   // Called when the window's monitor, DPI, display configuration, or client
   // size changes so subclasses can resync child rendering.
   virtual void OnDisplayOrDpiChanged();
+
+  // Called when WM_CLOSE is received while prevent_close_ is true.
+  // Return true to suppress OS window destruction.
+  virtual bool OnWindowCloseRequested();
 
   // Synchronizes child content HWND bounds to match the current client area.
   void SyncChildContentBounds();
@@ -98,6 +123,7 @@ class Win32Window {
   static void UpdateTheme(HWND const window);
 
   bool quit_on_close_ = false;
+  bool prevent_close_ = false;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;
@@ -110,6 +136,12 @@ class Win32Window {
   UINT last_dpi_ = 96;
   LONG last_client_width_ = -1;
   LONG last_client_height_ = -1;
+
+  // True Win32 fullscreen state tracking and window geometry restoration.
+  bool is_fullscreen_ = false;
+  WINDOWPLACEMENT saved_placement_ = { sizeof(saved_placement_) };
+  DWORD saved_style_ = 0;
+  DWORD saved_ex_style_ = 0;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

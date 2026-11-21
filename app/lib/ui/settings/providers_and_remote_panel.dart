@@ -1,18 +1,26 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
+import '../../models/streaming_models.dart';
 import '../../models/streaming_provider_meta.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
+import '../../services/streaming/secure_credential_store.dart';
+import '../../services/streaming/streaming_manager.dart';
 import '../theme/lumina_tokens.dart';
 import 'settings_widgets.dart';
+import 'streaming_login_dialog.dart';
 
 class ProvidersAndRemotePanel extends StatefulWidget {
   final AudioService audioService;
+  final StreamingManager? streamingManager;
   final VoidCallback? onProvidersChanged;
 
   const ProvidersAndRemotePanel({
     super.key,
     required this.audioService,
+    this.streamingManager,
     this.onProvidersChanged,
   });
 
@@ -28,21 +36,19 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
   static const _accentLavender = LuminaTokens.accentPurpleText;
   static const _accentBlue = LuminaTokens.accentBlue;
 
-  final _appleTokenCtrl = TextEditingController();
-  final _ytMusicTokenCtrl = TextEditingController();
-  final _qobuzTokenCtrl = TextEditingController();
-  final _tidalCodeCtrl = TextEditingController();
-  final _deezerArlCtrl = TextEditingController();
   final _webdavUriCtrl = TextEditingController();
   final _smbUriCtrl = TextEditingController();
   final _remoteUrlCtrl = TextEditingController(text: 'http://127.0.0.1:9888');
   final _remotePinCtrl = TextEditingController();
   final _wanUrlCtrl = TextEditingController(text: 'https://lumina.example.com');
 
-  TidalPkceStartInfo? _tidalPkce;
+  late final StreamingManager _streamingManager;
+  late final bool _ownsStreamingManager;
+
   PairingInitiateInfo? _hostPairInfo;
   List<DiscoveredServerInfo> _lanServers = const [];
   List<ProviderStatusInfo> _providers = const [];
+  final Set<String> _syncingKinds = <String>{};
   String? _status;
   bool _statusIsError = false;
 
@@ -52,16 +58,24 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
   @override
   void initState() {
     super.initState();
+    _ownsStreamingManager = widget.streamingManager == null;
+    _streamingManager = widget.streamingManager ??
+        StreamingManager(
+          credentialStore: Platform.environment.containsKey('FLUTTER_TEST')
+              ? MemorySecureCredentialStore()
+              : null,
+        );
+    _streamingManager.addListener(_onStreamingChanged);
+    _syncActiveStreamingSelection();
     _loadProviders();
   }
 
   @override
   void dispose() {
-    _appleTokenCtrl.dispose();
-    _ytMusicTokenCtrl.dispose();
-    _qobuzTokenCtrl.dispose();
-    _tidalCodeCtrl.dispose();
-    _deezerArlCtrl.dispose();
+    _streamingManager.removeListener(_onStreamingChanged);
+    if (_ownsStreamingManager) {
+      _streamingManager.dispose();
+    }
     _webdavUriCtrl.dispose();
     _smbUriCtrl.dispose();
     _remoteUrlCtrl.dispose();
@@ -70,13 +84,38 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     super.dispose();
   }
 
+  void _onStreamingChanged() {
+    if (!mounted) return;
+    _syncActiveStreamingSelection();
+    setState(() {});
+  }
+
+  void _syncActiveStreamingSelection() {
+    final connected = _streamingManager.connectedProviders;
+    if (_selectedActiveProvider != null) {
+      final isStreaming =
+          StreamingProviderMeta.isStreamingKind(_selectedActiveProvider!);
+      if (isStreaming &&
+          !connected.any((p) => p.kind == _selectedActiveProvider)) {
+        _selectedActiveProvider = null;
+      }
+    }
+    _selectedActiveProvider ??= connected.firstOrNull?.kind;
+  }
+
   Future<void> _loadProviders() async {
     final list = await widget.audioService.listProviders();
     if (!mounted) return;
     setState(() {
       _providers = list;
+      _syncActiveStreamingSelection();
       _selectedActiveProvider ??= list
-          .where((p) => p.kind != 'local' && (p.isOnline || p.isConfigured))
+          .where(
+            (p) =>
+                !StreamingProviderMeta.isStreamingKind(p.kind) &&
+                p.kind != 'local' &&
+                (p.isOnline || p.isConfigured),
+          )
           .firstOrNull
           ?.kind;
     });
@@ -88,6 +127,73 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
   void _toggleExpand(String id) {
     setState(() {
       _expandedSection = _expandedSection == id ? null : id;
+    });
+  }
+
+  Future<void> _openStreamingLoginDialog(StreamingProviderMeta meta) async {
+    final provider = _streamingManager.providerFor(meta.kind);
+    if (provider == null) return;
+    final ok = await StreamingLoginDialog.show(
+      context,
+      provider,
+      _streamingManager,
+    );
+    if (!mounted) return;
+    if (ok == true && provider.authState == StreamingAuthState.connected) {
+      _selectedActiveProvider = meta.kind;
+      widget.onProvidersChanged?.call();
+      setState(() {
+        _statusIsError = false;
+        final name = provider.accountInfo?.displayName ?? meta.name;
+        _status = '已完成 ${meta.name} 驗證登入（$name）';
+      });
+    } else {
+      _syncActiveStreamingSelection();
+      widget.onProvidersChanged?.call();
+      setState(() {});
+    }
+  }
+
+  Future<void> _syncStreamingProvider(String kind, String displayName) async {
+    if (_syncingKinds.contains(kind)) return;
+    setState(() => _syncingKinds.add(kind));
+    try {
+      final catalog = await _streamingManager.syncProvider(kind);
+      widget.onProvidersChanged?.call();
+      if (!mounted) return;
+      setState(() {
+        _statusIsError = false;
+        _status =
+            '已完成 $displayName 曲庫同步（${catalog.tracks.length} 首曲目、${catalog.playlists.length} 個歌單）';
+      });
+    } on StreamingException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusIsError = true;
+        _status = e.message;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusIsError = true;
+        _status = '$displayName 曲庫同步失敗：$e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _syncingKinds.remove(kind));
+      }
+    }
+  }
+
+  Future<void> _logoutStreamingProvider(String kind, String displayName) async {
+    await _streamingManager.logoutProvider(kind);
+    await _loadProviders();
+    widget.onProvidersChanged?.call();
+    if (!mounted) return;
+    setState(() {
+      _syncActiveStreamingSelection();
+      _statusIsError = false;
+      _status = '已登出 $displayName';
     });
   }
 
@@ -139,7 +245,12 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     setState(() {
       if (_selectedActiveProvider == kind) {
         _selectedActiveProvider = _providers
-            .where((p) => p.kind != 'local' && (p.isOnline || p.isConfigured))
+            .where(
+              (p) =>
+                  !StreamingProviderMeta.isStreamingKind(p.kind) &&
+                  p.kind != 'local' &&
+                  (p.isOnline || p.isConfigured),
+            )
             .firstOrNull
             ?.kind;
       }
@@ -223,14 +334,18 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
               label: '串流音樂服務',
             ),
             const SizedBox(height: LuminaTokens.spaceXs),
-            for (final meta in StreamingProviderMeta.streamingServices)
-              _buildProviderItem(
-                kind: meta.kind,
-                name: meta.name,
-                badgeColor: meta.badgeColor,
-                iconGlyph: meta.buildGlyph(size: 16),
-                formBuilder: () => _buildFormForStreaming(meta.kind),
-              ),
+            ListenableBuilder(
+              listenable: _streamingManager,
+              builder: (context, _) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final meta in StreamingProviderMeta.streamingServices)
+                      _buildStreamingProviderRow(meta),
+                  ],
+                );
+              },
+            ),
 
             const SizedBox(height: LuminaTokens.spaceLg),
 
@@ -306,65 +421,352 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     );
   }
 
-  Widget _buildFormForStreaming(String kind) => switch (kind) {
-    'apple_music' => _buildSingleFieldForm(
-      inputKey: const Key('input_apple_music_token'),
-      buttonKey: const Key('btn_save_apple_music'),
-      controller: _appleTokenCtrl,
-      labelText: 'Apple Music Media-User-Token / 授權權杖',
-      buttonLabel: '登入 Apple Music',
-      onSubmit: () => _submitSingleTokenProvider(
-        kind: 'apple_music',
-        controller: _appleTokenCtrl,
-        emptyWarning: '請先輸入 Apple Music 授權權杖',
-        payloadBuilder: (v) => {'media_user_token': v},
-        successMessage: '已完成 Apple Music ALAC 無損串流連結並於側邊欄顯示',
+  Widget _buildStreamingProviderRow(StreamingProviderMeta meta) {
+    final kind = meta.kind;
+    final provider = _streamingManager.providerFor(kind);
+    final authState = provider?.authState ?? StreamingAuthState.disconnected;
+    final isAuthenticating =
+        _streamingManager.isAuthenticating(kind) ||
+        authState == StreamingAuthState.authenticating;
+    final isConnected = !isAuthenticating && authState == StreamingAuthState.connected;
+    final isError = !isAuthenticating && authState == StreamingAuthState.error;
+    final isInUse = _selectedActiveProvider == kind && isConnected;
+    final isSyncing = _syncingKinds.contains(kind);
+    final info = provider?.accountInfo;
+
+    final String? subtitleText;
+    final Color subtitleColor;
+    if (isAuthenticating) {
+      subtitleText = _streamingManager.progressMessageFor(kind) ?? '連線中...';
+      subtitleColor = LuminaTokens.accentBlue;
+    } else if (isConnected) {
+      final accountLabel = info != null
+          ? ((info.planTier != null && info.planTier!.isNotEmpty)
+                ? '${info.displayName} • ${info.planTier}'
+                : info.displayName)
+          : '已登入就緒';
+      subtitleText = isInUse ? '$accountLabel • 使用中' : accountLabel;
+      subtitleColor = isInUse ? LuminaTokens.textSecondary : LuminaTokens.statusSuccess;
+    } else if (isError) {
+      subtitleText = provider?.lastError ?? '授權驗證失敗，請重新登入';
+      subtitleColor = LuminaTokens.statusError;
+    } else {
+      subtitleText = null;
+      subtitleColor = LuminaTokens.textMuted;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: LuminaTokens.space2xs),
+      child: Material(
+        color: isInUse ? _activeRowBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+        child: InkWell(
+          key: Key('provider_row_$kind'),
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+          mouseCursor: SystemMouseCursors.click,
+          hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.6),
+          focusColor: LuminaTokens.focusRing.withValues(alpha: 0.16),
+          onTap: isAuthenticating ? null : () => _openStreamingLoginDialog(meta),
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: LuminaTokens.spaceMd,
+              vertical: LuminaTokens.spaceSm,
+            ),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+              border: Border.all(
+                color: isInUse
+                    ? LuminaTokens.borderControl
+                    : (isError
+                          ? LuminaTokens.statusError.withValues(alpha: 0.5)
+                          : Colors.transparent),
+              ),
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final infoColumn = Row(
+                  children: [
+                    meta.buildBadge(
+                      boxSize: 28,
+                      borderRadius: LuminaTokens.radiusSm,
+                      overrideBackground: isInUse
+                          ? meta.badgeColor
+                          : LuminaTokens.cardElevatedBg,
+                      glyphOpacity: isInUse ? 1.0 : 0.88,
+                    ),
+                    const SizedBox(width: LuminaTokens.spaceSm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              if (isConnected || isError) ...[
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: isConnected
+                                        ? LuminaTokens.statusSuccess
+                                        : LuminaTokens.statusError,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  meta.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: isInUse || isConnected
+                                        ? LuminaTokens.textPrimary
+                                        : LuminaTokens.textSecondary,
+                                    fontSize: 14.5,
+                                    fontWeight: isInUse
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (subtitleText != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                subtitleText,
+                                maxLines: isError ? 2 : 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: subtitleColor,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+
+                final compactBtnStyle = LuminaSettingsStyles.outlinedButtonStyle()
+                    .copyWith(
+                      padding: const WidgetStatePropertyAll(
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      ),
+                      minimumSize: const WidgetStatePropertyAll(Size(0, 32)),
+                    );
+
+                final Widget trailingActions;
+                if (isAuthenticating) {
+                  trailingActions = Wrap(
+                    spacing: LuminaTokens.spaceXs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: LuminaTokens.accentBlue,
+                        ),
+                      ),
+                      const Text(
+                        '連線中...',
+                        style: TextStyle(
+                          color: LuminaTokens.accentBlue,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      TextButton(
+                        key: Key('btn_cancel_signin_$kind'),
+                        onPressed: () => _streamingManager.cancelLogin(kind),
+                        style: TextButton.styleFrom(
+                          foregroundColor: LuminaTokens.statusError,
+                          minimumSize: const Size(0, 32),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: LuminaTokens.spaceSm,
+                          ),
+                        ),
+                        child: const Text('取消'),
+                      ),
+                    ],
+                  );
+                } else if (isConnected) {
+                  trailingActions = Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      OutlinedButton(
+                        key: Key('btn_sync_$kind'),
+                        onPressed: isSyncing
+                            ? null
+                            : () => _syncStreamingProvider(kind, meta.name),
+                        style: compactBtnStyle,
+                        child: Text(
+                          isSyncing ? '同步中' : '同步',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      OutlinedButton(
+                        key: Key('btn_settings_$kind'),
+                        onPressed: () => _openStreamingLoginDialog(meta),
+                        style: compactBtnStyle,
+                        child: const Text(
+                          '設定',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      OutlinedButton(
+                        key: Key('btn_logout_$kind'),
+                        onPressed: () =>
+                            _logoutStreamingProvider(kind, meta.name),
+                        style: compactBtnStyle,
+                        child: const Text(
+                          '登出',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      Tooltip(
+                        message: isInUse
+                            ? '${meta.name}（目前主要串流來源）'
+                            : '將 ${meta.name} 設為主要串流來源',
+                        child: Semantics(
+                          label: '將 ${meta.name} 設為主要串流來源',
+                          selected: isInUse,
+                          button: true,
+                          child: InkWell(
+                            key: Key('btn_activate_provider_$kind'),
+                            borderRadius: BorderRadius.circular(
+                              LuminaTokens.radiusPill,
+                            ),
+                            mouseCursor: SystemMouseCursors.click,
+                            hoverColor: LuminaTokens.cardHoverBg,
+                            focusColor: LuminaTokens.focusRing.withValues(
+                              alpha: 0.24,
+                            ),
+                            onTap: () {
+                              setState(() {
+                                _statusIsError = false;
+                                _selectedActiveProvider = kind;
+                                _status = '已將主要串流來源切換為 ${meta.name}';
+                              });
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.all(
+                                LuminaTokens.spaceXs,
+                              ),
+                              child: isInUse
+                                  ? Container(
+                                      width: 18,
+                                      height: 18,
+                                      decoration: const BoxDecoration(
+                                        color: _accentLavender,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: Center(
+                                        child: Container(
+                                          width: 6,
+                                          height: 6,
+                                          decoration: const BoxDecoration(
+                                            color: LuminaTokens.onAccentDark,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  : Container(
+                                      width: 18,
+                                      height: 18,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: LuminaTokens.borderControl,
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                } else if (isError) {
+                  trailingActions = FilledButton(
+                    key: Key('btn_relogin_$kind'),
+                    onPressed: () => _openStreamingLoginDialog(meta),
+                    style: LuminaSettingsStyles.filledButtonStyle(
+                      backgroundColor: LuminaTokens.statusError,
+                      foregroundColor: LuminaTokens.onAccentDark,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: LuminaTokens.spaceSm,
+                        vertical: LuminaTokens.spaceXs,
+                      ),
+                    ),
+                    child: const Text(
+                      '重新登入',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                } else {
+                  trailingActions = TextButton(
+                    key: Key('btn_signin_$kind'),
+                    onPressed: () => _openStreamingLoginDialog(meta),
+                    style: TextButton.styleFrom(
+                      foregroundColor: LuminaTokens.accentBlue,
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: LuminaTokens.spaceSm,
+                      ),
+                    ),
+                    child: const Text(
+                      '登入',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                }
+
+                if (constraints.maxWidth < 460 &&
+                    (isConnected || isAuthenticating)) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      infoColumn,
+                      const SizedBox(height: LuminaTokens.spaceXs),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: trailingActions,
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: infoColumn),
+                    const SizedBox(width: LuminaTokens.spaceXs),
+                    trailingActions,
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
       ),
-    ),
-    'youtube_music' => _buildSingleFieldForm(
-      inputKey: const Key('input_youtube_music_token'),
-      buttonKey: const Key('btn_save_youtube_music'),
-      controller: _ytMusicTokenCtrl,
-      labelText: 'YouTube Music OAuth 權杖 / 瀏覽器 Cookie',
-      buttonLabel: '登入 YouTube Music',
-      onSubmit: () => _submitSingleTokenProvider(
-        kind: 'youtube_music',
-        controller: _ytMusicTokenCtrl,
-        emptyWarning: '請先輸入 YouTube Music 授權權杖或 Cookie',
-        payloadBuilder: (v) => {'auth_cookie': v},
-        successMessage: '已完成 YouTube Music 帳號登入並於側邊欄顯示',
-      ),
-    ),
-    'qobuz' => _buildSingleFieldForm(
-      inputKey: const Key('input_qobuz_token'),
-      buttonKey: const Key('btn_save_qobuz'),
-      controller: _qobuzTokenCtrl,
-      labelText: 'Qobuz 使用者授權權杖（user_auth_token）',
-      buttonLabel: '儲存 Qobuz',
-      onSubmit: () => _submitSingleTokenProvider(
-        kind: 'qobuz',
-        controller: _qobuzTokenCtrl,
-        emptyWarning: '請先輸入 Qobuz 授權權杖',
-        payloadBuilder: (v) => {'user_auth_token': v, 'authenticate': false},
-        successMessage: '已完成 Qobuz 帳號登入並於側邊欄顯示',
-      ),
-    ),
-    'tidal' => _buildTidalForm(),
-    _ => _buildSingleFieldForm(
-      inputKey: const Key('input_deezer_arl'),
-      buttonKey: const Key('btn_save_deezer'),
-      controller: _deezerArlCtrl,
-      labelText: 'Deezer ARL Cookie 金鑰',
-      buttonLabel: '儲存 Deezer',
-      onSubmit: () => _submitSingleTokenProvider(
-        kind: 'deezer',
-        controller: _deezerArlCtrl,
-        emptyWarning: '請先輸入 Deezer ARL Cookie 金鑰',
-        payloadBuilder: (v) => {'arl': v, 'authenticate': false},
-        successMessage: '已完成 Deezer 帳號登入並於側邊欄顯示',
-      ),
-    ),
-  };
+    );
+  }
 
   Widget _buildSingleFieldForm({
     required Key inputKey,
@@ -413,82 +815,6 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
           ],
         );
       },
-    );
-  }
-
-  Widget _buildTidalForm() {
-    return Wrap(
-      spacing: LuminaTokens.spaceXs,
-      runSpacing: LuminaTokens.spaceXs,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        OutlinedButton(
-          key: const Key('btn_tidal_pkce_start'),
-          onPressed: () async {
-            final start = await widget.audioService.startTidalPkce();
-            if (!mounted) return;
-            setState(() {
-              _tidalPkce = start;
-              _statusIsError = false;
-              _status = '已初始化 Tidal PKCE 驗證流程';
-            });
-          },
-          style: LuminaSettingsStyles.outlinedButtonStyle(),
-          child: const Text('啟動 Tidal PKCE 登入'),
-        ),
-        SizedBox(
-          width: 216,
-          child: TextField(
-            key: const Key('input_tidal_code'),
-            controller: _tidalCodeCtrl,
-            style: const TextStyle(
-              color: LuminaTokens.textPrimary,
-              fontSize: 12.5,
-            ),
-            decoration: LuminaSettingsStyles.inputDecoration(
-              labelText: 'Tidal 回傳授權碼（Auth Code）',
-              borderRadius: LuminaTokens.radiusSm,
-            ),
-          ),
-        ),
-        FilledButton(
-          key: const Key('btn_tidal_pkce_complete'),
-          onPressed: () async {
-            final code = _tidalCodeCtrl.text.trim();
-            if (code.isEmpty) {
-              setState(() {
-                _statusIsError = true;
-                _status = '請先輸入 Tidal 回傳授權碼（Auth Code）';
-              });
-              return;
-            }
-            final verifier =
-                _tidalPkce?.verifier ?? 'manual_verifier_1234567890';
-            final ok = await widget.audioService.completeTidalPkce(
-              code,
-              verifier,
-            );
-            if (!ok) {
-              if (!mounted) return;
-              setState(() {
-                _statusIsError = true;
-                _status = 'Tidal PKCE 驗證交換失敗';
-              });
-              return;
-            }
-            await _loadProviders();
-            widget.onProvidersChanged?.call();
-            if (!mounted) return;
-            setState(() {
-              _statusIsError = false;
-              _selectedActiveProvider = 'tidal';
-              _status = '已完成 Tidal PKCE 權杖交換並於側邊欄顯示';
-            });
-          },
-          style: LuminaSettingsStyles.filledButtonStyle(),
-          child: const Text('完成 Tidal 綁定'),
-        ),
-      ],
     );
   }
 

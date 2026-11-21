@@ -5,9 +5,12 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../models/audio_format.dart';
 import '../../models/playback_state.dart';
+import '../../models/streaming_models.dart';
+import '../../models/streaming_provider_meta.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/streaming/streaming_manager.dart';
 import '../artwork/album_artwork_view.dart';
 import '../theme/lumina_tokens.dart';
 
@@ -16,6 +19,9 @@ import '../theme/lumina_tokens.dart';
 class AlbumDetailPage extends StatefulWidget {
   final String albumId;
   final AudioService audioService;
+  final StreamingManager? streamingManager;
+  final void Function(TrackInfo track, {List<TrackInfo>? queueContext})?
+      onPlayStreamingTrack;
   final VoidCallback? onBack;
   final bool showInlineBackButton;
   final void Function(String artistId)? onOpenArtistCredits;
@@ -32,6 +38,8 @@ class AlbumDetailPage extends StatefulWidget {
     super.key,
     required this.albumId,
     required this.audioService,
+    this.streamingManager,
+    this.onPlayStreamingTrack,
     this.onBack,
     this.showInlineBackButton = true,
     this.onOpenArtistCredits,
@@ -168,6 +176,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   bool _loading = true;
   String? _error;
   int _loadEpoch = 0;
+  CancellationToken? _streamingLoadCancel;
 
   @override
   void initState() {
@@ -219,6 +228,8 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
   @override
   void dispose() {
+    _streamingLoadCancel?.cancel();
+    _streamingLoadCancel = null;
     _playbackSub?.cancel();
     _playbackNotifier.dispose();
     _scrollController.removeListener(_onScroll);
@@ -261,13 +272,42 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     }
   }
 
+  ({String kind, String rawId})? _parseStreamingAlbumId(String albumId) {
+    if (!albumId.startsWith('streaming:')) return null;
+    final rest = albumId.substring('streaming:'.length);
+    final sep = rest.indexOf(':');
+    if (sep <= 0 || sep >= rest.length - 1) return null;
+    return (
+      kind: rest.substring(0, sep),
+      rawId: rest.substring(sep + 1),
+    );
+  }
+
   Future<void> _load() async {
     final epoch = ++_loadEpoch;
+    _streamingLoadCancel?.cancel();
+    _streamingLoadCancel = null;
     try {
       final cache = widget.libraryCache;
-      final detail = cache != null
-          ? await cache.loadAlbumDetail(widget.audioService, widget.albumId)
-          : await widget.audioService.getAlbumDetail(widget.albumId);
+      final streamingTarget = _parseStreamingAlbumId(widget.albumId);
+      final CanonicalAlbumDetail? detail;
+      if (streamingTarget != null && widget.streamingManager != null) {
+        final cached = cache?.getAlbumDetailSync(widget.albumId);
+        if (cached != null && cached.versions.isNotEmpty) {
+          return;
+        }
+        final cancelToken = CancellationToken();
+        _streamingLoadCancel = cancelToken;
+        detail = await widget.streamingManager!.fetchAlbumDetail(
+          streamingTarget.kind,
+          streamingTarget.rawId,
+          cancel: cancelToken,
+        );
+      } else {
+        detail = cache != null
+            ? await cache.loadAlbumDetail(widget.audioService, widget.albumId)
+            : await widget.audioService.getAlbumDetail(widget.albumId);
+      }
       if (!mounted || epoch != _loadEpoch) return;
       if (detail != null && cache != null) {
         cache.putAlbumDetailSync(detail);
@@ -376,6 +416,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         ext.contains('\\') ||
         ext.startsWith('http://') ||
         ext.startsWith('https://');
+    final providerMeta = StreamingProviderMeta.byKind(ver.provider);
     return TrackInfo(
       id: vTrack.id,
       title: vTrack.title,
@@ -389,9 +430,10 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         channels: 2,
         isDsd: ver.isDsd || vTrack.isDsd,
       ),
-      providerName: ver.provider,
+      providerName: providerMeta?.name ?? ver.provider,
       trackNumber: vTrack.trackNumber,
       discNumber: vTrack.discNumber,
+      albumArtUrl: d.coverUrl,
       coverUrl: d.coverUrl,
       filePath: hasUri ? ext : null,
     );
@@ -448,6 +490,19 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('音樂庫中找不到此專輯的可播放曲目')),
       );
+      return;
+    }
+    final ver = d.versions.isNotEmpty
+        ? d.versions[_selectedVersionIndex.clamp(0, d.versions.length - 1)]
+        : null;
+    final isStreamingAlbum = widget.albumId.startsWith('streaming:');
+    if (isStreamingAlbum && widget.onPlayStreamingTrack != null) {
+      final allAlbumTracks = (ver != null && ver.tracks.isNotEmpty)
+          ? ver.orderedTrackEntries
+              .map((e) => _toTrackInfo(d, ver, e.track))
+              .toList()
+          : <TrackInfo>[track];
+      widget.onPlayStreamingTrack!(track, queueContext: allAlbumTracks);
       return;
     }
     await widget.audioService.play(track: track);
