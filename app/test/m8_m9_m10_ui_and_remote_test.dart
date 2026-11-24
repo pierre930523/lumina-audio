@@ -557,6 +557,7 @@ void main() {
         tester,
         find.byKey(const Key('btn_toggle_manual_token_section')),
       );
+      await _tapVisible(tester, find.byKey(const Key('login_tab_tidal_1')));
       await _tapVisible(tester, find.byKey(const Key('tidal_byok_toggle')));
       await _enterVisibleText(
         tester,

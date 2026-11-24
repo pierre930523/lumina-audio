@@ -4,6 +4,7 @@ import '../../models/playback_state.dart';
 import '../../models/smart_playlist.dart';
 import '../../services/audio_service.dart';
 import '../../services/smart_playlist_service.dart';
+import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 class SmartPlaylistsView extends StatefulWidget {
@@ -350,41 +351,44 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                                   itemCount: matchedTracks.length,
                                   itemBuilder: (context, index) {
                                     final t = matchedTracks[index];
-                                    return Material(
-                                      type: MaterialType.transparency,
-                                      child: ListTile(
-                                        key: Key('smart_playlist_track_${t.id}'),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            LuminaTokens.radiusSm,
+                                    return TrackHoverPrefetch(
+                                      track: t,
+                                      child: Material(
+                                        type: MaterialType.transparency,
+                                        child: ListTile(
+                                          key: Key('smart_playlist_track_${t.id}'),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              LuminaTokens.radiusSm,
+                                            ),
                                           ),
-                                        ),
-                                        hoverColor: LuminaTokens.cardHoverBg
-                                            .withValues(alpha: 0.6),
-                                        leading: const Icon(
-                                          Icons.music_note_rounded,
-                                          color: LuminaTokens.textSecondary,
-                                        ),
-                                        title: Text(
-                                          t.title,
-                                          style: const TextStyle(
-                                            color: LuminaTokens.textPrimary,
-                                            fontWeight: FontWeight.w600,
+                                          hoverColor: LuminaTokens.cardHoverBg
+                                              .withValues(alpha: 0.6),
+                                          leading: const Icon(
+                                            Icons.music_note_rounded,
+                                            color: LuminaTokens.textSecondary,
                                           ),
-                                        ),
-                                        subtitle: Text(
-                                          '${t.artist} • ${t.album} • ${t.format.label}',
-                                          style: const TextStyle(
-                                            color: LuminaTokens.textMuted,
-                                            fontSize: 12,
+                                          title: Text(
+                                            t.title,
+                                            style: const TextStyle(
+                                              color: LuminaTokens.textPrimary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
-                                        ),
-                                        trailing: const Icon(
-                                          Icons.play_arrow_rounded,
-                                          color: LuminaTokens.textSecondary,
-                                        ),
-                                        onTap: () => widget.audioService.play(
-                                          track: t,
+                                          subtitle: Text(
+                                            '${t.artist} • ${t.album} • ${t.format.label}',
+                                            style: const TextStyle(
+                                              color: LuminaTokens.textMuted,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                          trailing: const Icon(
+                                            Icons.play_arrow_rounded,
+                                            color: LuminaTokens.textSecondary,
+                                          ),
+                                          onTap: () => widget.audioService.play(
+                                            track: t,
+                                          ),
                                         ),
                                       ),
                                     );

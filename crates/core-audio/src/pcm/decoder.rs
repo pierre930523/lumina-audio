@@ -1,14 +1,15 @@
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, IoSliceMut, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use core_types::{
     AudioCodec, AudioFormat, ChannelLayout, Endianness, Interleaving, SampleFormatKind,
-    UnifiedAudioFormat,
+    StreamSourceSpec, UnifiedAudioFormat,
 };
 use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
-use symphonia::core::codecs::{CodecType, Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecRegistry, CodecType, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
@@ -16,6 +17,56 @@ use symphonia::core::probe::Hint;
 
 use super::{AudioChunk, AudioDecoder, DecodedTrackMetadata};
 use crate::error::DecoderError;
+use crate::streaming::{BlockingStreamBridge, StreamError};
+
+/// Minimum `MediaSourceStreamOptions::buffer_len` permitted by Symphonia 0.5.5
+/// (`MediaSourceStream::new` asserts `buffer_len.is_power_of_two() && buffer_len > 32 * 1024`).
+const LOW_LATENCY_MSS_BUFFER_LEN: usize = 64 * 1024;
+
+fn codec_registry() -> &'static CodecRegistry {
+    static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        crate::pcm::opus::register_opus_codec(&mut registry);
+        registry
+    })
+}
+
+struct SharedBridgeMediaSource(Arc<Mutex<BlockingStreamBridge>>);
+
+impl Read for SharedBridgeMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("BlockingStreamBridge lock poisoned"))?;
+        guard.read(buf)
+    }
+}
+
+impl Seek for SharedBridgeMediaSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("BlockingStreamBridge lock poisoned"))?;
+        guard.seek(pos)
+    }
+}
+
+impl MediaSource for SharedBridgeMediaSource {
+    fn is_seekable(&self) -> bool {
+        self.0
+            .lock()
+            .map(|guard| guard.is_seekable())
+            .unwrap_or(false)
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.lock().ok().and_then(|guard| guard.byte_len())
+    }
+}
 
 struct GenericSource<R> {
     inner: R,
@@ -52,6 +103,111 @@ impl<R: Read + Seek + Send + Sync + 'static> MediaSource for GenericSource<R> {
     fn byte_len(&self) -> Option<u64> {
         self.byte_len
     }
+}
+
+/// Preserves underlying non-EOF I/O errors (such as `HTTP 403`) across Symphonia's
+/// `Probe::next` / `MediaSourceStream` loops that otherwise downgrade `Err` into
+/// `UnexpectedEof` or `no suitable format reader found`.
+struct ErrorTrackingMediaSource {
+    inner: Box<dyn MediaSource>,
+    last_io_error: Arc<Mutex<Option<(std::io::ErrorKind, String)>>>,
+}
+
+impl ErrorTrackingMediaSource {
+    fn record_error(&self, err: &std::io::Error) {
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            return;
+        }
+        if let Ok(mut guard) = self.last_io_error.lock()
+            && guard.is_none()
+        {
+            *guard = Some((err.kind(), err.to_string()));
+        }
+    }
+}
+
+impl Read for ErrorTrackingMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let res = self.inner.read(buf);
+        if let Err(ref e) = res {
+            self.record_error(e);
+        }
+        res
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> std::io::Result<usize> {
+        let res = self.inner.read_vectored(bufs);
+        if let Err(ref e) = res {
+            self.record_error(e);
+        }
+        res
+    }
+}
+
+impl Seek for ErrorTrackingMediaSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let res = self.inner.seek(pos);
+        if let Err(ref e) = res {
+            self.record_error(e);
+        }
+        res
+    }
+}
+
+impl MediaSource for ErrorTrackingMediaSource {
+    fn is_seekable(&self) -> bool {
+        self.inner.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.inner.byte_len()
+    }
+}
+
+fn clear_tracked_io_error(slot: &Arc<Mutex<Option<(std::io::ErrorKind, String)>>>) {
+    if let Ok(mut guard) = slot.lock() {
+        *guard = None;
+    }
+}
+
+fn take_tracked_io_error(
+    slot: &Arc<Mutex<Option<(std::io::ErrorKind, String)>>>,
+) -> Option<(std::io::ErrorKind, String)> {
+    slot.lock().ok().and_then(|mut g| g.take())
+}
+
+fn format_with_tracked_io_error(
+    base: impl std::fmt::Display,
+    slot: &Arc<Mutex<Option<(std::io::ErrorKind, String)>>>,
+) -> String {
+    let base_str = base.to_string();
+    match take_tracked_io_error(slot) {
+        Some((_, io_err)) if !base_str.contains(&io_err) => format!("{io_err} ({base_str})"),
+        _ => base_str,
+    }
+}
+
+fn map_typed_stream_error(err: StreamError) -> Option<DecoderError> {
+    match err {
+        StreamError::AuthRequired {
+            provider_id,
+            status,
+        } => Some(DecoderError::StreamAuthRequired {
+            provider_id,
+            status,
+        }),
+        StreamError::FormatChanged(spec) => Some(DecoderError::StreamFormatChanged(spec)),
+        _ => None,
+    }
+}
+
+fn take_typed_bridge_error(
+    bridge: Option<&Arc<Mutex<BlockingStreamBridge>>>,
+) -> Option<DecoderError> {
+    bridge
+        .and_then(|b| b.lock().ok())
+        .and_then(|guard| guard.take_last_stream_error())
+        .and_then(map_typed_stream_error)
 }
 
 /// Detailed result of a `SymphoniaDecoder` seek operation, including demuxer
@@ -100,10 +256,16 @@ pub struct SymphoniaDecoder {
     is_seekable: bool,
     hint_extension: Option<String>,
     hint_mime: Option<String>,
+    mss_buffer_len: usize,
+    bridge: Option<Arc<Mutex<BlockingStreamBridge>>>,
+    is_segmented: bool,
+    base_timestamp_ms: u64,
     last_packet_end_ts: u64,
     pending_seek_target_ts: Option<u64>,
+    pending_seek_skip_frames: u64,
     at_eof: bool,
     last_seek_outcome: Option<SeekOutcome>,
+    last_io_error: Arc<Mutex<Option<(std::io::ErrorKind, String)>>>,
 }
 
 fn interleave_planes<T: Copy + symphonia::core::sample::Sample, U, F: FnMut(T) -> U>(
@@ -204,10 +366,12 @@ fn collect_revision_metadata(rev: &MetadataRevision, out: &mut DecodedTrackMetad
         let val = tag.value.to_string();
         if let Some(std_key) = tag.std_key {
             match std_key {
-                StandardTagKey::TrackTitle if out.title.is_none() => out.title = Some(val),
-                StandardTagKey::Artist if out.artist.is_none() => out.artist = Some(val),
-                StandardTagKey::AlbumArtist if out.artist.is_none() => out.artist = Some(val),
-                StandardTagKey::Album if out.album.is_none() => out.album = Some(val),
+                StandardTagKey::TrackTitle if out.title.is_none() => out.title = Some(val.clone()),
+                StandardTagKey::Artist if out.artist.is_none() => out.artist = Some(val.clone()),
+                StandardTagKey::AlbumArtist if out.artist.is_none() => {
+                    out.artist = Some(val.clone())
+                }
+                StandardTagKey::Album if out.album.is_none() => out.album = Some(val.clone()),
                 StandardTagKey::TrackNumber if out.track_number.is_none() => {
                     out.track_number = val.split('/').next().and_then(|n| n.trim().parse().ok());
                 }
@@ -217,8 +381,39 @@ fn collect_revision_metadata(rev: &MetadataRevision, out: &mut DecodedTrackMetad
                 StandardTagKey::ReplayGainAlbumGain if out.replaygain_album_db.is_none() => {
                     out.replaygain_album_db = parse_gain_db(&val);
                 }
+                StandardTagKey::ReplayGainTrackPeak if out.replaygain_track_peak.is_none() => {
+                    out.replaygain_track_peak = parse_peak(&val);
+                }
+                StandardTagKey::ReplayGainAlbumPeak if out.replaygain_album_peak.is_none() => {
+                    out.replaygain_album_peak = parse_peak(&val);
+                }
                 _ => {}
             }
+        }
+
+        // Also match raw VorbisComment / ID3v2 TXXX / freeform tag keys (notably EBU R128
+        // `R128_TRACK_GAIN` / `R128_ALBUM_GAIN`, which Symphonia 0.5 does not map to StandardTagKey).
+        let key_upper = tag.key.trim().to_ascii_uppercase();
+        match key_upper.as_str() {
+            "REPLAYGAIN_TRACK_GAIN" if out.replaygain_track_db.is_none() => {
+                out.replaygain_track_db = parse_gain_db(&val);
+            }
+            "REPLAYGAIN_ALBUM_GAIN" if out.replaygain_album_db.is_none() => {
+                out.replaygain_album_db = parse_gain_db(&val);
+            }
+            "REPLAYGAIN_TRACK_PEAK" if out.replaygain_track_peak.is_none() => {
+                out.replaygain_track_peak = parse_peak(&val);
+            }
+            "REPLAYGAIN_ALBUM_PEAK" if out.replaygain_album_peak.is_none() => {
+                out.replaygain_album_peak = parse_peak(&val);
+            }
+            "R128_TRACK_GAIN" if out.r128_track_gain.is_none() => {
+                out.r128_track_gain = parse_r128_q78(&val);
+            }
+            "R128_ALBUM_GAIN" if out.r128_album_gain.is_none() => {
+                out.r128_album_gain = parse_r128_q78(&val);
+            }
+            _ => {}
         }
     }
 }
@@ -227,10 +422,22 @@ fn parse_gain_db(raw: &str) -> Option<f64> {
     raw.trim()
         .trim_end_matches("dB")
         .trim_end_matches("db")
+        .trim_end_matches("DB")
         .trim()
         .parse::<f64>()
         .ok()
         .filter(|v| v.is_finite())
+}
+
+fn parse_peak(raw: &str) -> Option<f32> {
+    raw.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+fn parse_r128_q78(raw: &str) -> Option<i16> {
+    raw.trim().parse::<i16>().ok()
 }
 
 fn classify_codec_and_sample_format(
@@ -375,6 +582,132 @@ fn ts_to_ms(
     ((frames as u128 * 1000) / (sample_rate.max(1) as u128)) as u64
 }
 
+fn ms_to_ts(
+    ms: u64,
+    time_base: Option<symphonia::core::units::TimeBase>,
+    sample_rate: u32,
+) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    match time_base {
+        Some(tb) if tb.denom > 0 && tb.numer > 0 => {
+            ((ms as u128 * tb.denom as u128) / (1000u128 * tb.numer as u128)) as u64
+        }
+        _ => ((ms as u128 * sample_rate.max(1) as u128) / 1000u128) as u64,
+    }
+}
+
+/// Maps a MIME type (with optional `; codecs=...` parameters) to a canonical Symphonia file
+/// extension hint (`m4a`, `webm`, `mkv`, `mp3`, `ogg`, `flac`, `aac`, `wav`, `aiff`, `caf`).
+pub fn extension_from_mime_type(mime: &str) -> Option<&'static str> {
+    let base = crate::streaming::normalize_mime_base(mime);
+    match base.as_str() {
+        "audio/mp4" | "audio/x-m4a" | "audio/m4a" | "video/mp4" | "audio/mp4a-latm"
+        | "audio/alac" => Some("m4a"),
+        "audio/webm" | "video/webm" => Some("webm"),
+        "audio/x-matroska" | "video/x-matroska" | "audio/matroska" => Some("mkv"),
+        "audio/mpeg" | "audio/mp3" | "audio/x-mpeg" | "audio/mpeg3" | "audio/x-mpeg-3" => {
+            Some("mp3")
+        }
+        "audio/ogg" | "audio/opus" | "audio/vorbis" | "application/ogg" | "audio/x-ogg" => {
+            Some("ogg")
+        }
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "audio/aac" | "audio/aacp" | "audio/x-aac" => Some("aac"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => Some("wav"),
+        "audio/aiff" | "audio/x-aiff" => Some("aiff"),
+        "audio/caf" | "audio/x-caf" => Some("caf"),
+        _ => None,
+    }
+}
+
+fn normalize_probe_hints(
+    hint_extension: Option<&str>,
+    hint_mime: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let norm_mime = hint_mime
+        .map(crate::streaming::normalize_mime_base)
+        .filter(|s| !s.is_empty());
+    let norm_ext = hint_extension
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            norm_mime
+                .as_deref()
+                .and_then(extension_from_mime_type)
+                .map(str::to_string)
+        });
+    (norm_ext, norm_mime)
+}
+
+/// Builds a Symphonia [`Hint`] populated with both normalized base `mime_type(...)` and
+/// `with_extension(...)` (deriving the extension from `mime_type` when `hint_extension` is absent).
+pub fn build_probe_hint(hint_extension: Option<&str>, hint_mime: Option<&str>) -> Hint {
+    let (norm_ext, norm_mime) = normalize_probe_hints(hint_extension, hint_mime);
+    let mut hint = Hint::new();
+    if let Some(ext) = norm_ext.as_deref() {
+        hint.with_extension(ext);
+    }
+    if let Some(mime) = norm_mime.as_deref() {
+        hint.mime_type(mime);
+    }
+    hint
+}
+
+fn bridge_probe_hints(
+    bridge: &BlockingStreamBridge,
+    spec: &StreamSourceSpec,
+) -> (Option<String>, Option<String>, bool) {
+    match spec {
+        StreamSourceSpec::DirectRange {
+            hint_extension,
+            mime_type,
+            ..
+        }
+        | StreamSourceSpec::EncryptedRange {
+            hint_extension,
+            mime_type,
+            ..
+        } => {
+            let raw_ext = hint_extension.as_deref().or_else(|| bridge.hint_extension());
+            let raw_mime = mime_type.as_deref().or_else(|| bridge.mime_type());
+            let (ext, mime) = normalize_probe_hints(raw_ext, raw_mime);
+            (ext, mime, false)
+        }
+        StreamSourceSpec::SegmentedManifest { mime_type, .. } => {
+            let raw_ext = bridge.hint_extension();
+            let raw_mime = bridge
+                .mime_type()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    mime_type.as_deref().map(str::trim).filter(|m| {
+                        !m.is_empty()
+                            && !m.eq_ignore_ascii_case("application/dash+xml")
+                            && !m.to_ascii_lowercase().contains("mpegurl")
+                    })
+                });
+            let (ext, mime) = normalize_probe_hints(raw_ext, raw_mime);
+            (ext, mime, true)
+        }
+        StreamSourceSpec::LocalFile { path, .. } => {
+            let raw_ext = Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .or_else(|| bridge.hint_extension());
+            let raw_mime = bridge.mime_type();
+            let (ext, mime) = normalize_probe_hints(raw_ext, raw_mime);
+            (ext, mime, false)
+        }
+        StreamSourceSpec::ExternalBackend { .. } => (None, None, false),
+    }
+}
+
+fn build_hint(hint_extension: Option<&str>, hint_mime: Option<&str>) -> Hint {
+    build_probe_hint(hint_extension, hint_mime)
+}
+
 fn trim_chunk_front(chunk: &mut AudioChunk, trim_frames: usize) {
     if trim_frames == 0 {
         return;
@@ -423,26 +756,141 @@ impl SymphoniaDecoder {
         hint_extension: Option<&str>,
         hint_mime: Option<&str>,
     ) -> Result<Self, DecoderError> {
-        let mut hint = Hint::new();
-        if let Some(ext) = hint_extension {
-            hint.with_extension(ext);
-        }
-        if let Some(mime) = hint_mime {
-            hint.mime_type(mime);
-        }
-        let is_seekable = source.is_seekable();
+        Self::open_internal(
+            source,
+            hint_extension,
+            hint_mime,
+            MediaSourceStreamOptions::default().buffer_len,
+            None,
+            false,
+            None,
+        )
+    }
 
-        let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+    /// Opens a decoder backed by a [`BlockingStreamBridge`] and [`StreamSourceSpec`], configuring
+    /// exact format hints, low-latency buffering, `prebuild_seek_index: false`, and segmented DASH
+    /// seek support.
+    pub fn from_blocking_bridge(
+        bridge: BlockingStreamBridge,
+        spec: &StreamSourceSpec,
+    ) -> Result<Self, DecoderError> {
+        Self::from_blocking_bridge_with_duration(bridge, spec, None)
+    }
+
+    /// Opens a decoder backed by a [`BlockingStreamBridge`] with an optional manifest duration hint
+    /// (used when fragmented MP4 `mdhd.duration` is `0`).
+    pub fn from_blocking_bridge_with_duration(
+        mut bridge: BlockingStreamBridge,
+        spec: &StreamSourceSpec,
+        manifest_duration_ms: Option<u64>,
+    ) -> Result<Self, DecoderError> {
+        if let StreamSourceSpec::ExternalBackend {
+            key, provider_id, ..
+        } = spec
+        {
+            return Err(DecoderError::UnsupportedFormat(format!(
+                "ExternalBackend ({provider_id}:{}) cannot enter SymphoniaDecoder",
+                key.track_id
+            )));
+        }
+
+        let (mut hint_extension, hint_mime, is_segmented) = bridge_probe_hints(&bridge, spec);
+
+        // Pre-read and validate the initial chunk at `offset = 0` BEFORE handing the stream to
+        // Symphonia `probe()` (even when `content_length` is already known). This guarantees:
+        // 1. `ChunkedStreamProxy` executes HTTP 403/410 in-place self-healing (up to 2 retries)
+        //    and populates `Content-Length` + RAM LRU chunk 0 before `MediaSourceStream` caches
+        //    `is_seekable()`.
+        // 2. Unrecoverable HTTP 403 / 401 / network / timeout / empty-body errors surface cleanly
+        //    instead of falling into Symphonia `probe()` as `no suitable format reader found`.
+        let mut probe_buf = [0u8; 32];
+        match bridge.read(&mut probe_buf) {
+            Ok(0) => {
+                if let Some(typed) =
+                    bridge.take_last_stream_error().and_then(map_typed_stream_error)
+                {
+                    return Err(typed);
+                }
+                return Err(DecoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Empty audio stream (0 bytes received at offset 0)",
+                )));
+            }
+            Ok(n) => {
+                if hint_extension.is_none()
+                    && let Some(magic_ext) = crate::player::infer_extension_from_magic(&probe_buf[..n])
+                {
+                    hint_extension = Some(magic_ext.to_string());
+                }
+                bridge.seek(SeekFrom::Start(0)).map_err(DecoderError::Io)?;
+            }
+            Err(e) => {
+                if let Some(typed) =
+                    bridge.take_last_stream_error().and_then(map_typed_stream_error)
+                {
+                    return Err(typed);
+                }
+                return Err(DecoderError::Io(e));
+            }
+        }
+
+        let bridge_arc = Arc::new(Mutex::new(bridge));
+        let source: Box<dyn MediaSource> = Box::new(SharedBridgeMediaSource(Arc::clone(&bridge_arc)));
+        Self::open_internal(
+            source,
+            hint_extension.as_deref(),
+            hint_mime.as_deref(),
+            LOW_LATENCY_MSS_BUFFER_LEN,
+            Some(bridge_arc),
+            is_segmented,
+            manifest_duration_ms,
+        )
+    }
+
+    fn open_internal(
+        source: Box<dyn MediaSource>,
+        hint_extension: Option<&str>,
+        hint_mime: Option<&str>,
+        mss_buffer_len: usize,
+        bridge: Option<Arc<Mutex<BlockingStreamBridge>>>,
+        is_segmented: bool,
+        manifest_duration_ms: Option<u64>,
+    ) -> Result<Self, DecoderError> {
+        let (norm_ext, norm_mime) = normalize_probe_hints(hint_extension, hint_mime);
+        let hint = build_hint(norm_ext.as_deref(), norm_mime.as_deref());
+        let is_seekable = source.is_seekable();
+        let last_io_error = Arc::new(Mutex::new(None));
+        let tracked_source = Box::new(ErrorTrackingMediaSource {
+            inner: source,
+            last_io_error: Arc::clone(&last_io_error),
+        });
+
+        let mss = MediaSourceStream::new(
+            tracked_source,
+            MediaSourceStreamOptions {
+                buffer_len: mss_buffer_len,
+            },
+        );
 
         let format_opts = FormatOptions {
             enable_gapless: true,
+            prebuild_seek_index: false,
             ..Default::default()
         };
         let meta_opts = MetadataOptions::default();
 
         let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &format_opts, &meta_opts)
-            .map_err(|e| DecoderError::ProbeFailed(e.to_string()))?;
+            .map_err(|e| {
+                if let Some(typed) = take_typed_bridge_error(bridge.as_ref()) {
+                    return typed;
+                }
+                if let Some((kind, io_err)) = take_tracked_io_error(&last_io_error) {
+                    return DecoderError::Io(std::io::Error::new(kind, io_err));
+                }
+                DecoderError::ProbeFailed(e.to_string())
+            })?;
+        clear_tracked_io_error(&last_io_error);
 
         let mut metadata = DecodedTrackMetadata::default();
         if let Some(mut container_meta) = probed.metadata.get()
@@ -469,7 +917,17 @@ impl SymphoniaDecoder {
         let track_id = track.id;
         let params = &track.codec_params;
 
-        let sample_rate = params.sample_rate.unwrap_or(44_100);
+        let decoder_opts = DecoderOptions::default();
+        let decoder = codec_registry()
+            .make(params, &decoder_opts)
+            .map_err(|e| DecoderError::CodecInitFailed(e.to_string()))?;
+        let dec_params = decoder.codec_params();
+
+        let sample_rate = dec_params
+            .sample_rate
+            .or(params.sample_rate)
+            .unwrap_or(44_100);
+        // Preserve the container's time base so packet timestamps and seeks match `FormatReader`.
         let time_base = params.time_base;
         let alac_cookie = if params.codec == symphonia::core::codecs::CODEC_TYPE_ALAC {
             params
@@ -479,31 +937,35 @@ impl SymphoniaDecoder {
         } else {
             None
         };
-        let channels = params
+        let channels = dec_params
             .channels
+            .or(params.channels)
             .map(|c| c.count() as u8)
             .or_else(|| alac_cookie.map(|ed| ed[9]))
             .unwrap_or(2);
-        let declared_bits = params
+        let declared_bits = dec_params
             .bits_per_sample
+            .or(params.bits_per_sample)
             .or_else(|| alac_cookie.map(|ed| ed[5] as u32))
             .unwrap_or(16)
             .min(64) as u8;
-        let total_frames = params.n_frames;
-        let duration = total_frames.map(|f| {
-            if let Some(tb) = time_base {
-                let t = tb.calc_time(f);
-                Duration::new(t.seconds, (t.frac * 1_000_000_000.0).round() as u32)
-            } else {
-                Duration::from_secs_f64(f as f64 / sample_rate.max(1) as f64)
-            }
-        });
 
-        if params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS {
-            return Err(DecoderError::UnsupportedFormat(
-                "Opus codec is not supported by the built-in Symphonia decoder".to_string(),
-            ));
-        }
+        let total_frames = if is_segmented && params.n_frames == Some(0) {
+            None
+        } else {
+            params.n_frames
+        };
+        let duration = total_frames
+            .map(|f| {
+                if let Some(tb) = time_base {
+                    let t = tb.calc_time(f);
+                    Duration::new(t.seconds, (t.frac * 1_000_000_000.0).round() as u32)
+                } else {
+                    Duration::from_secs_f64(f as f64 / sample_rate.max(1) as f64)
+                }
+            })
+            .filter(|d| !is_segmented || *d > Duration::ZERO)
+            .or_else(|| manifest_duration_ms.filter(|&ms| ms > 0).map(Duration::from_millis));
 
         let (codec, sample_format, container_bits, valid_bits, endianness) =
             classify_codec_and_sample_format(params.codec, declared_bits);
@@ -524,11 +986,6 @@ impl SymphoniaDecoder {
             dsd_rate: None,
         };
 
-        let decoder_opts = DecoderOptions::default();
-        let decoder = symphonia::default::get_codecs()
-            .make(params, &decoder_opts)
-            .map_err(|e| DecoderError::CodecInitFailed(e.to_string()))?;
-
         tracing::trace!(
             "SymphoniaDecoder initialized: {:?}, unified={:?}",
             format,
@@ -548,12 +1005,18 @@ impl SymphoniaDecoder {
             duration,
             total_frames,
             is_seekable,
-            hint_extension: hint_extension.map(str::to_string),
-            hint_mime: hint_mime.map(str::to_string),
+            hint_extension: norm_ext,
+            hint_mime: norm_mime,
+            mss_buffer_len,
+            bridge,
+            is_segmented,
+            base_timestamp_ms: 0,
             last_packet_end_ts: 0,
             pending_seek_target_ts: None,
+            pending_seek_skip_frames: 0,
             at_eof: false,
             last_seek_outcome: None,
+            last_io_error,
         })
     }
 
@@ -568,9 +1031,15 @@ impl SymphoniaDecoder {
         Self::from_media_source(Box::new(cursor), hint_extension, None)
     }
 
+    /// Returns the timeline base offset in milliseconds (non-zero after segmented DASH seeks).
+    pub fn base_timestamp_ms(&self) -> u64 {
+        self.base_timestamp_ms
+    }
+
     pub fn seek_with_outcome(&mut self, time: Duration) -> Result<SeekOutcome, DecoderError> {
         self.at_eof = false;
         self.pending_seek_target_ts = None;
+        self.pending_seek_skip_frames = 0;
 
         let requested_ms = time.as_millis() as u64;
         let exact_ts = self.time_base.and_then(|tb| {
@@ -582,11 +1051,14 @@ impl SymphoniaDecoder {
                 None
             }
         });
-        let is_eof_seek = self.total_frames == Some(0)
-            || self.duration.is_some_and(|d| time >= d)
+        let is_eof_seek = (!self.is_segmented && self.total_frames == Some(0))
             || self
-                .total_frames
-                .is_some_and(|tf| exact_ts.is_some_and(|ts| ts >= tf));
+                .duration
+                .is_some_and(|d| d > Duration::ZERO && time >= d)
+            || (!self.is_segmented
+                && self
+                    .total_frames
+                    .is_some_and(|tf| exact_ts.is_some_and(|ts| ts >= tf)));
 
         if is_eof_seek {
             self.decoder.reset();
@@ -607,31 +1079,44 @@ impl SymphoniaDecoder {
             return Ok(outcome);
         }
 
-        let is_backward_flac_seek = self.format.codec == AudioCodec::Flac
+        if self.is_segmented
+            && let Some(ref bridge_arc) = self.bridge
+        {
+            return self.seek_segmented(Arc::clone(bridge_arc), requested_ms);
+        }
+
+        let is_backward_flac_seek = !self.is_segmented
+            && self.format.codec == AudioCodec::Flac
             && self.is_seekable
             && exact_ts.is_some_and(|ts| ts < self.last_packet_end_ts);
 
         if is_backward_flac_seek
             && let Some(old_reader) = self.reader.take()
         {
+            clear_tracked_io_error(&self.last_io_error);
             let mut mss = old_reader.into_inner();
             mss.seek(SeekFrom::Start(0))
-                .map_err(|e| DecoderError::SeekError(e.to_string()))?;
-            let mut hint = Hint::new();
-            if let Some(ref ext) = self.hint_extension {
-                hint.with_extension(ext);
-            }
-            if let Some(ref mime) = self.hint_mime {
-                hint.mime_type(mime);
-            }
+                .map_err(|e| {
+                    DecoderError::SeekError(format_with_tracked_io_error(e, &self.last_io_error))
+                })?;
+            let hint = build_hint(self.hint_extension.as_deref(), self.hint_mime.as_deref());
             let format_opts = FormatOptions {
                 enable_gapless: true,
+                prebuild_seek_index: false,
                 ..Default::default()
             };
             let meta_opts = MetadataOptions::default();
             let probed = symphonia::default::get_probe()
                 .format(&hint, mss, &format_opts, &meta_opts)
-                .map_err(|e| DecoderError::SeekError(e.to_string()))?;
+                .map_err(|e| {
+                    take_typed_bridge_error(self.bridge.as_ref()).unwrap_or_else(|| {
+                        DecoderError::SeekError(format_with_tracked_io_error(
+                            e,
+                            &self.last_io_error,
+                        ))
+                    })
+                })?;
+            clear_tracked_io_error(&self.last_io_error);
             self.reader = Some(probed.format);
             self.last_packet_end_ts = 0;
         }
@@ -646,13 +1131,74 @@ impl SymphoniaDecoder {
                 track_id: Some(self.track_id),
             },
         };
-        let reader = self
-            .reader
-            .as_mut()
-            .ok_or_else(|| DecoderError::SeekError("Missing format reader".to_string()))?;
-        let seeked = reader
-            .seek(SeekMode::Accurate, seek_to)
-            .map_err(|e| DecoderError::SeekError(e.to_string()))?;
+        clear_tracked_io_error(&self.last_io_error);
+        let seek_res = {
+            let reader = self
+                .reader
+                .as_mut()
+                .ok_or_else(|| DecoderError::SeekError("Missing format reader".to_string()))?;
+            reader.seek(SeekMode::Accurate, seek_to)
+        };
+        let seeked = match seek_res {
+            Ok(s) => s,
+            Err(symphonia::core::errors::Error::SeekError(
+                symphonia::core::errors::SeekErrorKind::OutOfRange,
+            )) if !self.is_segmented && self.is_seekable && requested_ms == 0 => {
+                // Containers like WebM/Opus can have a first CuePoint timestamp > 0 (e.g. CodecDelay).
+                // Rewinding the underlying MediaSourceStream to offset 0 cleanly restarts playback at 0.
+                if let Some(old_reader) = self.reader.take() {
+                    clear_tracked_io_error(&self.last_io_error);
+                    let mut mss = old_reader.into_inner();
+                    mss.seek(SeekFrom::Start(0)).map_err(|e| {
+                        DecoderError::SeekError(format_with_tracked_io_error(
+                            e,
+                            &self.last_io_error,
+                        ))
+                    })?;
+                    let hint = build_hint(self.hint_extension.as_deref(), self.hint_mime.as_deref());
+                    let format_opts = FormatOptions {
+                        enable_gapless: true,
+                        prebuild_seek_index: false,
+                        ..Default::default()
+                    };
+                    let meta_opts = MetadataOptions::default();
+                    let probed = symphonia::default::get_probe()
+                        .format(&hint, mss, &format_opts, &meta_opts)
+                        .map_err(|e| {
+                            take_typed_bridge_error(self.bridge.as_ref()).unwrap_or_else(|| {
+                                DecoderError::SeekError(format_with_tracked_io_error(
+                                    e,
+                                    &self.last_io_error,
+                                ))
+                            })
+                        })?;
+                    clear_tracked_io_error(&self.last_io_error);
+                    self.reader = Some(probed.format);
+                }
+                self.decoder.reset();
+                self.last_packet_end_ts = 0;
+                let outcome = SeekOutcome {
+                    requested_ms: 0,
+                    actual_ms: 0,
+                    required_ts: 0,
+                    actual_ts: 0,
+                    trimmed_frames: 0,
+                };
+                self.last_seek_outcome = Some(outcome);
+                return Ok(outcome);
+            }
+            Err(e) => {
+                return Err(take_typed_bridge_error(self.bridge.as_ref()).unwrap_or_else(|| {
+                    DecoderError::SeekError(format_with_tracked_io_error(e, &self.last_io_error))
+                }));
+            }
+        };
+        if let Some(typed) = take_typed_bridge_error(self.bridge.as_ref()) {
+            return Err(typed);
+        }
+        if let Some((_, io_err)) = take_tracked_io_error(&self.last_io_error) {
+            return Err(DecoderError::SeekError(io_err));
+        }
         self.decoder.reset();
         self.last_packet_end_ts = seeked.actual_ts;
 
@@ -678,8 +1224,102 @@ impl SymphoniaDecoder {
         Ok(outcome)
     }
 
+    fn seek_segmented(
+        &mut self,
+        bridge_arc: Arc<Mutex<BlockingStreamBridge>>,
+        requested_ms: u64,
+    ) -> Result<SeekOutcome, DecoderError> {
+        self.reader = None;
+        clear_tracked_io_error(&self.last_io_error);
+
+        let target = {
+            let mut br = bridge_arc
+                .lock()
+                .map_err(|_| DecoderError::SeekError("Segmented bridge lock poisoned".into()))?;
+            br.seek_to_time_ms(requested_ms)
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    map_typed_stream_error(e).unwrap_or(DecoderError::SeekError(msg))
+                })?
+                .ok_or_else(|| {
+                    DecoderError::SeekError("Segmented stream returned no seek target".to_string())
+                })?
+        };
+
+        let tracked_source = Box::new(ErrorTrackingMediaSource {
+            inner: Box::new(SharedBridgeMediaSource(Arc::clone(&bridge_arc))),
+            last_io_error: Arc::clone(&self.last_io_error),
+        });
+        let mss = MediaSourceStream::new(
+            tracked_source,
+            MediaSourceStreamOptions {
+                buffer_len: self.mss_buffer_len,
+            },
+        );
+        let hint = build_hint(self.hint_extension.as_deref(), self.hint_mime.as_deref());
+        let format_opts = FormatOptions {
+            enable_gapless: true,
+            prebuild_seek_index: false,
+            ..Default::default()
+        };
+        let meta_opts = MetadataOptions::default();
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &format_opts, &meta_opts)
+            .map_err(|e| {
+                take_typed_bridge_error(Some(&bridge_arc)).unwrap_or_else(|| {
+                    DecoderError::SeekError(format_with_tracked_io_error(e, &self.last_io_error))
+                })
+            })?;
+        clear_tracked_io_error(&self.last_io_error);
+
+        let reader = probed.format;
+        let track = reader
+            .default_track()
+            .or_else(|| {
+                reader
+                    .tracks()
+                    .iter()
+                    .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            })
+            .ok_or(DecoderError::NoAudioTrack)?;
+
+        self.track_id = track.id;
+        self.time_base = track.codec_params.time_base;
+        self.reader = Some(reader);
+        self.decoder.reset();
+        self.last_packet_end_ts = 0;
+        self.base_timestamp_ms = target.segment_start_ms;
+
+        let intra_ms = requested_ms.saturating_sub(target.segment_start_ms);
+        let local_target_ts = ms_to_ts(intra_ms, self.time_base, self.sample_rate);
+        let trimmed_frames =
+            ((intra_ms as u128 * self.sample_rate.max(1) as u128) / 1000u128) as u64;
+        // Trim intra-segment leading samples by decoded frame count so trimming works accurately
+        // regardless of whether fMP4 `tfdt` timestamps are segment-relative (0) or absolute timeline ticks.
+        self.pending_seek_target_ts = None;
+        self.pending_seek_skip_frames = trimmed_frames;
+
+        let actual_ms = self
+            .base_timestamp_ms
+            .saturating_add(intra_ms);
+        let outcome = SeekOutcome {
+            requested_ms,
+            actual_ms,
+            required_ts: local_target_ts,
+            actual_ts: 0,
+            trimmed_frames,
+        };
+        self.last_seek_outcome = Some(outcome);
+        Ok(outcome)
+    }
+
     pub fn last_seek_outcome(&self) -> Option<SeekOutcome> {
         self.last_seek_outcome
+    }
+
+    /// Returns a handle to the backing `BlockingStreamBridge`, if this decoder reads from a stream.
+    pub fn stream_bridge(&self) -> Option<Arc<Mutex<BlockingStreamBridge>>> {
+        self.bridge.as_ref().map(Arc::clone)
     }
 }
 
@@ -703,6 +1343,7 @@ impl AudioDecoder for SymphoniaDecoder {
             AudioCodec::Mp3 => "Symphonia MPEG-1/2 Layer III Decoder",
             AudioCodec::Alac => "Symphonia Apple Lossless ALAC Decoder",
             AudioCodec::Aiff => "Symphonia AIFF PCM Decoder",
+            AudioCodec::Opus => "Symphonia Opus Decoder (libopus)",
             _ => "Symphonia Decoder",
         }
     }
@@ -725,15 +1366,30 @@ impl AudioDecoder for SymphoniaDecoder {
                 Some(r) => r,
                 None => return Ok(None),
             };
+            clear_tracked_io_error(&self.last_io_error);
             let packet = match reader.next_packet() {
                 Ok(p) => p,
                 Err(symphonia::core::errors::Error::IoError(e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
+                    if let Some(typed) = take_typed_bridge_error(self.bridge.as_ref()) {
+                        return Err(typed);
+                    }
+                    if let Some((_, io_err)) = take_tracked_io_error(&self.last_io_error) {
+                        return Err(DecoderError::DecodeError(io_err));
+                    }
                     self.at_eof = true;
                     return Ok(None);
                 }
-                Err(e) => return Err(DecoderError::DecodeError(e.to_string())),
+                Err(e) => {
+                    if let Some(typed) = take_typed_bridge_error(self.bridge.as_ref()) {
+                        return Err(typed);
+                    }
+                    return Err(DecoderError::DecodeError(format_with_tracked_io_error(
+                        e,
+                        &self.last_io_error,
+                    )));
+                }
             };
 
             if packet.track_id() != self.track_id {
@@ -759,26 +1415,49 @@ impl AudioDecoder for SymphoniaDecoder {
                 continue;
             }
 
+            if self.pending_seek_skip_frames > 0 {
+                let frames_u64 = decoded_frames as u64;
+                if self.pending_seek_skip_frames >= frames_u64 {
+                    self.pending_seek_skip_frames -= frames_u64;
+                    continue;
+                }
+                let trim_frames = self.pending_seek_skip_frames as usize;
+                self.pending_seek_skip_frames = 0;
+                let mut chunk = extract_interleaved_chunk(decoded, self.valid_bits);
+                trim_chunk_front(&mut chunk, trim_frames);
+                if chunk.is_empty() {
+                    continue;
+                }
+                return Ok(Some(chunk));
+            }
+
             if let Some(target_ts) = self.pending_seek_target_ts {
                 if pkt_dur > 0 && pkt_ts.saturating_add(pkt_dur) <= target_ts {
                     continue;
                 }
-                self.pending_seek_target_ts = None;
 
                 let decoded_rate = decoded.spec().rate;
-                let mut chunk = extract_interleaved_chunk(decoded, self.valid_bits);
                 if target_ts > pkt_ts {
                     let trim_frames =
                         ts_delta_to_frames(target_ts - pkt_ts, self.time_base, decoded_rate)
                             as usize;
-                    if trim_frames >= chunk.frames() {
+                    if trim_frames >= decoded_frames {
+                        // Keep `pending_seek_target_ts` active: containers like Matroska/WebM
+                        // often emit `pkt_dur == 0`, so we must keep decoding and discarding
+                        // whole pre-target packets until a packet actually straddles `target_ts`.
                         continue;
                     }
+                    self.pending_seek_target_ts = None;
+                    let mut chunk = extract_interleaved_chunk(decoded, self.valid_bits);
                     trim_chunk_front(&mut chunk, trim_frames);
                     if chunk.is_empty() {
                         continue;
                     }
+                    return Ok(Some(chunk));
                 }
+
+                self.pending_seek_target_ts = None;
+                let chunk = extract_interleaved_chunk(decoded, self.valid_bits);
                 return Ok(Some(chunk));
             }
 
@@ -789,5 +1468,13 @@ impl AudioDecoder for SymphoniaDecoder {
 
     fn seek(&mut self, time: Duration) -> Result<(), DecoderError> {
         self.seek_with_outcome(time).map(|_| ())
+    }
+
+    fn reclaim_idle_memory(&mut self) -> usize {
+        self.bridge
+            .as_ref()
+            .and_then(|b| b.lock().ok())
+            .map(|guard| guard.reclaim_idle_memory())
+            .unwrap_or(0)
     }
 }

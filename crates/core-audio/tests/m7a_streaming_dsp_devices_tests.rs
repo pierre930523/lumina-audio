@@ -351,7 +351,13 @@ async fn test_f35_http_dsf_range_stream_playback() {
     assert!(meta.format.is_dsd);
     assert_eq!(meta.format.sample_rate_hz, 2_822_400);
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Allow bounded time for debug-mode DSD64 software decimation to reach the 500 ms startup watermark.
+    for _ in 0..60 {
+        if player.position_ms() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(player.position_ms() > 0);
 
     player.stop();

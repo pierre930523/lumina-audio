@@ -4,9 +4,11 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../main.dart';
 import '../../models/playback_state.dart';
+import '../../models/streaming_models.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/streaming/streaming_provider.dart';
 
 /// Reusable Album Artwork View with strict Artwork Cache keying, zero-flash
 /// synchronous [LibraryIndexCache] lookups, gapless image decoding, HiDPI
@@ -25,6 +27,7 @@ class AlbumArtworkView extends StatefulWidget {
   final List<BoxShadow>? boxShadow;
   final int revision;
   final bool fullResolution;
+  final int? coverTargetSize;
   final bool circular;
   final double? uiScale;
   final void Function(String? cachePath, String? coverUrl)? onArtworkResolved;
@@ -44,10 +47,47 @@ class AlbumArtworkView extends StatefulWidget {
     this.boxShadow,
     this.revision = 0,
     this.fullResolution = true,
+    this.coverTargetSize,
     this.circular = false,
     this.uiScale,
     this.onArtworkResolved,
   });
+
+  /// Resolves the scene-tiered streaming cover pixel target size.
+  static int resolveCoverTargetSize({
+    required double size,
+    required bool fullResolution,
+    int? explicitTargetSize,
+  }) {
+    if (explicitTargetSize != null && explicitTargetSize > 0) {
+      return explicitTargetSize;
+    }
+    if (fullResolution && size >= 120) {
+      return 1200;
+    }
+    if (size >= 100) {
+      return 600;
+    }
+    return 300;
+  }
+
+  static final RegExp _tidalCoverSizeRegex = RegExp(
+    r'^(https?://resources\.tidal\.com/images/.+/)(?:80x80|160x160|320x320|640x640)(\.jpg(?:\?.*)?)$',
+    caseSensitive: false,
+  );
+
+  /// Upgrades smaller Tidal cover URLs to 1280x1280 for large full-resolution views.
+  static String maybeUpgradeTidalLargeCoverUrl(
+    String url, {
+    required double size,
+    required bool fullResolution,
+  }) {
+    if (!fullResolution || size < 160) return url;
+    return url.replaceFirstMapped(
+      _tidalCoverSizeRegex,
+      (match) => '${match.group(1)}1280x1280${match.group(2)}',
+    );
+  }
 
   @override
   State<AlbumArtworkView> createState() => _AlbumArtworkViewState();
@@ -61,6 +101,7 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
   String? _lastNotifiedCachePath;
   String? _lastNotifiedCoverUrl;
   bool _hasNotifiedArtwork = false;
+  bool _highResFallbackActive = false;
 
   void _emitArtworkResolved({bool forceIfCleared = false}) {
     final cb = widget.onArtworkResolved;
@@ -169,15 +210,32 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
       _resolvedCachePath = null;
       _resolvedCoverUrl = null;
       _resolvedSourceId = null;
+      _highResFallbackActive = false;
       _hasNotifiedArtwork = false;
       _lastNotifiedCachePath = null;
       _lastNotifiedCoverUrl = null;
       _initAndResolve(notifyIfCleared: hadResolved);
-    } else if (oldWidget.onArtworkResolved != widget.onArtworkResolved &&
-        widget.onArtworkResolved != null &&
-        (_resolvedCachePath != null || _resolvedCoverUrl != null)) {
-      _hasNotifiedArtwork = false;
-      _scheduleArtworkResolvedPostFrame(_resolveToken);
+    } else {
+      if (oldWidget.coverTargetSize != widget.coverTargetSize ||
+          oldWidget.fullResolution != widget.fullResolution ||
+          AlbumArtworkView.resolveCoverTargetSize(
+                size: oldWidget.size,
+                fullResolution: oldWidget.fullResolution,
+                explicitTargetSize: oldWidget.coverTargetSize,
+              ) !=
+              AlbumArtworkView.resolveCoverTargetSize(
+                size: widget.size,
+                fullResolution: widget.fullResolution,
+                explicitTargetSize: widget.coverTargetSize,
+              )) {
+        _highResFallbackActive = false;
+      }
+      if (oldWidget.onArtworkResolved != widget.onArtworkResolved &&
+          widget.onArtworkResolved != null &&
+          (_resolvedCachePath != null || _resolvedCoverUrl != null)) {
+        _hasNotifiedArtwork = false;
+        _scheduleArtworkResolvedPostFrame(_resolveToken);
+      }
     }
   }
 
@@ -287,10 +345,14 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
       alb?.coverUrl,
     ]);
     if (directUrl != null) {
-      if (directUrl.startsWith('http://') || directUrl.startsWith('https://')) {
-        _resolvedCoverUrl = directUrl;
+      final normalizedNetUrl = BaseStreamingProvider.normalizeCoverUrl(directUrl);
+      if (normalizedNetUrl != null) {
+        _resolvedCoverUrl = normalizedNetUrl;
         _scheduleArtworkResolvedPostFrame(token);
-      } else if (!directUrl.startsWith('/api/')) {
+      } else if (!directUrl.startsWith('/api/') &&
+          !directUrl.startsWith('http://') &&
+          !directUrl.startsWith('https://') &&
+          !directUrl.startsWith('//')) {
         // Verify local file path off the build() path via microtask.
         Future.microtask(() {
           if (!mounted || token != _resolveToken) return;
@@ -576,18 +638,67 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
         errorBuilder: (_, _, _) => _buildPlaceholder(radius),
       );
     } else if (_resolvedCoverUrl != null && _resolvedCoverUrl!.isNotEmpty) {
-      imageContent = Image.network(
-        _resolvedCoverUrl!,
-        key: ValueKey('cover_net_${_resolvedCoverUrl!}'),
-        width: widget.size,
-        height: widget.size,
-        fit: widget.fit,
-        gaplessPlayback: true,
-        filterQuality: FilterQuality.high,
-        isAntiAlias: true,
-        cacheWidth: targetCacheWidth,
-        errorBuilder: (_, _, _) => _buildPlaceholder(radius),
-      );
+      final netUrl = BaseStreamingProvider.normalizeCoverUrl(_resolvedCoverUrl);
+      if (netUrl != null) {
+        final targetSize = AlbumArtworkView.resolveCoverTargetSize(
+          size: widget.size,
+          fullResolution: widget.fullResolution,
+          explicitTargetSize: widget.coverTargetSize,
+        );
+        final tidalUpgraded = AlbumArtworkView.maybeUpgradeTidalLargeCoverUrl(
+          netUrl,
+          size: widget.size,
+          fullResolution: widget.fullResolution,
+        );
+        final primaryUrl = upgradeStreamingCoverUrl(
+              tidalUpgraded,
+              targetSize: targetSize,
+            ) ??
+            tidalUpgraded;
+        final fallbackUrl = fallbackStreamingCoverUrl(
+          primaryUrl,
+          originalUrl: netUrl,
+        );
+        final effectiveNetUrl =
+            (_highResFallbackActive && fallbackUrl != null)
+                ? fallbackUrl
+                : primaryUrl;
+        final signature = _resolveSignature(widget);
+        final reqFullResolution = widget.fullResolution;
+        final reqCoverTargetSize = widget.coverTargetSize;
+        imageContent = Image.network(
+          effectiveNetUrl,
+          key: ValueKey('cover_net_$effectiveNetUrl'),
+          width: widget.size,
+          height: widget.size,
+          fit: widget.fit,
+          headers: BaseStreamingProvider.defaultImageHttpHeaders,
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.high,
+          isAntiAlias: true,
+          cacheWidth: targetCacheWidth,
+          errorBuilder: (_, error, _) {
+            debugPrint('[CoverLoadError] $effectiveNetUrl -> $error');
+            if (!_highResFallbackActive &&
+                fallbackUrl != null &&
+                fallbackUrl != effectiveNetUrl) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted ||
+                    _highResFallbackActive ||
+                    _resolveSignature(widget) != signature ||
+                    widget.fullResolution != reqFullResolution ||
+                    widget.coverTargetSize != reqCoverTargetSize) {
+                  return;
+                }
+                setState(() => _highResFallbackActive = true);
+              });
+            }
+            return _buildPlaceholder(radius);
+          },
+        );
+      } else {
+        imageContent = _buildPlaceholder(radius);
+      }
     } else {
       imageContent = _buildPlaceholder(radius);
     }

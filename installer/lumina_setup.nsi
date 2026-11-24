@@ -1,9 +1,9 @@
-﻿; NSIS Modern UI 2 Installer Script for Lumina Audio v0.2.2
+﻿; NSIS Modern UI 2 Installer Script for Lumina Audio v0.2.4
 Unicode True
 SetCompressor /SOLID lzma
 
 !define APP_NAME "Lumina Audio"
-!define APP_VERSION "0.2.2"
+!define APP_VERSION "0.2.4"
 !define APP_PUBLISHER "Lumina Audio Team"
 !define APP_URL "https://github.com/pierre930523/lumina-audio"
 !define APP_EXE "lumina_app.exe"
@@ -35,7 +35,7 @@ BrandingText "${APP_NAME} v${APP_VERSION} — Audiophile Lossless Music Player"
 !insertmacro MUI_LANGUAGE "TradChinese"
 !insertmacro MUI_LANGUAGE "English"
 
-VIProductVersion "0.2.2.0"
+VIProductVersion "0.2.4.0"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "FileDescription" "${APP_NAME} Setup (NSIS)"
@@ -47,7 +47,7 @@ Section "Lumina Audio 主程式 (必選)" SecCore
   SectionIn RO
   SetOutPath "$INSTDIR"
 
-  ; Package full Flutter Windows Release bundle (exe, core_ffi.dll, WebView2Loader.dll, data, etc.)
+  ; Package full Flutter Windows Release bundle (exe, core_ffi.dll, WebView2Loader.dll, MSVC CRT DLLs, data/, bin/, THIRD_PARTY_LICENSES.txt, etc.)
   File /r "..\app\build\windows\x64\runner\Release\*.*"
 
   ; Persist install directory
@@ -79,7 +79,9 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
 
+  RMDir /r "$INSTDIR\bin"
   RMDir /r "$INSTDIR\data"
+  Delete "$INSTDIR\THIRD_PARTY_LICENSES.txt"
   Delete "$INSTDIR\*.dll"
   Delete "$INSTDIR\*.exe"
   Delete "$INSTDIR\*.dat"

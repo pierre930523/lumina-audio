@@ -228,8 +228,9 @@ impl AudioFormatManager {
         let exact_ch = device.supported_channels.is_empty()
             || device.supported_channels.contains(&source.channels);
 
-        let chosen_wire = pick_bit_exact_wire(source.sample_format, device);
+        let chosen_wire = pick_bit_exact_wire(source, device);
         let is_bluetooth = device.transport == DeviceTransportKind::Bluetooth;
+        let is_bit_perfect_candidate = !source.codec.is_lossy();
 
         if device.backend == OutputBackendKind::WindowsAsio {
             if device.asio_available && exact_rate && exact_ch && let Some(wire) = chosen_wire {
@@ -240,7 +241,7 @@ impl AudioFormatManager {
                     target_channels: source.channels,
                     container_bits: wire.container_bits(),
                     valid_bits: wire.valid_bits(),
-                    is_bit_perfect_candidate: true,
+                    is_bit_perfect_candidate,
                     requires_dsp_bypass: policy.strict_bit_perfect,
                     requires_unity_volume: policy.strict_bit_perfect,
                     requires_resampling: false,
@@ -275,7 +276,7 @@ impl AudioFormatManager {
                 target_channels: source.channels,
                 container_bits: wire.container_bits(),
                 valid_bits: wire.valid_bits(),
-                is_bit_perfect_candidate: true,
+                is_bit_perfect_candidate,
                 requires_dsp_bypass: policy.strict_bit_perfect,
                 requires_unity_volume: policy.strict_bit_perfect,
                 requires_resampling: false,
@@ -338,13 +339,13 @@ impl AudioFormatManager {
 }
 
 fn pick_bit_exact_wire(
-    src: SampleFormatKind,
+    source: &UnifiedAudioFormat,
     device: &AudioDeviceCapabilities,
 ) -> Option<WireSampleFormat> {
     let has_cb = |cb: u8| device.supported_container_bits.contains(&cb);
     let has_vb = |vb: u8| device.supported_bit_depths.contains(&vb);
 
-    match src {
+    match source.sample_format {
         SampleFormatKind::Int16 => {
             if has_vb(16) {
                 Some(WireSampleFormat::Int16Le)
@@ -379,6 +380,22 @@ fn pick_bit_exact_wire(
         SampleFormatKind::Float32 => {
             if has_cb(32) && device.supports_float32 {
                 Some(WireSampleFormat::Float32Le)
+            } else if source.codec.is_lossy() {
+                // Lossy streams (Opus/AAC/MP3) decode to Float32; select the DAC's highest
+                // supported exclusive integer container at exact source rate rather than
+                // forcing Shared-mode mixer resampling. Lossless Float32 WAV remains strict.
+                if has_vb(24) && has_cb(32) {
+                    Some(WireSampleFormat::Int24In32MsbLe)
+                } else if has_cb(32) && (has_vb(32) || device.backend == OutputBackendKind::WindowsAsio)
+                {
+                    Some(WireSampleFormat::Int32Le)
+                } else if has_vb(24) && has_cb(24) {
+                    Some(WireSampleFormat::Int24PackedLe)
+                } else if has_vb(16) {
+                    Some(WireSampleFormat::Int16Le)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -555,7 +572,15 @@ impl AudioDeviceManager {
 
             for asio in crate::backend::asio_win::enumerate_asio_drivers(true) {
                 let asio_ready = asio.dll_exists && asio.initialized_ok;
+                let asio_is_integer_24_or_32 = matches!(
+                    asio.sample_type,
+                    Some(
+                        crate::backend::asio_win::ASIO_ST_INT24_LSB
+                            | crate::backend::asio_win::ASIO_ST_INT32_LSB
+                    )
+                );
                 let dop_ok = asio_ready
+                    && asio_is_integer_24_or_32
                     && asio.supported_bit_depths.iter().any(|&b| b >= 24)
                     && asio.supported_rates.contains(&176_400);
 

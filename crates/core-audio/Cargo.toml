@@ -4,14 +4,25 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+blowfish = { workspace = true }
+bytes = { workspace = true }
+cbc = { workspace = true }
+cipher = { workspace = true }
+core-db = { path = "../core-db" }
 core-types = { path = "../core-types" }
 cpal = "0.18"
+futures-util = { workspace = true }
+md-5 = { workspace = true }
+opus2 = { workspace = true }
+quick-xml = { workspace = true }
 reqwest = { workspace = true }
 rustfft = "6.4"
 serde = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -22,8 +33,12 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_Audio_Endpoints",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Variant",
@@ -51,3 +66,6 @@ symphonia = { version = "0.5.4", default-features = false, features = [
 default = []
 wasapi = []
 asio = []
+
+[dev-dependencies]
+tempfile = "3"

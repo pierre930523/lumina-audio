@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'podcast_models.dart';
+
 /// Top-level workspace destinations inside [HomeScreen].
 enum HomeTab {
   home,
@@ -12,7 +14,9 @@ enum HomeTab {
   artistDetail,
   audiobooks,
   podcasts,
+  podcastDetail,
   radio,
+  search,
   streamingProvider,
   general,
   appearance,
@@ -42,6 +46,8 @@ class NavEntry {
   final String? smartPlaylistId;
   final String? streamingKind;
   final String? creditArtistId;
+  final String? podcastShowId;
+  final PodcastShow? podcastShow;
   final String? entryId;
 
   const NavEntry({
@@ -52,6 +58,8 @@ class NavEntry {
     this.smartPlaylistId,
     this.streamingKind,
     this.creditArtistId,
+    this.podcastShowId,
+    this.podcastShow,
     this.entryId,
   });
 
@@ -61,6 +69,17 @@ class NavEntry {
   factory NavEntry.album(String albumId, {String? entryId}) => NavEntry(
     tab: HomeTab.albumDetail,
     albumId: albumId,
+    entryId: entryId,
+  );
+
+  factory NavEntry.podcastDetail(
+    String showId, {
+    PodcastShow? show,
+    String? entryId,
+  }) => NavEntry(
+    tab: HomeTab.podcastDetail,
+    podcastShowId: showId,
+    podcastShow: show,
     entryId: entryId,
   );
 
@@ -112,6 +131,7 @@ class NavEntry {
     smartPlaylistId ?? '',
     streamingKind ?? '',
     creditArtistId ?? '',
+    podcastShowId ?? '',
   ].join('|');
 
   String get effectiveId => entryId ?? routeKey;
@@ -126,6 +146,8 @@ class NavEntry {
     String? smartPlaylistId,
     String? streamingKind,
     String? creditArtistId,
+    String? podcastShowId,
+    PodcastShow? podcastShow,
     String? entryId,
   }) {
     return NavEntry(
@@ -136,6 +158,8 @@ class NavEntry {
       smartPlaylistId: smartPlaylistId ?? this.smartPlaylistId,
       streamingKind: streamingKind ?? this.streamingKind,
       creditArtistId: creditArtistId ?? this.creditArtistId,
+      podcastShowId: podcastShowId ?? this.podcastShowId,
+      podcastShow: podcastShow ?? this.podcastShow,
       entryId: entryId ?? this.entryId,
     );
   }
@@ -152,6 +176,8 @@ class NavEntry {
           smartPlaylistId == other.smartPlaylistId &&
           streamingKind == other.streamingKind &&
           creditArtistId == other.creditArtistId &&
+          podcastShowId == other.podcastShowId &&
+          podcastShow == other.podcastShow &&
           entryId == other.entryId;
 
   @override
@@ -163,6 +189,8 @@ class NavEntry {
     smartPlaylistId,
     streamingKind,
     creditArtistId,
+    podcastShowId,
+    podcastShow,
     entryId,
   );
 

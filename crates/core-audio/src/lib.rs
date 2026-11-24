@@ -4,16 +4,20 @@ pub mod device_manager;
 pub mod dsd;
 pub mod dsp;
 pub mod error;
+pub mod network_monitor;
 pub mod pcm;
 pub mod player;
 pub mod signal_path;
 pub mod stream;
+pub mod streaming;
 pub mod test_utils;
 pub mod verification;
 pub mod visualizer;
 
 pub use device_manager::{AudioDeviceManager, AudioFormatManager, NegotiatedFormat};
-pub use verification::{AudioVerificationEngine, VerificationConfig, WireSampleFormat};
+pub use verification::{
+    AudioVerificationEngine, VerificationConfig, VerificationTapProducer, WireSampleFormat,
+};
 pub use visualizer::{global_tap, VisualizerRingBuffer, VisualizerTap};
 
 pub use backend::{
@@ -37,11 +41,14 @@ pub use dsp::{
     peq::{ParametricBand, ParametricEq},
 };
 pub use error::{BackendError, CoreAudioError, DecoderError, DsdError, DspError};
-pub use pcm::{AudioChunk, AudioDecoder, SymphoniaDecoder, SynthAudioDecoder};
+pub use pcm::{
+    AudioChunk, AudioDecoder, OpusSymphoniaDecoder, SymphoniaDecoder, SynthAudioDecoder,
+};
 pub use player::{
     enumerate_cpal_devices, infer_extension_from_magic, open_decoder_for_path,
     open_decoder_for_stream, open_decoder_for_stream_cancellable, rank_sample_format,
-    select_best_config_index, ActiveTrackMeta, AudioPlayer, PlaybackLifecycleState,
+    select_best_config_index, ActiveTrackMeta, AudioPlayer, OpenedStreamDecoder,
+    PlaybackLifecycleState, StreamingSincResampler,
 };
 pub use signal_path::{SignalPathContext, SignalPathEngine};
 pub use stream::{

@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use core_db::credential::CredentialStore;
-use core_types::{AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, ProviderKind, TrackSource};
+use core_types::{
+    AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, NormalizedLoudness, ProviderKind,
+    StreamCipher, StreamKey, StreamProviderCapabilities, StreamSourceSpec, TrackSource,
+    DEFAULT_DEEZER_BLOCK_SIZE, DEFAULT_DEEZER_STRIDE,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -10,7 +15,10 @@ use crate::error::ProviderError;
 use crate::http::{endpoint_url, HttpRequest, HttpTransport, ReqwestHttpTransport};
 use crate::local::dsd_meta::parse_year;
 use crate::local::extract_edition_label;
-use crate::traits::{MusicProvider, ProviderCapabilities, ResolvedStream, SyncResult};
+use crate::traits::{
+    extract_expire_at_from_url, validate_stream_key, MusicProvider, ProviderCapabilities,
+    ResolvedStream, StreamResolver, SyncResult,
+};
 
 pub const DEEZER_CREDENTIAL_SERVICE: &str = "com.lumina.audio.deezer";
 pub const DEEZER_KEY_ARL: &str = "arl_token";
@@ -140,6 +148,10 @@ struct DeezerMediaItem {
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
+    exp: Option<u64>,
+    #[serde(default)]
+    cipher: Option<serde_json::Value>,
+    #[serde(default)]
     sources: Vec<DeezerMediaSource>,
 }
 
@@ -202,6 +214,8 @@ struct DeezerTrackDto {
     disk_number: Option<u16>,
     #[serde(default)]
     gain: Option<f64>,
+    #[serde(default)]
+    preview: Option<String>,
     #[serde(default)]
     album: Option<DeezerTrackAlbumDto>,
 }
@@ -445,6 +459,286 @@ impl DeezerProvider {
             format!("arl={}", sess.arl)
         }
     }
+
+    async fn fetch_encrypted_media(
+        &self,
+        sess: &DeezerSession,
+        track_id: &str,
+        preferred_formats: Vec<serde_json::Value>,
+    ) -> Result<DeezerMediaResolved, ProviderError> {
+        let cookie_header = self.build_cookie_header(sess);
+        let cfg = self.config.read().await.clone();
+
+        // Optionally query song.getData to obtain TRACK_TOKEN and ReplayGain when api_token is available.
+        let mut track_token = track_id.to_string();
+        let mut gw_gain_db: Option<f64> = None;
+
+        if let Some(ref api_token) = sess.api_token {
+            let song_body = serde_json::json!({ "sng_id": track_id }).to_string();
+            let song_req = HttpRequest::post_json(&cfg.gw_base_url, song_body)
+                .with_header("Cookie", &cookie_header)
+                .with_query("method", "song.getData")
+                .with_query("input", "3")
+                .with_query("api_version", "1.0")
+                .with_query("api_token", api_token);
+
+            if let Ok(song_resp) = self.transport.execute(song_req).await {
+                if song_resp.status == 200 {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<DeezerGwResponse<DeezerSongDataResult>>(
+                            &song_resp.body,
+                        )
+                    {
+                        if let Some(res) = parsed.results {
+                            if let Some(tt) = res.track_token.filter(|s| !s.trim().is_empty()) {
+                                track_token = tt;
+                            }
+                            if let Some(g) = res.gain {
+                                gw_gain_db = match g {
+                                    serde_json::Value::Number(n) => n.as_f64(),
+                                    serde_json::Value::String(s) => s.parse::<f64>().ok(),
+                                    _ => None,
+                                }
+                                .filter(|v| v.is_finite());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let media_payload = serde_json::json!({
+            "license_token": sess.license_token.as_deref().unwrap_or(""),
+            "media": [{
+                "type": "FULL",
+                "formats": preferred_formats,
+            }],
+            "track_tokens": [track_token],
+        })
+        .to_string();
+
+        let media_req = HttpRequest::post_json(&cfg.media_base_url, media_payload)
+            .with_header("Cookie", &cookie_header);
+
+        let resp = self.transport.execute(media_req).await?;
+        if resp.status == 401 {
+            return Err(ProviderError::AuthenticationFailed(
+                "Deezer media endpoint unauthorized (HTTP 401)".to_string(),
+            ));
+        }
+        if resp.status == 403 {
+            return Err(ProviderError::StreamResolutionFailed(format!(
+                "Deezer media endpoint forbidden (HTTP 403): {}",
+                resp.body
+            )));
+        }
+        if resp.status == 429 {
+            return Err(ProviderError::RateLimited(
+                "Deezer media endpoint rate limited (HTTP 429)".to_string(),
+            ));
+        }
+        if resp.status >= 400 {
+            return Err(ProviderError::StreamResolutionFailed(format!(
+                "Deezer media endpoint failed (HTTP {}): {}",
+                resp.status, resp.body
+            )));
+        }
+
+        let parsed: DeezerMediaResponse = serde_json::from_str(&resp.body).map_err(|e| {
+            ProviderError::StreamResolutionFailed(format!(
+                "Failed to parse Deezer media response: {e}"
+            ))
+        })?;
+
+        let mut chosen_format_name: Option<String> = None;
+        let mut media_exp: Option<u64> = None;
+        let mut is_unencrypted = false;
+        let stream_url = if let Some(u) = parsed.url.filter(|s| !s.trim().is_empty()) {
+            u
+        } else if let Some(first) = parsed.data.into_iter().next() {
+            let media_was_empty = first.media.is_empty();
+            let mut found_media: Option<(Option<String>, Option<u64>, bool, String)> = None;
+            for media in first.media {
+                if let Some(src) = media.sources.into_iter().find(|s| !s.url.trim().is_empty()) {
+                    let unenc = is_deezer_cipher_none(media.cipher.as_ref());
+                    found_media = Some((media.format, media.exp, unenc, src.url));
+                    break;
+                }
+            }
+
+            if let Some((fmt_name, exp, unenc, url)) = found_media {
+                chosen_format_name = fmt_name;
+                media_exp = exp;
+                is_unencrypted = unenc;
+                url
+            } else if let Some(err) = first.errors.into_iter().next() {
+                let code = err.code.unwrap_or(0);
+                let msg = err.message.unwrap_or_else(|| "Unavailable".to_string());
+                if code == 2002 || msg.to_ascii_lowercase().contains("license") {
+                    return Err(ProviderError::DrmRestricted(format!(
+                        "Deezer track restricted ({code}): {msg}"
+                    )));
+                }
+                return Err(ProviderError::StreamResolutionFailed(format!(
+                    "Deezer media error ({code}): {msg}"
+                )));
+            } else if media_was_empty {
+                return Err(ProviderError::StreamResolutionFailed(
+                    "Deezer media response contained empty data item".to_string(),
+                ));
+            } else {
+                return Err(ProviderError::StreamResolutionFailed(
+                    "Deezer media item contained no source URLs".to_string(),
+                ));
+            }
+        } else {
+            return Err(ProviderError::StreamResolutionFailed(
+                "Deezer media response missing stream URL".to_string(),
+            ));
+        };
+
+        let upper_fmt = chosen_format_name
+            .as_deref()
+            .map(|f| f.to_ascii_uppercase());
+        let (codec, hint_ext, mime_type, bitrate_bps) = match upper_fmt.as_deref() {
+            Some("MP3_128") => (AudioCodec::Mp3, "mp3", "audio/mpeg", Some(128_000)),
+            Some(f) if f.starts_with("MP3") => (AudioCodec::Mp3, "mp3", "audio/mpeg", Some(320_000)),
+            Some(_) => (AudioCodec::Flac, "flac", "audio/flac", None),
+            None if !sess.user.can_stream_lossless => {
+                (AudioCodec::Mp3, "mp3", "audio/mpeg", Some(320_000))
+            }
+            None => (AudioCodec::Flac, "flac", "audio/flac", None),
+        };
+        let expire_at = media_exp.or_else(|| extract_expire_at_from_url(&stream_url));
+
+        Ok(DeezerMediaResolved {
+            url: stream_url,
+            codec,
+            hint_ext,
+            mime_type: mime_type.to_string(),
+            bitrate_bps,
+            gw_gain_db,
+            expire_at,
+            is_unencrypted,
+        })
+    }
+
+    async fn fetch_preview_info(
+        &self,
+        track_id: &str,
+    ) -> Result<(String, Option<NormalizedLoudness>), ProviderError> {
+        let api_base = self.config.read().await.api_base_url.clone();
+        let url = endpoint_url(&api_base, &format!("track/{track_id}"));
+        let mut req = HttpRequest::get(url);
+        if let Ok(arl) = self.get_valid_arl().await {
+            req = req.with_header("Cookie", format!("arl={arl}"));
+        }
+        let resp = self.transport.execute(req).await?;
+        if resp.status == 404 {
+            return Err(ProviderError::track_not_found("deezer", track_id));
+        }
+        if resp.status >= 400 {
+            return Err(ProviderError::Network(format!(
+                "Deezer track preview fetch failed (HTTP {}): {}",
+                resp.status, resp.body
+            )));
+        }
+        let dto: DeezerTrackDto = serde_json::from_str(&resp.body).map_err(|e| {
+            ProviderError::StreamResolutionFailed(format!(
+                "Failed to parse Deezer track response: {e}"
+            ))
+        })?;
+        let loudness = dto
+            .gain
+            .filter(|g| g.is_finite())
+            .map(|g| NormalizedLoudness::from_deezer_gain(g as f32));
+        let preview_url = dto
+            .preview
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ProviderError::StreamResolutionFailed(format!(
+                    "Deezer track '{track_id}' has no preview stream URL"
+                ))
+            })?;
+        Ok((preview_url, loudness))
+    }
+}
+
+struct DeezerMediaResolved {
+    url: String,
+    codec: AudioCodec,
+    hint_ext: &'static str,
+    mime_type: String,
+    bitrate_bps: Option<u64>,
+    gw_gain_db: Option<f64>,
+    expire_at: Option<u64>,
+    is_unencrypted: bool,
+}
+
+fn is_deezer_cipher_none(cipher: Option<&serde_json::Value>) -> bool {
+    match cipher {
+        Some(serde_json::Value::String(s)) => s.trim().eq_ignore_ascii_case("NONE"),
+        Some(serde_json::Value::Object(map)) => map
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("NONE")),
+        _ => false,
+    }
+}
+
+enum DeezerQualityPlan {
+    Full(Vec<serde_json::Value>),
+    PreviewOnly,
+}
+
+fn deezer_quality_plan(
+    quality_key: &str,
+    can_stream_lossless: bool,
+    can_stream_hq: bool,
+) -> Result<DeezerQualityPlan, ProviderError> {
+    let normalized = quality_key.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "preview" => Ok(DeezerQualityPlan::PreviewOnly),
+        "" | "default" | "auto" | "flac" | "lossless" | "hi_res" | "hires" | "max" | "best" => {
+            if can_stream_lossless {
+                Ok(DeezerQualityPlan::Full(vec![
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "FLAC" }),
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_320" }),
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_128" }),
+                ]))
+            } else if can_stream_hq {
+                Ok(DeezerQualityPlan::Full(vec![
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_320" }),
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_128" }),
+                ]))
+            } else {
+                Ok(DeezerQualityPlan::PreviewOnly)
+            }
+        }
+        "mp3_320" | "mp3" | "high" | "320" => {
+            if can_stream_hq || can_stream_lossless {
+                Ok(DeezerQualityPlan::Full(vec![
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_320" }),
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_128" }),
+                ]))
+            } else {
+                Ok(DeezerQualityPlan::PreviewOnly)
+            }
+        }
+        "mp3_128" | "low" | "128" => {
+            if can_stream_hq || can_stream_lossless {
+                Ok(DeezerQualityPlan::Full(vec![
+                    serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "MP3_128" }),
+                ]))
+            } else {
+                Ok(DeezerQualityPlan::PreviewOnly)
+            }
+        }
+        _ => Err(ProviderError::UnsupportedFormat(format!(
+            "Unsupported Deezer quality key: '{quality_key}'"
+        ))),
+    }
 }
 
 #[async_trait]
@@ -578,47 +872,6 @@ impl MusicProvider for DeezerProvider {
         }
 
         let sess = self.ensure_session().await?;
-        let cookie_header = self.build_cookie_header(&sess);
-        let cfg = self.config.read().await.clone();
-
-        // Optionally query song.getData to obtain TRACK_TOKEN and ReplayGain when api_token is available.
-        let mut track_token = track.external_track_id.clone();
-        let mut gw_gain_db: Option<f64> = None;
-
-        if let Some(ref api_token) = sess.api_token {
-            let song_body = serde_json::json!({ "sng_id": track.external_track_id }).to_string();
-            let song_req = HttpRequest::post_json(&cfg.gw_base_url, song_body)
-                .with_header("Cookie", &cookie_header)
-                .with_query("method", "song.getData")
-                .with_query("input", "3")
-                .with_query("api_version", "1.0")
-                .with_query("api_token", api_token);
-
-            if let Ok(song_resp) = self.transport.execute(song_req).await {
-                if song_resp.status == 200 {
-                    if let Ok(parsed) =
-                        serde_json::from_str::<DeezerGwResponse<DeezerSongDataResult>>(
-                            &song_resp.body,
-                        )
-                    {
-                        if let Some(res) = parsed.results {
-                            if let Some(tt) = res.track_token.filter(|s| !s.trim().is_empty()) {
-                                track_token = tt;
-                            }
-                            if let Some(g) = res.gain {
-                                gw_gain_db = match g {
-                                    serde_json::Value::Number(n) => n.as_f64(),
-                                    serde_json::Value::String(s) => s.parse::<f64>().ok(),
-                                    _ => None,
-                                }
-                                .filter(|v| v.is_finite());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let preferred_formats = if sess.user.can_stream_lossless {
             vec![
                 serde_json::json!({ "cipher": "BF_CBC_STRIPE", "format": "FLAC" }),
@@ -631,109 +884,194 @@ impl MusicProvider for DeezerProvider {
             ]
         };
 
-        let media_payload = serde_json::json!({
-            "license_token": sess.license_token.as_deref().unwrap_or(""),
-            "media": [{
-                "type": "FULL",
-                "formats": preferred_formats,
-            }],
-            "track_tokens": [track_token],
-        })
-        .to_string();
-
-        let media_req = HttpRequest::post_json(&cfg.media_base_url, media_payload)
-            .with_header("Cookie", &cookie_header);
-
-        let resp = self.transport.execute(media_req).await?;
-        if resp.status == 401 || resp.status == 403 {
-            return Err(ProviderError::AuthenticationFailed(format!(
-                "Deezer media endpoint unauthorized (HTTP {})",
-                resp.status
-            )));
-        }
-        if resp.status == 429 {
-            return Err(ProviderError::RateLimited(
-                "Deezer media endpoint rate limited (HTTP 429)".to_string(),
-            ));
-        }
-        if resp.status >= 400 {
-            return Err(ProviderError::StreamResolutionFailed(format!(
-                "Deezer media endpoint failed (HTTP {}): {}",
-                resp.status, resp.body
-            )));
-        }
-
-        let parsed: DeezerMediaResponse = serde_json::from_str(&resp.body).map_err(|e| {
-            ProviderError::StreamResolutionFailed(format!(
-                "Failed to parse Deezer media response: {e}"
-            ))
-        })?;
-
-        let mut chosen_format_name: Option<String> = None;
-        let stream_url = if let Some(u) = parsed.url.filter(|s| !s.trim().is_empty()) {
-            u
-        } else if let Some(first) = parsed.data.into_iter().next() {
-            let media_was_empty = first.media.is_empty();
-            let mut found_media: Option<(Option<String>, String)> = None;
-            for media in first.media {
-                if let Some(src) = media.sources.into_iter().find(|s| !s.url.trim().is_empty()) {
-                    found_media = Some((media.format, src.url));
-                    break;
-                }
-            }
-
-            if let Some((fmt_name, url)) = found_media {
-                chosen_format_name = fmt_name;
-                url
-            } else if let Some(err) = first.errors.into_iter().next() {
-                let code = err.code.unwrap_or(0);
-                let msg = err.message.unwrap_or_else(|| "Unavailable".to_string());
-                if code == 2002 || msg.to_ascii_lowercase().contains("license") {
-                    return Err(ProviderError::DrmRestricted(format!(
-                        "Deezer track restricted ({code}): {msg}"
-                    )));
-                }
-                return Err(ProviderError::StreamResolutionFailed(format!(
-                    "Deezer media error ({code}): {msg}"
-                )));
-            } else if media_was_empty {
-                return Err(ProviderError::StreamResolutionFailed(
-                    "Deezer media response contained empty data item".to_string(),
-                ));
-            } else {
-                return Err(ProviderError::StreamResolutionFailed(
-                    "Deezer media item contained no source URLs".to_string(),
-                ));
-            }
-        } else {
-            return Err(ProviderError::StreamResolutionFailed(
-                "Deezer media response missing stream URL".to_string(),
-            ));
-        };
-
-        let (codec, hint_ext) = match chosen_format_name
-            .as_deref()
-            .map(|f| f.to_ascii_uppercase())
-        {
-            Some(ref f) if f.starts_with("MP3") => (AudioCodec::Mp3, "mp3"),
-            Some(_) => (AudioCodec::Flac, "flac"),
-            None if !sess.user.can_stream_lossless => (AudioCodec::Mp3, "mp3"),
-            None => (AudioCodec::Flac, "flac"),
-        };
-        let format = AudioFormat::pcm(codec, 44100, 16, 2)?;
+        let resolved = self
+            .fetch_encrypted_media(&sess, &track.external_track_id, preferred_formats)
+            .await?;
+        let format = AudioFormat::pcm(resolved.codec, 44100, 16, 2)?;
 
         Ok(ResolvedStream::http_stream(
-            stream_url,
+            resolved.url,
             format,
             vec![("Cookie".to_string(), format!("arl={}", sess.arl))],
-            Some(hint_ext.to_string()),
+            Some(resolved.hint_ext.to_string()),
         )
-        .with_replay_gain(gw_gain_db, None, None, None)
+        .with_replay_gain(resolved.gw_gain_db, None, None, None)
         .with_replay_gain_from_track(track))
     }
 
     async fn sync_library(&self) -> Result<SyncResult, ProviderError> {
         Ok(SyncResult::default())
+    }
+}
+
+#[async_trait]
+impl StreamResolver for DeezerProvider {
+    fn provider_id(&self) -> &'static str {
+        "deezer"
+    }
+
+    fn capabilities(&self) -> StreamProviderCapabilities {
+        StreamProviderCapabilities::deezer()
+    }
+
+    async fn resolve_source(&self, key: &StreamKey) -> Result<StreamSourceSpec, ProviderError> {
+        validate_stream_key("deezer", key)?;
+
+        if key.quality_key.trim().eq_ignore_ascii_case("preview") {
+            let (preview_url, loudness) = self.fetch_preview_info(&key.track_id).await?;
+            let expire_at = extract_expire_at_from_url(&preview_url);
+            return Ok(StreamSourceSpec::DirectRange {
+                key: key.clone(),
+                url: preview_url,
+                headers: BTreeMap::new(),
+                content_length: None,
+                bitrate_bps: Some(128_000),
+                mime_type: Some("audio/mpeg".to_string()),
+                hint_extension: Some("mp3".to_string()),
+                expire_at,
+                init_range_end: None,
+                index_range_start: None,
+                index_range_end: None,
+                loudness,
+                album_loudness: None,
+            });
+        }
+
+        // Validate quality_key syntax up front before any session/network fallback.
+        let _ = deezer_quality_plan(&key.quality_key, true, true)?;
+
+        let sess = match self.ensure_session().await {
+            Ok(s) => s,
+            Err(ProviderError::Unauthenticated(unauth_msg)) => {
+                if let Ok((preview_url, loudness)) = self.fetch_preview_info(&key.track_id).await {
+                    let expire_at = extract_expire_at_from_url(&preview_url);
+                    return Ok(StreamSourceSpec::DirectRange {
+                        key: key.clone(),
+                        url: preview_url,
+                        headers: BTreeMap::new(),
+                        content_length: None,
+                        bitrate_bps: Some(128_000),
+                        mime_type: Some("audio/mpeg".to_string()),
+                        hint_extension: Some("mp3".to_string()),
+                        expire_at,
+                        init_range_end: None,
+                        index_range_start: None,
+                        index_range_end: None,
+                        loudness,
+                        album_loudness: None,
+                    });
+                }
+                return Err(ProviderError::Unauthenticated(unauth_msg));
+            }
+            Err(e) => return Err(e),
+        };
+
+        let plan = deezer_quality_plan(
+            &key.quality_key,
+            sess.user.can_stream_lossless,
+            sess.user.can_stream_hq,
+        )?;
+
+        match plan {
+            DeezerQualityPlan::PreviewOnly => {
+                let (preview_url, loudness) = self.fetch_preview_info(&key.track_id).await?;
+                let expire_at = extract_expire_at_from_url(&preview_url);
+                Ok(StreamSourceSpec::DirectRange {
+                    key: key.clone(),
+                    url: preview_url,
+                    headers: BTreeMap::new(),
+                    content_length: None,
+                    bitrate_bps: Some(128_000),
+                    mime_type: Some("audio/mpeg".to_string()),
+                    hint_extension: Some("mp3".to_string()),
+                    expire_at,
+                    init_range_end: None,
+                    index_range_start: None,
+                    index_range_end: None,
+                    loudness,
+                    album_loudness: None,
+                })
+            }
+            DeezerQualityPlan::Full(preferred_formats) => {
+                match self
+                    .fetch_encrypted_media(&sess, &key.track_id, preferred_formats)
+                    .await
+                {
+                    Ok(media) => {
+                        let headers = BTreeMap::from([(
+                            "Cookie".to_string(),
+                            format!("arl={}", sess.arl),
+                        )]);
+                        let loudness = media
+                            .gw_gain_db
+                            .filter(|g| g.is_finite())
+                            .map(|g| NormalizedLoudness::from_deezer_gain(g as f32));
+                        if media.is_unencrypted {
+                            Ok(StreamSourceSpec::DirectRange {
+                                key: key.clone(),
+                                url: media.url,
+                                headers,
+                                content_length: None,
+                                bitrate_bps: media.bitrate_bps,
+                                mime_type: Some(media.mime_type),
+                                hint_extension: Some(media.hint_ext.to_string()),
+                                expire_at: media.expire_at,
+                                init_range_end: None,
+                                index_range_start: None,
+                                index_range_end: None,
+                                loudness,
+                                album_loudness: None,
+                            })
+                        } else {
+                            Ok(StreamSourceSpec::EncryptedRange {
+                                key: key.clone(),
+                                url: media.url,
+                                headers,
+                                content_length: None,
+                                bitrate_bps: media.bitrate_bps,
+                                mime_type: Some(media.mime_type),
+                                hint_extension: Some(media.hint_ext.to_string()),
+                                cipher: StreamCipher::DeezerBlowfish {
+                                    track_id: key.track_id.clone(),
+                                    block_size: DEFAULT_DEEZER_BLOCK_SIZE,
+                                    stride: DEFAULT_DEEZER_STRIDE,
+                                },
+                                expire_at: media.expire_at,
+                                loudness,
+                                album_loudness: None,
+                            })
+                        }
+                    }
+                    Err(e @ (ProviderError::AuthenticationFailed(_) | ProviderError::RateLimited(_))) => {
+                        Err(e)
+                    }
+                    Err(orig_err) => {
+                        if let Ok((preview_url, loudness)) =
+                            self.fetch_preview_info(&key.track_id).await
+                        {
+                            let expire_at = extract_expire_at_from_url(&preview_url);
+                            Ok(StreamSourceSpec::DirectRange {
+                                key: key.clone(),
+                                url: preview_url,
+                                headers: BTreeMap::new(),
+                                content_length: None,
+                                bitrate_bps: Some(128_000),
+                                mime_type: Some("audio/mpeg".to_string()),
+                                hint_extension: Some("mp3".to_string()),
+                                expire_at,
+                                init_range_end: None,
+                                index_range_start: None,
+                                index_range_end: None,
+                                loudness,
+                                album_loudness: None,
+                            })
+                        } else {
+                            Err(orig_err)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -762,4 +1100,197 @@ fn extract_sid_cookie(headers: &[(String, String)]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{HttpResponse, MockHttpTransport};
+
+    #[tokio::test]
+    async fn test_deezer_stream_resolver_bf_cbc_stripe_encrypted_range() {
+        let valid_arl = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_fn("gw-light.php", |req| {
+                let is_song = req
+                    .query_params
+                    .iter()
+                    .any(|(k, v)| k == "method" && v == "song.getData");
+                if is_song {
+                    return Ok(HttpResponse::ok_json(
+                        r#"{"error":[],"results":{"TRACK_TOKEN":"trk_tok_554433","GAIN":-4.2}}"#,
+                    ));
+                }
+                Ok(HttpResponse::ok_json(
+                    r#"{
+                        "error": [],
+                        "results": {
+                            "checkForm": "dz_csrf_1",
+                            "OFFER_NAME": "Deezer HiFi",
+                            "USER": {
+                                "USER_ID": 482910,
+                                "BLOG_NAME": "HiFi Subscriber",
+                                "OPTIONS": {
+                                    "web_hq": true,
+                                    "web_lossless": true,
+                                    "license_token": "lic_tok_1"
+                                }
+                            }
+                        }
+                    }"#,
+                ))
+            })
+            .await;
+        transport
+            .register_fn("get_url", |req| {
+                let body = String::from_utf8_lossy(req.body.as_deref().unwrap_or(&[]));
+                if body.contains(r#""format":"FLAC""#) {
+                    Ok(HttpResponse::ok_json(
+                        r#"{
+                            "data": [{
+                                "media": [{
+                                    "format": "FLAC",
+                                    "exp": 1766000000,
+                                    "sources": [{ "url": "https://e-cdns-proxy.dzcdn.net/stream/554433.flac" }]
+                                }]
+                            }]
+                        }"#,
+                    ))
+                } else {
+                    Ok(HttpResponse::ok_json(
+                        r#"{
+                            "data": [{
+                                "media": [{
+                                    "format": "MP3_320",
+                                    "sources": [{ "url": "https://e-cdns-proxy.dzcdn.net/stream/554433.mp3" }]
+                                }]
+                            }]
+                        }"#,
+                    ))
+                }
+            })
+            .await;
+
+        let provider = DeezerProvider::with_transport(DeezerConfig::default(), transport, None);
+        provider.login_with_arl(valid_arl).await.unwrap();
+
+        assert_eq!(StreamResolver::provider_id(&provider), "deezer");
+        assert_eq!(
+            StreamResolver::capabilities(&provider),
+            StreamProviderCapabilities::deezer()
+        );
+
+        let flac_key = StreamKey::new("deezer", "554433", "FLAC");
+        let flac_spec = provider.resolve_source(&flac_key).await.unwrap();
+        match flac_spec {
+            StreamSourceSpec::EncryptedRange {
+                key,
+                url,
+                headers,
+                mime_type,
+                hint_extension,
+                cipher,
+                expire_at,
+                loudness,
+                ..
+            } => {
+                assert_eq!(key, flac_key);
+                assert_eq!(url, "https://e-cdns-proxy.dzcdn.net/stream/554433.flac");
+                assert_eq!(
+                    headers.get("Cookie").map(String::as_str),
+                    Some(format!("arl={valid_arl}").as_str())
+                );
+                assert_eq!(mime_type.as_deref(), Some("audio/flac"));
+                assert_eq!(hint_extension.as_deref(), Some("flac"));
+                assert_eq!(expire_at, Some(1_766_000_000));
+                let l = loudness.expect("Deezer GAIN should map to NormalizedLoudness");
+                assert!((l.gain_db - (-3.2)).abs() < 1e-4);
+                assert!((l.peak - 1.0).abs() < 1e-4);
+                assert_eq!(
+                    cipher,
+                    StreamCipher::DeezerBlowfish {
+                        track_id: "554433".to_string(),
+                        block_size: 2048,
+                        stride: 3,
+                    }
+                );
+            }
+            other => panic!("expected EncryptedRange, got {other:?}"),
+        }
+
+        let mp3_key = StreamKey::new("deezer", "554433", "MP3_320");
+        let mp3_spec = provider.resolve_source(&mp3_key).await.unwrap();
+        match mp3_spec {
+            StreamSourceSpec::EncryptedRange {
+                url,
+                bitrate_bps,
+                mime_type,
+                hint_extension,
+                cipher,
+                ..
+            } => {
+                assert_eq!(url, "https://e-cdns-proxy.dzcdn.net/stream/554433.mp3");
+                assert_eq!(bitrate_bps, Some(320_000));
+                assert_eq!(mime_type.as_deref(), Some("audio/mpeg"));
+                assert_eq!(hint_extension.as_deref(), Some("mp3"));
+                assert_eq!(
+                    cipher,
+                    StreamCipher::DeezerBlowfish {
+                        track_id: "554433".to_string(),
+                        block_size: 2048,
+                        stride: 3,
+                    }
+                );
+            }
+            other => panic!("expected EncryptedRange, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deezer_stream_resolver_preview_mp3_returns_direct_range() {
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_exact(
+                "track/554433",
+                HttpResponse::ok_json(
+                    r#"{
+                        "id": 554433,
+                        "title": "Preview Track",
+                        "preview": "https://cdns-preview-5.dzcdn.net/stream/c-554433.mp3"
+                    }"#,
+                ),
+            )
+            .await;
+
+        let provider = DeezerProvider::with_transport(DeezerConfig::default(), transport, None);
+        let spec = provider
+            .resolve_source(&StreamKey::new("deezer", "554433", "preview"))
+            .await
+            .unwrap();
+        match spec {
+            StreamSourceSpec::DirectRange {
+                url,
+                headers,
+                bitrate_bps,
+                mime_type,
+                hint_extension,
+                ..
+            } => {
+                assert_eq!(url, "https://cdns-preview-5.dzcdn.net/stream/c-554433.mp3");
+                assert!(headers.is_empty());
+                assert_eq!(bitrate_bps, Some(128_000));
+                assert_eq!(mime_type.as_deref(), Some("audio/mpeg"));
+                assert_eq!(hint_extension.as_deref(), Some("mp3"));
+            }
+            other => panic!("expected DirectRange, got {other:?}"),
+        }
+
+        // Unauthenticated quality fallback also resolves official 30s preview DirectRange
+        let fallback_spec = provider
+            .resolve_source(&StreamKey::new("deezer", "554433", "FLAC"))
+            .await
+            .unwrap();
+        assert!(matches!(fallback_spec, StreamSourceSpec::DirectRange { .. }));
+    }
 }

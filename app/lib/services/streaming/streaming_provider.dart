@@ -16,6 +16,7 @@ abstract class StreamingProvider {
   StreamingAccountInfo? get accountInfo;
   String? get lastError;
   StreamingCatalog get catalog;
+  bool get supportsGuestMode => false;
 
   Future<void> restoreFromStorage();
   Future<void> authenticate(
@@ -28,17 +29,22 @@ abstract class StreamingProvider {
   Future<StreamingCatalog> syncLibrary({CancellationToken? cancel});
   Future<StreamingRecommendations> fetchRecommendations({
     CancellationToken? cancel,
+    bool forceRefresh = false,
+    int batchIndex = 0,
+    Set<String> excludeAlbumIds = const <String>{},
+    Set<String> excludeTrackIds = const <String>{},
   });
   Future<CanonicalAlbumDetail?> fetchAlbumDetail(
     String albumId, {
     CancellationToken? cancel,
   });
   Future<List<TrackInfo>> fetchPlaylistTracks(String playlistId);
-  Future<StreamingCatalog> search(String query);
+  Future<StreamingCatalog> search(String query, {CancellationToken? cancel});
   Future<ResolvedStreamResult> resolveStream(
     TrackInfo track, {
     CancellationToken? cancel,
     Duration? timeout,
+    int? playRequestId,
   });
 }
 
@@ -57,6 +63,108 @@ class StreamingHttpResponse {
   bool get isSuccess => statusCode >= 200 && statusCode < 300;
 }
 
+/// Resolves [host] to an IPv4 [InternetAddress] when available so Dart HTTP
+/// resolvers and Rust streaming downloaders share the same egress IP family
+/// (preventing YouTube CDN IP-bound HTTP 403s on dual-stack networks).
+///
+/// If [host] is already an IP literal, returns the parsed address directly.
+/// Returns `null` if IPv4 DNS lookup yields no record (allowing fallback to
+/// default OS resolution).
+Future<InternetAddress?> resolvePreferredIpv4Address(
+  String host, {
+  Future<List<InternetAddress>> Function(String host)? ipv4Lookup,
+}) async {
+  final parsed = InternetAddress.tryParse(host);
+  if (parsed != null) {
+    return parsed;
+  }
+  final lookup =
+      ipv4Lookup ??
+      ((String h) => InternetAddress.lookup(h, type: InternetAddressType.IPv4));
+  try {
+    final addrs = await lookup(host);
+    for (final addr in addrs) {
+      if (addr.type == InternetAddressType.IPv4) {
+        return addr;
+      }
+    }
+  } catch (_) {
+    // Fall back to default OS resolution on IPv6-only hosts or test fixtures.
+  }
+  return null;
+}
+
+/// Creates a `dart:io` [HttpClient] that prefers IPv4 connections via
+/// [HttpClient.connectionFactory] while preserving full TLS SNI and
+/// certificate verification for HTTPS hosts.
+HttpClient createIpv4HttpClient({
+  Duration? idleTimeout,
+  int? maxConnectionsPerHost,
+  Duration? connectionTimeout,
+  Future<List<InternetAddress>> Function(String host)? ipv4Lookup,
+}) {
+  final client = HttpClient();
+  if (idleTimeout != null) client.idleTimeout = idleTimeout;
+  if (maxConnectionsPerHost != null) {
+    client.maxConnectionsPerHost = maxConnectionsPerHost;
+  }
+  if (connectionTimeout != null) client.connectionTimeout = connectionTimeout;
+
+  try {
+    client.connectionFactory =
+        (Uri uri, String? proxyHost, int? proxyPort) async {
+          final targetHost = proxyHost ?? uri.host;
+          final targetPort =
+              proxyPort ??
+              (uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80));
+          final ipv4Addr = await resolvePreferredIpv4Address(
+            targetHost,
+            ipv4Lookup: ipv4Lookup,
+          );
+          final Object connectTarget = ipv4Addr ?? targetHost;
+          final rawTask = await Socket.startConnect(connectTarget, targetPort);
+
+          if (proxyHost == null && uri.scheme == 'https') {
+            var cancelled = false;
+            Socket? connectedRaw;
+            final tlsFuture = rawTask.socket.then<Socket>((
+              Socket rawSocket,
+            ) async {
+              connectedRaw = rawSocket;
+              if (cancelled) {
+                rawSocket.destroy();
+                throw const SocketException('Connection cancelled');
+              }
+              try {
+                final secure = await SecureSocket.secure(
+                  rawSocket,
+                  host: uri.host,
+                );
+                if (cancelled) {
+                  secure.destroy();
+                  throw const SocketException('Connection cancelled');
+                }
+                return secure;
+              } catch (_) {
+                rawSocket.destroy();
+                rethrow;
+              }
+            });
+            return ConnectionTask.fromSocket<Socket>(tlsFuture, () {
+              cancelled = true;
+              rawTask.cancel();
+              connectedRaw?.destroy();
+            });
+          }
+          return rawTask;
+        };
+  } catch (_) {
+    // Flutter test harnesses may inject a mock HttpClient whose
+    // connectionFactory setter is unimplemented.
+  }
+  return client;
+}
+
 /// Shared `dart:io` HTTP client wrapper with timeouts, cancellation, and strict
 /// JSON / HTTP status validation across all streaming providers.
 class StreamingHttpClient {
@@ -66,7 +174,7 @@ class StreamingHttpClient {
   StreamingHttpClient({
     HttpClient Function()? clientFactory,
     this.timeout = const Duration(seconds: 15),
-  }) : _clientFactory = clientFactory ?? HttpClient.new;
+  }) : _clientFactory = clientFactory ?? (() => createIpv4HttpClient());
 
   static Future<T> _withRootTimeout<T>(
     Future<T> future,
@@ -300,8 +408,30 @@ class StreamingHttpClient {
   }
 }
 
+/// Optional authentication-lifecycle capability implemented by providers that
+/// support silent token/session refresh and circuit-breaker `authRequired` state.
+abstract interface class AuthAwareStreamingProvider
+    implements StreamingProvider {
+  bool get supportsSilentRefresh;
+  Future<void> forceRefreshSession();
+  void markAuthRequired(String reason);
+  void clearAuthRequired();
+}
+
 /// Shared stateful scaffolding for [StreamingProvider] implementations.
-abstract class BaseStreamingProvider implements StreamingProvider {
+abstract class BaseStreamingProvider
+    implements StreamingProvider, AuthAwareStreamingProvider {
+  static const Map<String, String> defaultImageHttpHeaders = <String, String>{
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  };
+
+  static String? normalizeCoverUrl(String? raw) =>
+      normalizeStreamingCoverUrl(raw);
+
+  static String? upgradeCoverUrl(String? raw, {int targetSize = 1200}) =>
+      upgradeStreamingCoverUrl(raw, targetSize: targetSize);
+
   final SecureCredentialStore credentialStore;
   final StreamingHttpClient http;
   final DateTime Function() clock;
@@ -338,6 +468,33 @@ abstract class BaseStreamingProvider implements StreamingProvider {
 
   @override
   StreamingCatalog get catalog => _catalog;
+
+  @override
+  bool get supportsGuestMode => false;
+
+  @override
+  bool get supportsSilentRefresh => false;
+
+  @override
+  Future<void> forceRefreshSession() => refreshSessionIfNeeded();
+
+  @override
+  void markAuthRequired(String reason) {
+    _authState = StreamingAuthState.authRequired;
+    _lastError = reason.trim().isNotEmpty
+        ? reason.trim()
+        : '${meta.name} 授權已失效，請重新登入';
+  }
+
+  @override
+  void clearAuthRequired() {
+    if (_authState == StreamingAuthState.authRequired) {
+      _lastError = null;
+      _authState = _accountInfo != null
+          ? StreamingAuthState.connected
+          : StreamingAuthState.disconnected;
+    }
+  }
 
   void setAuthenticating() {
     _authState = StreamingAuthState.authenticating;
@@ -410,6 +567,13 @@ abstract class BaseStreamingProvider implements StreamingProvider {
   }
 
   void ensureAuthenticated() {
+    if (_authState == StreamingAuthState.authRequired) {
+      throw StreamingException(
+        _lastError ?? '${meta.name} 授權已失效，請重新登入',
+        statusCode: 401,
+        isTokenExpired: true,
+      );
+    }
     if (_authState != StreamingAuthState.connected) {
       throw StreamingException('${meta.name} 尚未登入或授權已失效');
     }
@@ -418,14 +582,88 @@ abstract class BaseStreamingProvider implements StreamingProvider {
   @override
   Future<StreamingRecommendations> fetchRecommendations({
     CancellationToken? cancel,
+    bool forceRefresh = false,
+    int batchIndex = 0,
+    Set<String> excludeAlbumIds = const <String>{},
+    Set<String> excludeTrackIds = const <String>{},
   }) async {
     ensureAuthenticated();
     return StreamingRecommendations(
       providerKind: kind,
-      albums: _catalog.albums,
-      tracks: _catalog.tracks,
+      albums: selectFreshBatch<StreamingAlbum>(
+        _catalog.albums,
+        idOf: (a) => a.id,
+        excludeIds: excludeAlbumIds,
+        batchIndex: batchIndex,
+      ),
+      tracks: selectFreshBatch<TrackInfo>(
+        _catalog.tracks,
+        idOf: (t) => t.id,
+        excludeIds: excludeTrackIds,
+        batchIndex: batchIndex,
+      ),
       fetchedAt: clock(),
     );
+  }
+
+  /// Adds HTTP cache-busting headers when [forceRefresh] is true.
+  static Map<String, String> withNoCacheHeaders(
+    Map<String, String> headers, {
+    required bool forceRefresh,
+  }) {
+    if (!forceRefresh) return headers;
+    return <String, String>{
+      ...headers,
+      'Cache-Control': 'no-cache, no-store, max-age=0',
+      'Pragma': 'no-cache',
+    };
+  }
+
+  /// Deduplicates [candidates], prioritizes items not in [excludeIds], and
+  /// applies a deterministic circular shift by [batchIndex] so consecutive
+  /// refreshes visibly rotate items even if an endpoint pool repeats.
+  static List<T> selectFreshBatch<T>(
+    List<T> candidates, {
+    required String Function(T item) idOf,
+    Set<String> excludeIds = const <String>{},
+    int batchIndex = 0,
+    int? maxCount,
+  }) {
+    final deduped = <T>[];
+    final seen = <String>{};
+    for (final item in candidates) {
+      final id = idOf(item);
+      if (seen.add(id)) {
+        deduped.add(item);
+      }
+    }
+    if (deduped.isEmpty) return const [];
+
+    final fresh = <T>[];
+    final repeated = <T>[];
+    for (final item in deduped) {
+      if (excludeIds.contains(idOf(item))) {
+        repeated.add(item);
+      } else {
+        fresh.add(item);
+      }
+    }
+
+    List<T> rotate(List<T> list, int offset) {
+      if (list.length <= 1 || offset <= 0) return list;
+      final shift = offset % list.length;
+      if (shift == 0) return list;
+      return <T>[...list.sublist(shift), ...list.sublist(0, shift)];
+    }
+
+    final ordered = fresh.isNotEmpty
+        ? <T>[...rotate(fresh, batchIndex), ...rotate(repeated, batchIndex)]
+        : rotate(repeated, batchIndex);
+
+    if (maxCount != null && ordered.length > maxCount) {
+      return List<T>.unmodifiable(ordered.take(maxCount));
+    }
+    return List<T>.unmodifiable(ordered);
   }
 
   @override

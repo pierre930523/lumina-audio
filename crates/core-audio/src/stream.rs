@@ -1,14 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
-use reqwest::{Client, Response, StatusCode};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_RANGES, CONNECTION, CONTENT_LENGTH, CONTENT_RANGE,
+    CONTENT_TYPE, HOST, LOCATION, RANGE, USER_AGENT,
+};
+use reqwest::redirect::Policy;
+use reqwest::{Client, Method, Response, StatusCode};
 use symphonia::core::io::MediaSource;
 
 const CHUNK_SIZE: usize = 128 * 1024;
@@ -16,9 +22,33 @@ const MAX_CACHED_CHUNKS: usize = 24;
 const NON_RANGE_HISTORY_LIMIT: usize = 256 * 1024;
 const MAX_PLAYLIST_DEPTH: usize = 4;
 const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
+const MAX_HTTP_REDIRECTS: usize = 10;
 
 static HTTP_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+static HTTP_CLIENT: RwLock<Option<Client>> = RwLock::new(None);
+
+/// Forces DNS lookups to IPv4 addresses only so outbound stream sockets match
+/// `yt-dlp --force-ipv4` (`ip=` lock on `googlevideo.com` URLs).
+struct Ipv4OnlyDnsResolver;
+
+impl Resolve for Ipv4OnlyDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(SocketAddr::is_ipv4)
+                .collect();
+            if addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    format!("No IPv4 address resolved for '{host}'"),
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
 
 fn http_runtime() -> std::io::Result<&'static tokio::runtime::Runtime> {
     let res = HTTP_RUNTIME.get_or_init(|| {
@@ -33,16 +63,127 @@ fn http_runtime() -> std::io::Result<&'static tokio::runtime::Runtime> {
         .map_err(|e| std::io::Error::other(format!("HTTP runtime init failed: {e}")))
 }
 
-fn http_client() -> std::io::Result<&'static Client> {
-    let res = HTTP_CLIENT.get_or_init(|| {
-        Client::builder()
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(|e| e.to_string())
-    });
-    res.as_ref()
+fn build_http_client() -> std::io::Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        .dns_resolver(Arc::new(Ipv4OnlyDnsResolver))
+        // Handle redirects manually so caller headers (Referer, Cookie, User-Agent,
+        // Accept, Accept-Language, Range) are never stripped or overwritten on hops.
+        .referer(false)
+        .redirect(Policy::none())
+        .build()
         .map_err(|e| std::io::Error::other(format!("HTTP client init failed: {e}")))
+}
+
+fn http_client() -> std::io::Result<Client> {
+    if let Ok(guard) = HTTP_CLIENT.read()
+        && let Some(ref client) = *guard
+    {
+        return Ok(client.clone());
+    }
+    let mut guard = HTTP_CLIENT
+        .write()
+        .map_err(|_| std::io::Error::other("HTTP client lock poisoned"))?;
+    if let Some(ref client) = *guard {
+        return Ok(client.clone());
+    }
+    let client = build_http_client()?;
+    *guard = Some(client.clone());
+    Ok(client)
+}
+
+/// Drops the legacy HTTP keep-alive connection pool so subsequent requests open fresh sockets.
+pub fn reset_http_client() {
+    let old = HTTP_CLIENT.write().ok().and_then(|mut guard| guard.take());
+    drop(old);
+}
+
+fn is_stale_pooled_send_error(err: &reqwest::Error) -> bool {
+    err.is_request() && !err.is_connect() && !err.is_timeout()
+}
+
+async fn send_following_redirects(
+    client: &Client,
+    method: Method,
+    url: &str,
+    headers: &HeaderMap,
+    timeout: Option<Duration>,
+) -> std::io::Result<Response> {
+    let mut current_url = reqwest::Url::parse(url).map_err(|e| {
+        std::io::Error::new(ErrorKind::InvalidInput, format!("Invalid HTTP URL '{url}': {e}"))
+    })?;
+    let mut active_headers = headers.clone();
+    if !active_headers.contains_key(USER_AGENT) {
+        active_headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(crate::streaming::DEFAULT_STREAM_USER_AGENT),
+        );
+    }
+
+    for _hop in 0..=MAX_HTTP_REDIRECTS {
+        let mut retried_stale = false;
+        let resp = loop {
+            let req = client
+                .request(method.clone(), current_url.clone())
+                .headers(active_headers.clone());
+            // Bound only connection + response headers so reqwest does not abort long-lived
+            // sequential audio response bodies once streaming starts.
+            let send_res = if let Some(t) = timeout {
+                tokio::time::timeout(t, req.send())
+                    .await
+                    .map_err(|_| timeout_io_error(t))?
+            } else {
+                req.send().await
+            };
+            match send_res {
+                Ok(r) => break r,
+                Err(e) if !retried_stale && is_stale_pooled_send_error(&e) => {
+                    retried_stale = true;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(std::io::Error::other(format!("HTTP {method} failed: {e:?}")));
+                }
+            }
+        };
+
+        let status = resp.status();
+        if status.is_redirection()
+            && let Some(loc_val) = resp.headers().get(LOCATION)
+        {
+            let loc_str = loc_val.to_str().map_err(|e| {
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid redirect Location header from {current_url}: {e}"),
+                )
+            })?;
+            let next_url = current_url.join(loc_str).map_err(|e| {
+                std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid redirect Location '{loc_str}' from {current_url}: {e}"),
+                )
+            })?;
+            if next_url.scheme() != "http" && next_url.scheme() != "https" {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("Unsupported redirect URL scheme: {next_url}"),
+                ));
+            }
+            if !crate::streaming::same_trusted_redirect_scope(&current_url, &next_url) {
+                crate::streaming::strip_sensitive_cross_origin_headers(&mut active_headers);
+            }
+            current_url = next_url;
+            continue;
+        }
+
+        return Ok(resp);
+    }
+
+    Err(std::io::Error::other(format!(
+        "Too many HTTP redirects (>{MAX_HTTP_REDIRECTS}) fetching {url}"
+    )))
 }
 
 fn is_cancelled(cancel: &Option<Arc<AtomicBool>>) -> bool {
@@ -349,16 +490,18 @@ impl HttpRangeMediaSource {
             )?;
         }
 
-        let (seekable, total_len, content_type, mode) = match probe {
+        let (seekable, total_len, content_type, final_url, mode) = match probe {
             ProbeResult::Range {
                 total_len,
                 content_type,
+                resolved_url,
             } => (
                 true,
                 Some(total_len),
                 content_type,
+                resolved_url.clone(),
                 HttpSourceMode::Range(RangeCacheState {
-                    url: active_url.clone(),
+                    url: resolved_url,
                     headers: header_map,
                     total_len,
                     pos: 0,
@@ -369,13 +512,15 @@ impl HttpRangeMediaSource {
             ProbeResult::Sequential {
                 total_len,
                 content_type,
+                resolved_url,
                 response,
             } => (
                 false,
                 total_len,
                 content_type,
+                resolved_url.clone(),
                 HttpSourceMode::Sequential(SequentialState {
-                    url: active_url.clone(),
+                    url: resolved_url,
                     headers: header_map,
                     total_len,
                     pos: 0,
@@ -393,7 +538,7 @@ impl HttpRangeMediaSource {
             seekable,
             total_len,
             content_type,
-            resolved_url: active_url,
+            resolved_url: final_url,
             inner: Mutex::new(mode),
         })
     }
@@ -515,17 +660,18 @@ pub fn resolve_playlist_url_with_cancel(
                     ));
                 }
 
-                let resp = client
-                    .get(&current)
-                    .headers(header_map.clone())
-                    .timeout(timeout)
-                    .send()
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("HTTP playlist GET failed: {e}")))?;
+                let resp = send_following_redirects(
+                    &client,
+                    Method::GET,
+                    &current,
+                    &header_map,
+                    Some(timeout),
+                )
+                .await?;
 
             let status = resp.status();
             if !status.is_success() {
-                return Err(map_http_status_err(status, &current));
+                return Err(map_http_status_err(status, resp.url().as_str()));
             }
 
             let final_url = resp.url().clone();
@@ -642,10 +788,12 @@ enum ProbeResult {
     Range {
         total_len: u64,
         content_type: Option<String>,
+        resolved_url: String,
     },
     Sequential {
         total_len: Option<u64>,
         content_type: Option<String>,
+        resolved_url: String,
         response: Option<Response>,
     },
 }
@@ -653,19 +801,36 @@ enum ProbeResult {
 fn build_header_map(headers: &HashMap<String, String>) -> std::io::Result<HeaderMap> {
     let mut map = HeaderMap::new();
     for (k, v) in headers {
-        let name = HeaderName::from_str(k.trim()).map_err(|e| {
+        let trimmed_k = k.trim();
+        if trimmed_k.is_empty() {
+            continue;
+        }
+        let name = HeaderName::from_str(trimmed_k).map_err(|e| {
             std::io::Error::new(
                 ErrorKind::InvalidInput,
                 format!("Invalid HTTP header name '{k}': {e}"),
             )
         })?;
-        let val = HeaderValue::from_str(v).map_err(|e| {
+        if name == HOST || name == CONTENT_LENGTH {
+            continue;
+        }
+        let trimmed_v = v.trim();
+        if name == USER_AGENT && trimmed_v.is_empty() {
+            continue;
+        }
+        let val = HeaderValue::from_str(trimmed_v).map_err(|e| {
             std::io::Error::new(
                 ErrorKind::InvalidInput,
                 format!("Invalid HTTP header value for '{k}': {e}"),
             )
         })?;
         map.insert(name, val);
+    }
+    if !map.contains_key(USER_AGENT) {
+        map.insert(
+            USER_AGENT,
+            HeaderValue::from_static(crate::streaming::DEFAULT_STREAM_USER_AGENT),
+        );
     }
     Ok(map)
 }
@@ -709,16 +874,26 @@ async fn probe_http_stream(
 
     let mut head_content_type = None;
     let mut head_content_length = None;
+    let mut probe_url = url.to_string();
+    let mut head_forbidden_err: Option<std::io::Error> = None;
 
-    if let Ok(head_resp) = client
-        .head(url)
-        .headers(headers.clone())
-        .timeout(timeout.min(Duration::from_secs(4)))
-        .send()
-        .await
+    let mut head_headers = headers.clone();
+    // Prevent servers like googlevideo.com that drop sockets after HEAD from
+    // poisoning reqwest's idle connection pool for the subsequent Range GET.
+    head_headers.insert(CONNECTION, HeaderValue::from_static("close"));
+
+    if let Ok(head_resp) = send_following_redirects(
+        &client,
+        Method::HEAD,
+        url,
+        &head_headers,
+        Some(timeout.min(Duration::from_secs(4))),
+    )
+    .await
     {
         let status = head_resp.status();
         if status.is_success() {
+            probe_url = head_resp.url().to_string();
             let resp_headers = head_resp.headers();
             head_content_type = header_str(resp_headers, &CONTENT_TYPE);
             head_content_length = parse_content_length(resp_headers);
@@ -730,13 +905,15 @@ async fn probe_http_stream(
                 return Ok(ProbeResult::Range {
                     total_len: len,
                     content_type: head_content_type,
+                    resolved_url: probe_url,
                 });
             }
-        } else if status == StatusCode::UNAUTHORIZED
-            || status == StatusCode::FORBIDDEN
-            || status == StatusCode::NOT_FOUND
-        {
-            return Err(map_http_status_err(status, url));
+        } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND {
+            return Err(map_http_status_err(status, head_resp.url().as_str()));
+        } else if status == StatusCode::FORBIDDEN {
+            // Some signed GET-only CDNs reject HEAD with 403 while permitting GET;
+            // still preserve the 403 error if the subsequent GET fails to connect.
+            head_forbidden_err = Some(map_http_status_err(status, head_resp.url().as_str()));
         }
     }
 
@@ -744,17 +921,25 @@ async fn probe_http_stream(
     let mut probe_headers = headers.clone();
     probe_headers.insert(RANGE, HeaderValue::from_static("bytes=0-0"));
 
-    let resp = client
-        .get(url)
-        .headers(probe_headers)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| std::io::Error::other(format!("HTTP probe GET failed: {e:?}")))?;
+    let resp = match send_following_redirects(
+        &client,
+        Method::GET,
+        &probe_url,
+        &probe_headers,
+        Some(timeout),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(head_forbidden_err.unwrap_or(e));
+        }
+    };
 
+    let final_url = resp.url().to_string();
     let status = resp.status();
     if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
-        return Err(map_http_status_err(status, url));
+        return Err(map_http_status_err(status, &final_url));
     }
 
     let resp_headers = resp.headers();
@@ -765,12 +950,14 @@ async fn probe_http_stream(
             return Ok(ProbeResult::Range {
                 total_len,
                 content_type,
+                resolved_url: final_url,
             });
         }
         // Server sent 206 with unknown total ('/*'): fall back to sequential GET without range.
         return Ok(ProbeResult::Sequential {
             total_len: None,
             content_type,
+            resolved_url: final_url,
             response: None,
         });
     }
@@ -780,6 +967,7 @@ async fn probe_http_stream(
     Ok(ProbeResult::Sequential {
         total_len,
         content_type,
+        resolved_url: final_url,
         response: Some(resp),
     })
 }
@@ -833,7 +1021,7 @@ impl RangeCacheState {
         let url = self.url.clone();
         let headers = self.headers.clone();
 
-        let bytes = run_http_future(async move {
+        let (final_url, bytes) = run_http_future(async move {
             let client = http_client()?;
             let mut req_headers = headers;
             let range_val = format!("bytes={start}-{end}");
@@ -843,24 +1031,31 @@ impl RangeCacheState {
                     .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?,
             );
 
-            let resp = client
-                .get(&url)
-                .headers(req_headers)
-                .send()
-                .await
-                .map_err(|e| std::io::Error::other(format!("HTTP range GET failed: {e:?}")))?;
+            let resp = send_following_redirects(
+                &client,
+                Method::GET,
+                &url,
+                &req_headers,
+                Some(Duration::from_secs(20)),
+            )
+            .await?;
 
+            let resp_url = resp.url().to_string();
             let status = resp.status();
             if status != StatusCode::PARTIAL_CONTENT && !status.is_success() {
-                return Err(map_http_status_err(status, &url));
+                return Err(map_http_status_err(status, &resp_url));
             }
 
-            let data = resp
-                .bytes()
+            let body_timeout = Duration::from_secs(30);
+            let data = tokio::time::timeout(body_timeout, resp.bytes())
                 .await
+                .map_err(|_| timeout_io_error(body_timeout))?
                 .map_err(|e| std::io::Error::other(format!("HTTP body read failed: {e:?}")))?;
-            Ok(data.to_vec())
+            Ok((resp_url, data.to_vec()))
         })?;
+        if final_url != self.url {
+            self.url = final_url;
+        }
 
         let arc: Arc<[u8]> = Arc::from(bytes);
         if self.chunks.len() >= MAX_CACHED_CHUNKS
@@ -890,18 +1085,15 @@ impl SequentialState {
         let headers = self.headers.clone();
         let resp = run_http_future(async move {
             let client = http_client()?;
-            let resp = client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await
-                .map_err(|e| std::io::Error::other(format!("HTTP GET failed: {e}")))?;
+            let resp =
+                send_following_redirects(&client, Method::GET, &url, &headers, None).await?;
             let status = resp.status();
             if !status.is_success() {
-                return Err(map_http_status_err(status, &url));
+                return Err(map_http_status_err(status, resp.url().as_str()));
             }
             Ok(resp)
         })?;
+        self.url = resp.url().to_string();
         self.response = Some(resp);
         Ok(())
     }
@@ -920,9 +1112,10 @@ impl SequentialState {
         };
 
         let (resp_back, maybe_chunk) = run_http_future(async move {
-            let chunk = resp
-                .chunk()
+            let chunk_timeout = Duration::from_secs(30);
+            let chunk = tokio::time::timeout(chunk_timeout, resp.chunk())
                 .await
+                .map_err(|_| timeout_io_error(chunk_timeout))?
                 .map_err(|e| std::io::Error::other(format!("HTTP chunk read failed: {e}")))?;
             Ok((resp, chunk))
         })?;

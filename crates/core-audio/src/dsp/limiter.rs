@@ -63,15 +63,18 @@ impl LookaheadLimiter {
         self.lookahead_frames
     }
 
-    /// Soft clipper transfer function with C^1 continuity and hard ceiling at +/-1.0.
+    /// Soft clipper transfer function with C^1 continuity, NaN sanitization, and hard ceiling at +/-1.0.
     #[inline(always)]
     pub fn soft_clip(x: f64, threshold: f64) -> f64 {
+        if !x.is_finite() {
+            return 0.0;
+        }
         let abs_x = x.abs();
         if abs_x <= threshold {
             x
         } else {
-            let margin = 1.0 - threshold;
-            let compressed = threshold + margin * ((abs_x - threshold) / margin).tanh();
+            let margin = (1.0 - threshold).max(1e-6);
+            let compressed = (threshold + margin * ((abs_x - threshold) / margin).tanh()).min(1.0);
             if x.is_sign_negative() {
                 -compressed
             } else {
@@ -87,9 +90,12 @@ impl LookaheadLimiter {
             return;
         }
 
-        // 1. Calculate current frame peak
+        // 1. Calculate current frame peak (sanitizing non-finite inputs to 0.0)
         let mut frame_peak = 0.0f64;
-        for &s in frame.iter() {
+        for s in frame.iter_mut() {
+            if !s.is_finite() {
+                *s = 0.0;
+            }
             let abs_s = s.abs();
             if abs_s > frame_peak {
                 frame_peak = abs_s;

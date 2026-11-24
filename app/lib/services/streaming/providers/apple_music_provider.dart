@@ -1,12 +1,15 @@
 import '../../../models/audio_format.dart';
 import '../../../models/playback_state.dart';
+import '../../../models/stream_source_spec.dart';
 import '../../../models/streaming_models.dart';
 import '../../../models/studio_models.dart';
 import '../oauth_helper.dart';
+import '../stream_resolver.dart';
 import '../streaming_provider.dart';
 
 /// Real Apple Music API + MusicKit JS v3 provider with honest Windows FairPlay DRM handling.
-class AppleMusicProvider extends BaseStreamingProvider {
+class AppleMusicProvider extends BaseStreamingProvider
+    implements StreamResolver {
   static const String windowsFairPlayDrmNotice =
       'Windows 平台受 Apple FairPlay DRM 保護，無法直接將完整無損 ALAC PCM 串流送入原生 WASAPI/ASIO 管線。'
       'Lumina Audio 支援真實同步個人曲庫、歌單、高解析封面與搜尋，播放時將提供官方 AAC 試聽片段或開啟網頁播放器。';
@@ -18,6 +21,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
   String? _developerToken;
   String? _musicUserToken;
   String _storefront = 'us';
+  String? _nextRecommendationsPath;
 
   final Map<String, String> _catalogIdByTrackId = <String, String>{};
   final Map<String, String> _previewUrlByTrackId = <String, String>{};
@@ -35,6 +39,16 @@ class AppleMusicProvider extends BaseStreamingProvider {
 
   @override
   String get kind => 'apple_music';
+
+  @override
+  String get providerId => kind;
+
+  @override
+  ProviderCapabilities get capabilities => ProviderCapabilities.appleMusic;
+
+  String? get developerToken => _developerToken;
+  String? get musicUserToken => _musicUserToken;
+  String get storefront => _storefront;
 
   Map<String, String> get _authHeaders => <String, String>{
     'Authorization': 'Bearer ${_developerToken ?? ''}',
@@ -204,7 +218,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
   }
 
   @override
-  Future<void> refreshSessionIfNeeded() async {
+  Future<void> refreshSessionIfNeeded({bool force = false}) async {
     // MusicKit Developer / User tokens are validated live on restore and requests.
   }
 
@@ -213,6 +227,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
     _developerToken = null;
     _musicUserToken = null;
     _storefront = 'us';
+    _nextRecommendationsPath = null;
     _catalogIdByTrackId.clear();
     _previewUrlByTrackId.clear();
     _externalWebUrlByTrackId.clear();
@@ -270,6 +285,10 @@ class AppleMusicProvider extends BaseStreamingProvider {
   @override
   Future<StreamingRecommendations> fetchRecommendations({
     CancellationToken? cancel,
+    bool forceRefresh = false,
+    int batchIndex = 0,
+    Set<String> excludeAlbumIds = const <String>{},
+    Set<String> excludeTrackIds = const <String>{},
   }) async {
     ensureAuthenticated();
 
@@ -277,10 +296,28 @@ class AppleMusicProvider extends BaseStreamingProvider {
     final songMaps = <Map<String, dynamic>>[];
     final seenAlbumIds = <String>{};
     final seenSongIds = <String>{};
+    final headers = BaseStreamingProvider.withNoCacheHeaders(
+      _authHeaders,
+      forceRefresh: forceRefresh,
+    );
 
-    void collectAppleResource(Map<String, dynamic> item) {
+    void collectAppleResource(
+      Map<String, dynamic> item, {
+      dynamic fallbackArtwork,
+      String? fallbackAlbumName,
+    }) {
       final type = item['type']?.toString() ?? '';
       final id = item['id']?.toString() ?? '';
+      final attrs = item['attributes'] is Map
+          ? Map<String, dynamic>.from(item['attributes'] as Map)
+          : null;
+      final itemArtwork = attrs?['artwork'];
+      final hasOwnArtwork = _expandArtworkUrl(itemArtwork) != null;
+      final effectiveArtwork = hasOwnArtwork ? itemArtwork : fallbackArtwork;
+      final itemAlbumName = (type == 'albums' || type == 'library-albums')
+          ? (attrs?['name']?.toString() ?? fallbackAlbumName)
+          : fallbackAlbumName;
+
       if (id.isNotEmpty &&
           (type == 'albums' || type == 'library-albums')) {
         if (seenAlbumIds.add(id)) {
@@ -289,7 +326,25 @@ class AppleMusicProvider extends BaseStreamingProvider {
       } else if (id.isNotEmpty &&
           (type == 'songs' || type == 'library-songs' || type == 'tracks')) {
         if (seenSongIds.add(id)) {
-          songMaps.add(item);
+          var effectiveItem = item;
+          if (!hasOwnArtwork &&
+              fallbackArtwork != null &&
+              _expandArtworkUrl(fallbackArtwork) != null) {
+            final nextAttrs = Map<String, dynamic>.from(
+              attrs ?? const <String, dynamic>{},
+            );
+            nextAttrs['artwork'] = fallbackArtwork;
+            if ((nextAttrs['albumName']?.toString().trim() ?? '').isEmpty &&
+                fallbackAlbumName != null &&
+                fallbackAlbumName.isNotEmpty) {
+              nextAttrs['albumName'] = fallbackAlbumName;
+            }
+            effectiveItem = <String, dynamic>{
+              ...item,
+              'attributes': nextAttrs,
+            };
+          }
+          songMaps.add(effectiveItem);
         }
       }
       final rel = item['relationships'];
@@ -298,7 +353,11 @@ class AppleMusicProvider extends BaseStreamingProvider {
         if (contents is Map && contents['data'] is List) {
           for (final child in contents['data'] as List) {
             if (child is Map) {
-              collectAppleResource(Map<String, dynamic>.from(child));
+              collectAppleResource(
+                Map<String, dynamic>.from(child),
+                fallbackArtwork: effectiveArtwork,
+                fallbackAlbumName: itemAlbumName,
+              );
             }
           }
         }
@@ -306,32 +365,58 @@ class AppleMusicProvider extends BaseStreamingProvider {
         if (tracksRel is Map && tracksRel['data'] is List) {
           for (final child in tracksRel['data'] as List) {
             if (child is Map) {
-              collectAppleResource(Map<String, dynamic>.from(child));
+              collectAppleResource(
+                Map<String, dynamic>.from(child),
+                fallbackArtwork: effectiveArtwork,
+                fallbackAlbumName: itemAlbumName,
+              );
             }
           }
         }
       }
     }
 
-    try {
-      final recJson = await http.requestJson(
-        method: 'GET',
-        uri: BaseStreamingProvider.buildUri(
-          apiBaseUrl,
-          '/v1/me/recommendations',
-          const <String, String>{'limit': '10'},
-        ),
-        headers: _authHeaders,
-        cancel: cancel,
-      );
-      final data = recJson['data'];
-      if (data is List) {
-        for (final entry in data) {
-          if (entry is Map) {
-            collectAppleResource(Map<String, dynamic>.from(entry));
-          }
+    void collectDataArray(dynamic data) {
+      if (data is! List) return;
+      for (final entry in data) {
+        if (entry is Map) {
+          collectAppleResource(Map<String, dynamic>.from(entry));
         }
       }
+    }
+
+    final recOffset = batchIndex * 10;
+    try {
+      final Uri recUri;
+      final nextPath = (forceRefresh || batchIndex > 0)
+          ? _nextRecommendationsPath
+          : null;
+      if (nextPath != null && nextPath.isNotEmpty) {
+        final parsedNext = Uri.tryParse(nextPath);
+        recUri = (parsedNext != null && parsedNext.hasScheme)
+            ? parsedNext
+            : BaseStreamingProvider.buildUri(
+                apiBaseUrl,
+                nextPath,
+              );
+      } else {
+        recUri = BaseStreamingProvider.buildUri(
+          apiBaseUrl,
+          '/v1/me/recommendations',
+          <String, String>{
+            'limit': '10',
+            if (recOffset > 0) 'offset': '$recOffset',
+          },
+        );
+      }
+      final recJson = await http.requestJson(
+        method: 'GET',
+        uri: recUri,
+        headers: headers,
+        cancel: cancel,
+      );
+      _nextRecommendationsPath = recJson['next']?.toString().trim();
+      collectDataArray(recJson['data']);
     } on StreamingException catch (e) {
       if (e.isTokenExpired ||
           e.isCancelled ||
@@ -340,17 +425,22 @@ class AppleMusicProvider extends BaseStreamingProvider {
           e.statusCode == null) {
         rethrow;
       }
+      _nextRecommendationsPath = null;
     }
 
+    final recentOffset = (batchIndex * 10) % 40;
     try {
       final recentJson = await http.requestJson(
         method: 'GET',
         uri: BaseStreamingProvider.buildUri(
           apiBaseUrl,
           '/v1/me/recent/played/tracks',
-          const <String, String>{'limit': '15'},
+          <String, String>{
+            'limit': '15',
+            if (recentOffset > 0) 'offset': '$recentOffset',
+          },
         ),
-        headers: _authHeaders,
+        headers: headers,
         cancel: cancel,
       );
       final data = recentJson['data'];
@@ -375,6 +465,71 @@ class AppleMusicProvider extends BaseStreamingProvider {
       }
     }
 
+    if (forceRefresh || batchIndex > 0) {
+      try {
+        final addedJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            apiBaseUrl,
+            '/v1/me/library/recently-added',
+            <String, String>{
+              'limit': '15',
+              if (recOffset > 0) 'offset': '$recOffset',
+            },
+          ),
+          headers: headers,
+          cancel: cancel,
+        );
+        collectDataArray(addedJson['data']);
+      } on StreamingException catch (e) {
+        if (e.isTokenExpired ||
+            e.isCancelled ||
+            e.statusCode == 401 ||
+            e.statusCode == 403 ||
+            e.statusCode == null) {
+          rethrow;
+        }
+      }
+
+      try {
+        final chartsJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            apiBaseUrl,
+            '/v1/catalog/$_storefront/charts',
+            <String, String>{
+              'types': 'songs,albums',
+              'limit': '15',
+              if (recOffset > 0) 'offset': '$recOffset',
+            },
+          ),
+          headers: headers,
+          cancel: cancel,
+        );
+        final results = chartsJson['results'];
+        if (results is Map) {
+          for (final bucket in const ['albums', 'songs']) {
+            final groups = results[bucket];
+            if (groups is List) {
+              for (final group in groups) {
+                if (group is Map) {
+                  collectDataArray(group['data']);
+                }
+              }
+            }
+          }
+        }
+      } on StreamingException catch (e) {
+        if (e.isTokenExpired ||
+            e.isCancelled ||
+            e.statusCode == 401 ||
+            e.statusCode == 403 ||
+            e.statusCode == null) {
+          rethrow;
+        }
+      }
+    }
+
     if (albumMaps.isEmpty) {
       try {
         final libAlbumsJson = await http.requestJson(
@@ -384,7 +539,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
             '/v1/me/library/albums',
             const <String, String>{'limit': '15'},
           ),
-          headers: _authHeaders,
+          headers: headers,
           cancel: cancel,
         );
         final data = libAlbumsJson['data'];
@@ -419,7 +574,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
             '/v1/me/library/songs',
             const <String, String>{'limit': '15'},
           ),
-          headers: _authHeaders,
+          headers: headers,
           cancel: cancel,
         );
         final data = libSongsJson['data'];
@@ -447,8 +602,20 @@ class AppleMusicProvider extends BaseStreamingProvider {
 
     return StreamingRecommendations(
       providerKind: kind,
-      albums: _parseAlbums(albumMaps),
-      tracks: _parseSongs(songMaps),
+      albums: BaseStreamingProvider.selectFreshBatch<StreamingAlbum>(
+        _parseAlbums(albumMaps),
+        idOf: (a) => a.id,
+        excludeIds: excludeAlbumIds,
+        batchIndex: batchIndex,
+        maxCount: 16,
+      ),
+      tracks: BaseStreamingProvider.selectFreshBatch<TrackInfo>(
+        _parseSongs(songMaps),
+        idOf: (t) => t.id,
+        excludeIds: excludeTrackIds,
+        batchIndex: batchIndex,
+        maxCount: 16,
+      ),
       fetchedAt: clock(),
     );
   }
@@ -535,7 +702,11 @@ class AppleMusicProvider extends BaseStreamingProvider {
             ? (albumObj['tracks'] as Map)['data']
             : albumObj['tracks']);
 
-    final parsedTracks = _parseSongs(rawTracks);
+    final parsedTracks = _parseSongs(
+      rawTracks,
+      fallbackCoverUrl: coverUrl,
+      fallbackAlbumTitle: title,
+    );
     final versionTracks = <AlbumVersionTrackInfo>[];
     for (var i = 0; i < parsedTracks.length; i++) {
       final t = parsedTracks[i];
@@ -593,7 +764,11 @@ class AppleMusicProvider extends BaseStreamingProvider {
   }
 
   @override
-  Future<StreamingCatalog> search(String query) async {
+  Future<StreamingCatalog> search(
+    String query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
     ensureAuthenticated();
     final trimmed = query.trim();
     if (trimmed.isEmpty) return StreamingCatalog(syncedAt: clock());
@@ -610,7 +785,9 @@ class AppleMusicProvider extends BaseStreamingProvider {
         },
       ),
       headers: _authHeaders,
+      cancel: cancel,
     );
+    cancel?.throwIfCancelled();
 
     final results = json['results'] as Map?;
     final songsObj = results?['songs'] as Map?;
@@ -623,16 +800,16 @@ class AppleMusicProvider extends BaseStreamingProvider {
     );
   }
 
-  @override
-  Future<ResolvedStreamResult> resolveStream(
-    TrackInfo track, {
+  Future<({String rawId, String? catalogId, String previewUrl, String webUrl})>
+  _lookupTrackPlaybackInfo({
+    required String rawTrackId,
     CancellationToken? cancel,
     Duration? timeout,
   }) async {
     cancel?.throwIfCancelled();
     ensureAuthenticated();
 
-    final rawId = BaseStreamingProvider.stripTrackPrefix(track.id, 'apple');
+    final rawId = BaseStreamingProvider.stripTrackPrefix(rawTrackId, 'apple');
     if (rawId.isEmpty) {
       throw const StreamingException('曲目缺少有效的 Apple Music ID');
     }
@@ -714,20 +891,80 @@ class AppleMusicProvider extends BaseStreamingProvider {
       }
     }
 
-    if (previewUrl.isEmpty) {
+    if (previewUrl.isNotEmpty) {
+      _previewUrlByTrackId[rawId] = previewUrl;
+    }
+    if (catalogId != null && catalogId.isNotEmpty) {
+      _catalogIdByTrackId[rawId] = catalogId;
+    }
+    final resolvedWebUrl = webUrl ??
+        (catalogId != null && catalogId.isNotEmpty
+            ? 'https://music.apple.com/$_storefront/song/$catalogId'
+            : 'https://music.apple.com/$_storefront');
+    if (webUrl != null) {
+      _externalWebUrlByTrackId[rawId] = webUrl;
+    }
+
+    return (
+      rawId: rawId,
+      catalogId: catalogId,
+      previewUrl: previewUrl,
+      webUrl: resolvedWebUrl,
+    );
+  }
+
+  @override
+  Future<StreamSourceSpec> resolve(
+    StreamKey key, {
+    CancellationToken? cancelToken,
+  }) async {
+    final info = await _lookupTrackPlaybackInfo(
+      rawTrackId: key.trackId,
+      cancel: cancelToken,
+    );
+    final effectiveSongId =
+        (info.catalogId != null && info.catalogId!.isNotEmpty)
+            ? info.catalogId!
+            : info.rawId;
+
+    return ExternalBackendSpec(
+      key: key,
+      providerId: providerId,
+      trackUri: 'apple:$effectiveSongId',
+      externalWebUrl: info.webUrl,
+      previewUrl: info.previewUrl.isNotEmpty ? info.previewUrl : null,
+      notice: windowsFairPlayDrmNotice,
+      audioFormat: const AudioFormat(
+        codec: AudioCodec.aac,
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        channels: 2,
+      ),
+    );
+  }
+
+  @override
+  Future<ResolvedStreamResult> resolveStream(
+    TrackInfo track, {
+    CancellationToken? cancel,
+    Duration? timeout,
+    int? playRequestId,
+  }) async {
+    final info = await _lookupTrackPlaybackInfo(
+      rawTrackId: track.id,
+      cancel: cancel,
+      timeout: timeout,
+    );
+
+    if (info.previewUrl.isEmpty) {
       throw const StreamingException(
         '此 Apple Music 曲目無官方試聽片段，且 Windows 受 Apple FairPlay DRM 保護無法直接擷取完整無損 ALAC 串流，請改用 Apple Music 網頁播放器開啟。',
         isDrmRestricted: true,
       );
     }
 
-    _previewUrlByTrackId[rawId] = previewUrl;
-    if (webUrl != null) {
-      _externalWebUrlByTrackId[rawId] = webUrl;
-    }
-
     return ResolvedStreamResult(
-      url: previewUrl,
+      url: info.previewUrl,
       hintExtension: 'm4a',
       format: const AudioFormat(
         codec: AudioCodec.aac,
@@ -737,15 +974,17 @@ class AppleMusicProvider extends BaseStreamingProvider {
       ),
       isPreviewOnly: true,
       drmNotice: windowsFairPlayDrmNotice,
-      externalWebUrl: webUrl ??
-          (catalogId != null && catalogId.isNotEmpty
-              ? 'https://music.apple.com/$_storefront/song/$catalogId'
-              : 'https://music.apple.com/$_storefront'),
+      externalWebUrl: info.webUrl,
     );
   }
 
-  List<TrackInfo> _parseSongs(dynamic rawData) {
+  List<TrackInfo> _parseSongs(
+    dynamic rawData, {
+    String? fallbackCoverUrl,
+    String? fallbackAlbumTitle,
+  }) {
     if (rawData is! List) return const [];
+    final normalizedFallbackCover = _expandArtworkUrl(fallbackCoverUrl);
     final list = <TrackInfo>[];
     for (final entry in rawData) {
       if (entry is! Map) continue;
@@ -773,7 +1012,15 @@ class AppleMusicProvider extends BaseStreamingProvider {
         _externalWebUrlByTrackId[rawId] = extracted.webUrl!;
       }
 
-      final coverUrl = _expandArtworkUrl(attrs['artwork']);
+      final coverUrl =
+          _expandArtworkUrl(attrs['artwork']) ?? normalizedFallbackCover;
+      final rawAlbTitle = attrs['albumName']?.toString().trim();
+      final fbAlbTitle = fallbackAlbumTitle?.trim();
+      final albumTitle = (rawAlbTitle != null && rawAlbTitle.isNotEmpty)
+          ? rawAlbTitle
+          : ((fbAlbTitle != null && fbAlbTitle.isNotEmpty)
+                ? fbAlbTitle
+                : 'Apple Music');
       final durationMs = (attrs['durationInMillis'] as num?)?.toInt() ?? 0;
 
       list.add(
@@ -781,7 +1028,7 @@ class AppleMusicProvider extends BaseStreamingProvider {
           id: 'apple:$rawId',
           title: attrs['name']?.toString() ?? '未命名曲目',
           artist: attrs['artistName']?.toString() ?? '未知藝術家',
-          album: attrs['albumName']?.toString() ?? 'Apple Music',
+          album: albumTitle,
           duration: Duration(milliseconds: durationMs),
           albumArtUrl: coverUrl,
           coverUrl: coverUrl,
@@ -876,12 +1123,19 @@ class AppleMusicProvider extends BaseStreamingProvider {
   }
 
   static String? _expandArtworkUrl(dynamic artwork) {
-    if (artwork is! Map) return null;
-    final raw = artwork['url']?.toString().trim();
+    final String? raw;
+    if (artwork is String) {
+      raw = artwork.trim();
+    } else if (artwork is Map) {
+      raw = artwork['url']?.toString().trim();
+    } else {
+      return null;
+    }
     if (raw == null || raw.isEmpty) return null;
-    return raw
+    final expanded = raw
         .replaceAll('{w}', '600')
         .replaceAll('{h}', '600')
         .replaceAll('{f}', 'jpg');
+    return BaseStreamingProvider.normalizeCoverUrl(expanded);
   }
 }

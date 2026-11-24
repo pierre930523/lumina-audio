@@ -20,7 +20,8 @@ pub use credential::KeyringStore;
 pub use error::{DbError, ProfileError, Result};
 pub use repository::{
     deterministic_artist_id, normalize_match_key, AlbumCredit, Artist, ArtworkCacheEntry,
-    ArtworkOverride, ImmediateTx, LibraryRepository, PairedClient, PlayHistoryEntry,
+    ArtworkOverride, ImmediateTx, L1StreamCacheRepository, L1StreamUrlRecord, L2AccessUpdate,
+    L2HeadCacheRepository, L2HeadChunkRecord, LibraryRepository, PairedClient, PlayHistoryEntry,
     ProfileFavorite, ProfileRepository, PruneLocalTracksReport, TrackFileCacheInfo,
 };
 pub use search::{

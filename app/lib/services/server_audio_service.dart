@@ -8,6 +8,7 @@ import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
+import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'per_device_playback_tracker.dart';
@@ -253,8 +254,10 @@ class ServerAudioService implements AudioService {
   );
   List<TrackInfo> _queue = [];
   StreamingTrackHandler? _streamingTrackHandler;
+  void Function()? _playbackInterruptHandler;
   String? _lastError;
   bool _needsLoadOnResume = false;
+  int _activeEpoch = 0;
 
   ServerAudioService({
     String baseUrl = 'http://127.0.0.1:9888',
@@ -611,6 +614,11 @@ class ServerAudioService implements AudioService {
   }
 
   @override
+  void setPlaybackInterruptHandler(void Function()? handler) {
+    _playbackInterruptHandler = handler;
+  }
+
+  @override
   void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {
     if (queue != null && queue.isNotEmpty) {
       _queue = List<TrackInfo>.from(queue);
@@ -644,7 +652,10 @@ class ServerAudioService implements AudioService {
   }
 
   @override
-  Future<void> cancelPendingPlayback() async {
+  Future<void> cancelPendingPlayback({int epoch = 0}) async {
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+    }
     if (_state.status == PlaybackStatus.loading) {
       _state = _state.copyWith(
         status: PlaybackStatus.stopped,
@@ -653,6 +664,10 @@ class ServerAudioService implements AudioService {
       if (!_stateController.isClosed) _stateController.add(_state);
     }
   }
+
+  @override
+  Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
+      cancelPendingPlayback(epoch: epoch);
 
   @override
   Future<void> play({TrackInfo? track}) async {
@@ -679,6 +694,9 @@ class ServerAudioService implements AudioService {
     _currentLyrics = const [];
     final body = <String, dynamic>{};
     if (track != null) {
+      if (!AudioService.isStreamingTrackId(track.id)) {
+        _playbackInterruptHandler?.call();
+      }
       body['track_id'] = track.id;
       if (track.filePath != null) body['file_path'] = track.filePath;
       _needsLoadOnResume = false;
@@ -724,12 +742,69 @@ class ServerAudioService implements AudioService {
     Map<String, String> headers = const {},
     String? hintExtension,
     required int requestId,
-  }) => playStreamUrl(
-    track: track,
-    streamUrl: streamUrl,
-    headers: headers,
-    hintExtension: hintExtension,
-  );
+  }) {
+    _activeEpoch = requestId;
+    return playStreamUrl(
+      track: track,
+      streamUrl: streamUrl,
+      headers: headers,
+      hintExtension: hintExtension,
+    );
+  }
+
+  @override
+  Future<void> playStreamSpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+  }) async {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter ServerAudioService',
+      );
+    }
+    if (epoch < _activeEpoch) return;
+    _activeEpoch = epoch;
+    _currentLyrics = const [];
+
+    final body = <String, dynamic>{
+      'track_id': track.id,
+      'epoch': epoch,
+      'source_spec': spec.toJson(),
+      'source': track.providerName,
+    };
+    switch (spec) {
+      case DirectRangeSpec():
+        body['stream_url'] = spec.url;
+        if (spec.headers.isNotEmpty) body['headers'] = spec.headers;
+        if (spec.hintExtension != null && spec.hintExtension!.isNotEmpty) {
+          body['hint_extension'] = spec.hintExtension;
+        }
+      case EncryptedRangeSpec():
+        body['stream_url'] = spec.url;
+        if (spec.headers.isNotEmpty) body['headers'] = spec.headers;
+        if (spec.hintExtension != null && spec.hintExtension!.isNotEmpty) {
+          body['hint_extension'] = spec.hintExtension;
+        }
+      case SegmentedManifestSpec():
+        if (spec.headers.isNotEmpty) body['headers'] = spec.headers;
+      case LocalFileSpec():
+        body['file_path'] = spec.path;
+      case ExternalBackendSpec():
+        throw StateError(
+          'ExternalBackendSpec (${spec.providerId}) cannot enter ServerAudioService',
+        );
+    }
+
+    _needsLoadOnResume = false;
+    _state = _state.copyWith(track: track, clearLastError: true);
+    unawaited(_fetchLyrics(track.id, path: track.filePath));
+    await _requestJson('POST', '/api/v1/playback/play', body: body);
+    if (epoch != _activeEpoch) return;
+    _lastError = null;
+    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
+    if (!_stateController.isClosed) _stateController.add(_state);
+  }
 
   @override
   Future<void> restorePlaybackSession({
@@ -773,6 +848,7 @@ class ServerAudioService implements AudioService {
 
   @override
   Future<void> pause() async {
+    _playbackInterruptHandler?.call();
     await _requestJson('POST', '/api/v1/playback/pause');
     _state = _state.copyWith(status: PlaybackStatus.paused);
     if (!_stateController.isClosed) _stateController.add(_state);
@@ -915,6 +991,8 @@ class ServerAudioService implements AudioService {
 
   @override
   Future<void> stop() async {
+    _playbackInterruptHandler?.call();
+    _activeEpoch = 0;
     await _requestJson('POST', '/api/v1/playback/stop');
     _state = _state.copyWith(
       status: PlaybackStatus.stopped,

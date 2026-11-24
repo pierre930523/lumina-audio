@@ -10,8 +10,10 @@ import '../../models/signal_path.dart';
 import '../../models/streaming_provider_meta.dart';
 import '../../services/artwork_palette_service.dart';
 import '../../services/audio_service.dart';
+import '../../services/desktop_window_controller.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/now_playing_view_controller.dart';
+import '../../services/podcast_store.dart';
 import '../../shaders/mesh_fluid_painter.dart';
 import '../artwork/album_artwork_view.dart';
 import '../common/desktop_window_caption.dart';
@@ -27,6 +29,7 @@ class NowPlayingOverlay extends StatefulWidget {
   final VoidCallback onCollapse;
   final LibraryIndexCache? libraryCache;
   final NowPlayingViewController? controller;
+  final DesktopWindowController? windowController;
   final ArtworkPaletteService? paletteService;
   final ui.FragmentProgram? meshFluidProgram;
   final bool isVisible;
@@ -40,6 +43,7 @@ class NowPlayingOverlay extends StatefulWidget {
     required this.onCollapse,
     this.libraryCache,
     this.controller,
+    this.windowController,
     this.paletteService,
     this.meshFluidProgram,
     this.isVisible = true,
@@ -482,7 +486,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
                       type: MaterialType.transparency,
                       child: Column(
                         children: [
-                          _buildTopBar(mode),
+                          _buildTopBar(mode, track),
                           Expanded(
                             child: LayoutBuilder(
                               builder: (context, constraints) {
@@ -535,8 +539,10 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
     );
   }
 
-  Widget _buildTopBar(NowPlayingViewMode mode) {
+  Widget _buildTopBar(NowPlayingViewMode mode, TrackInfo? track) {
+    final isPodcast = PodcastPlaybackTracker.isPodcastTrack(track);
     return WindowDragBar(
+      controller: widget.windowController,
       height: 48.0,
       padding: const EdgeInsets.symmetric(horizontal: LuminaTokens.spaceMd),
       child: Row(
@@ -571,6 +577,61 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
               ),
             ),
           ),
+          if (isPodcast) ...[
+            const SizedBox(width: LuminaTokens.spaceSm),
+            Container(
+              height: 40,
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.36),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.16),
+                  width: 1.2,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    key: const Key('btn_now_playing_skip_back_15s'),
+                    tooltip: '倒退 15 秒 (-15s)',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 38,
+                      minHeight: 38,
+                    ),
+                    icon: const Icon(
+                      Icons.replay_10_rounded,
+                      size: 20,
+                      color: Colors.white,
+                    ),
+                    onPressed: () => PodcastPlaybackTracker.seekRelative(
+                      widget.audioService,
+                      PodcastPlaybackTracker.skipBackwardDelta,
+                    ),
+                  ),
+                  IconButton(
+                    key: const Key('btn_now_playing_skip_forward_30s'),
+                    tooltip: '快轉 30 秒 (+30s)',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 38,
+                      minHeight: 38,
+                    ),
+                    icon: const Icon(
+                      Icons.forward_30_rounded,
+                      size: 20,
+                      color: Colors.white,
+                    ),
+                    onPressed: () => PodcastPlaybackTracker.seekRelative(
+                      widget.audioService,
+                      PodcastPlaybackTracker.skipForwardDelta,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const Spacer(),
           _ModeIconButton(
             key: const Key('btn_now_playing_mode_split'),
@@ -603,6 +664,7 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
           ),
           const SizedBox(width: LuminaTokens.spaceSm),
           DesktopWindowCaptionButtons(
+            controller: widget.windowController,
             color: Colors.white70,
             height: 48.0,
             audioService: widget.audioService,
@@ -1100,6 +1162,8 @@ class NowPlayingOverlayState extends State<NowPlayingOverlay>
         child: AlbumArtworkView(
           track: track,
           size: maxSide,
+          fullResolution: !compact,
+          coverTargetSize: compact ? 300 : 1200,
           audioService: widget.audioService,
           libraryCache: widget.libraryCache,
           onArtworkResolved: (cachePath, coverUrl) =>

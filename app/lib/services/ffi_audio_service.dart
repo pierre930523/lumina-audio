@@ -10,12 +10,17 @@ import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
+import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'mock_audio_service.dart';
 import 'per_device_playback_tracker.dart';
 import 'playback_persistence_service.dart';
 import 'server_audio_service.dart';
+import 'streaming/auth_manager.dart';
+import 'streaming/playback_backend.dart';
+import 'streaming/single_flight_resolver.dart';
+import 'streaming/streaming_manager.dart';
 import 'visualizer_lifecycle_coordinator.dart';
 
 typedef LuminaVisualizerSetEnabledNative = ffi.Int32 Function(ffi.Int32);
@@ -142,7 +147,53 @@ typedef _LuminaLibraryRescanTagsDart = ffi.Pointer<ffi.Uint8> Function(
   int,
 );
 
-class FfiAudioService implements AudioService {
+// Phase 3 Streaming Refresh & Network Epoch C-ABI callback typedefs
+typedef _LuminaStreamRefreshCbNative = ffi.Void Function(
+  ffi.Uint64,
+  ffi.Pointer<ffi.Uint8>,
+);
+typedef _LuminaStreamSetRefreshCbNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaStreamRefreshCbNative>>,
+);
+typedef _LuminaStreamSetRefreshCbDart = int Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaStreamRefreshCbNative>>,
+);
+
+typedef _LuminaStreamCompleteRefreshNative = ffi.Int32 Function(
+  ffi.Uint64,
+  ffi.Pointer<ffi.Uint8>,
+);
+typedef _LuminaStreamCompleteRefreshDart = int Function(
+  int,
+  ffi.Pointer<ffi.Uint8>,
+);
+
+typedef _LuminaNetworkEpochCbNative = ffi.Void Function(ffi.Uint64);
+typedef _LuminaNetworkSetEpochCbNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaNetworkEpochCbNative>>,
+);
+typedef _LuminaNetworkSetEpochCbDart = int Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaNetworkEpochCbNative>>,
+);
+
+// Phase 4 L2 Cache C-ABI typedefs
+typedef _LuminaL2CacheInitNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Uint64,
+  ffi.Uint64,
+);
+typedef _LuminaL2CacheInitDart = int Function(
+  ffi.Pointer<ffi.Uint8>,
+  int,
+  int,
+);
+
+typedef _LuminaL2TotalBytesNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Uint64>,
+);
+typedef _LuminaL2TotalBytesDart = int Function(ffi.Pointer<ffi.Uint64>);
+
+class FfiAudioService implements AudioService, DualDeckAudioService {
   final MockAudioService _delegate;
   final PerDevicePlaybackTracker _tracker = PerDevicePlaybackTracker();
   final StreamController<PlaybackState> _stateController =
@@ -153,6 +204,7 @@ class FfiAudioService implements AudioService {
       StreamController<Duration>.broadcast();
 
   ffi.DynamicLibrary? _dylib;
+  final Completer<void> _dbReadyCompleter = Completer<void>();
   _LuminaVoidIntDart? _initFn;
   _LuminaVoidIntDart? _initHeadlessFn;
   _LuminaVoidIntDart? _shutdownFn;
@@ -228,6 +280,370 @@ class FfiAudioService implements AudioService {
   LuminaVisualizerIsEnabledDart? _visualizerIsEnabledFn;
   LuminaVisualizerGetBandsDart? _visualizerGetBandsFn;
 
+  // Phase 2 Streaming Warmup FFI function pointer
+  _LuminaVoidIntDart? _streamingWarmupH2Fn;
+
+  // Phase 3 Streaming Refresh, Network Epoch & Auth Cancellation FFI pointers
+  _LuminaStreamSetRefreshCbDart? _streamSetRefreshCbFn;
+  _LuminaStreamCompleteRefreshDart? _streamCompleteRefreshFn;
+  _LuminaVoidU64Dart? _networkGetEpochFn;
+  _LuminaNetworkSetEpochCbDart? _networkSetEpochCbFn;
+  _LuminaStrIntDart? _streamingCancelProviderFn;
+  _LuminaStrIntDart? _l1CacheClearProviderFn;
+
+  // Phase 4 Dual-Deck & L2 Cache FFI pointers (optional / null-safe lookup)
+  _LuminaPlayAsyncDart? _playbackPrepareStandbyAsyncFn;
+  _LuminaVoidIntDart? _playbackSkipToStandbyFn;
+  _LuminaL2CacheInitDart? _l2CacheInitFn;
+  _LuminaL2TotalBytesDart? _l2CacheTotalBytesFn;
+  _LuminaVoidIntDart? _l2CacheEvictNowFn;
+  _LuminaVoidIntDart? _l2CacheFlushAccessFn;
+  _LuminaVoidIntDart? _l2CacheRunOrphanSweepFn;
+
+  StreamingManager? _attachedStreamingManager;
+  ProviderAuthRequiredCallback? _authRequiredListener;
+  ffi.NativeCallable<_LuminaStreamRefreshCbNative>? _streamRefreshCallable;
+  ffi.NativeCallable<_LuminaNetworkEpochCbNative>? _networkEpochCallable;
+  String? _lastDispatchedAuthErrorKey;
+  DualDeckStatus? _lastDualDeckSnapshot;
+  TrackInfo? _pendingStandbyTrack;
+
+  /// Latest Dual-Deck status snapshot parsed from `lumina_playback_get_state_json`.
+  DualDeckStatus? get lastDualDeckSnapshot => _lastDualDeckSnapshot;
+
+  @override
+  bool get isStandbyDeckReady {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.isStandbyDeckReady;
+    }
+    if (!isNativeBound) {
+      return _lastDualDeckSnapshot?.isStandbyReady ??
+          _delegate.isStandbyDeckReady;
+    }
+    return _lastDualDeckSnapshot?.isStandbyReady ?? false;
+  }
+
+  /// Loaded native `core_ffi` library handle, or `null` when running in
+  /// fallback/test mode without the native shared library.
+  ffi.DynamicLibrary? get nativeLibrary => _dylib;
+
+  /// Resolves once `lumina_library_init` has completed (or immediately when the
+  /// native library is unavailable).
+  Future<void> get dbReady => _dbReadyCompleter.future;
+
+  /// Current native network epoch reported by Rust `NetworkMonitor` (`>= 1`).
+  int get nativeNetworkEpoch =>
+      isNativeBound ? (_networkGetEpochFn?.call() ?? 1) : 1;
+
+  /// Attaches [StreamingManager] to Rust's Phase 3 FFI streaming bridge:
+  /// - registers `NativeCallable.listener` for HTTP 403/410 URL refreshes
+  /// - registers `NativeCallable.listener` for `NetworkMonitor` epoch updates
+  /// - subscribes to `AuthRequired` events to cancel Rust playback/downloads &
+  ///   clear persisted SQLite L1 cache rows for that provider.
+  void attachStreamingManager(StreamingManager manager) {
+    if (_disposed) return;
+    if (identical(_attachedStreamingManager, manager)) return;
+    detachStreamingManager();
+
+    _attachedStreamingManager = manager;
+    _authRequiredListener = (String providerId, String reason) {
+      cancelStreamingProvider(providerId);
+    };
+    manager.addAuthRequiredListener(_authRequiredListener!);
+
+    if (!isNativeBound) return;
+
+    final epochFn = _networkGetEpochFn;
+    if (epochFn != null) {
+      try {
+        manager.handleNetworkEpochChanged(epochFn());
+      } catch (_) {}
+    }
+
+    final setRefreshCb = _streamSetRefreshCbFn;
+    if (setRefreshCb != null) {
+      try {
+        final callable =
+            ffi.NativeCallable<_LuminaStreamRefreshCbNative>.listener(
+          _onNativeStreamRefreshRequest,
+        );
+        _streamRefreshCallable = callable;
+        setRefreshCb(callable.nativeFunction);
+      } catch (_) {
+        _streamRefreshCallable?.close();
+        _streamRefreshCallable = null;
+      }
+    }
+
+    final setEpochCb = _networkSetEpochCbFn;
+    if (setEpochCb != null) {
+      try {
+        final callable =
+            ffi.NativeCallable<_LuminaNetworkEpochCbNative>.listener(
+          _onNativeNetworkEpochChanged,
+        );
+        _networkEpochCallable = callable;
+        setEpochCb(callable.nativeFunction);
+      } catch (_) {
+        _networkEpochCallable?.close();
+        _networkEpochCallable = null;
+      }
+    }
+  }
+
+  /// Unregisters all Rust Phase 3 FFI streaming callbacks, closes
+  /// `NativeCallable` handles, and detaches the [StreamingManager] listener.
+  void detachStreamingManager() {
+    final manager = _attachedStreamingManager;
+    final listener = _authRequiredListener;
+    if (manager != null && listener != null) {
+      manager.removeAuthRequiredListener(listener);
+    }
+    _attachedStreamingManager = null;
+    _authRequiredListener = null;
+    _lastDispatchedAuthErrorKey = null;
+
+    if (isNativeBound) {
+      try {
+        _streamSetRefreshCbFn?.call(ffi.nullptr);
+      } catch (_) {}
+      try {
+        _networkSetEpochCbFn?.call(ffi.nullptr);
+      } catch (_) {}
+    }
+
+    _streamRefreshCallable?.close();
+    _streamRefreshCallable = null;
+    _networkEpochCallable?.close();
+    _networkEpochCallable = null;
+  }
+
+  /// Cancels active Rust streaming playback/refreshes and clears SQLite L1
+  /// cache entries for [providerId].
+  void cancelStreamingProvider(String providerId) {
+    final trimmed = providerId.trim();
+    if (trimmed.isEmpty || !isNativeBound) return;
+    final cancelFn = _streamingCancelProviderFn;
+    if (cancelFn != null) {
+      try {
+        _withNativeUtf8(trimmed, cancelFn);
+      } catch (_) {}
+    }
+    final clearL1Fn = _l1CacheClearProviderFn;
+    if (clearL1Fn != null) {
+      try {
+        _withNativeUtf8(trimmed, clearL1Fn);
+      } catch (_) {}
+    }
+  }
+
+  void _onNativeStreamRefreshRequest(
+    int requestId,
+    ffi.Pointer<ffi.Uint8> requestJsonPtr,
+  ) {
+    // Ownership contract (streaming_bridge.rs): ALWAYS free requestJsonPtr via
+    // lumina_string_free inside _takeRustString before any early return/await.
+    String? rawJson;
+    try {
+      rawJson = _takeRustString(requestJsonPtr);
+    } catch (_) {
+      rawJson = null;
+    }
+
+    if (_disposed) {
+      _completeNativeStreamRefresh(
+        requestId,
+        jsonEncode(const <String, dynamic>{'status': 'cancelled'}),
+      );
+      return;
+    }
+
+    if (rawJson == null || rawJson.trim().isEmpty) {
+      _completeNativeStreamRefresh(
+        requestId,
+        jsonEncode(const <String, dynamic>{
+          'status': 'error',
+          'message': 'Empty stream refresh request payload',
+        }),
+      );
+      return;
+    }
+
+    unawaited(_dispatchNativeStreamRefresh(requestId, rawJson));
+  }
+
+  Future<void> _dispatchNativeStreamRefresh(
+    int requestId,
+    String requestJson,
+  ) async {
+    final replyJson = await handleStreamRefreshRequestJson(requestJson);
+    _completeNativeStreamRefresh(requestId, replyJson);
+  }
+
+  void _completeNativeStreamRefresh(int requestId, String replyJson) {
+    final completeFn = _streamCompleteRefreshFn;
+    if (completeFn == null || !isNativeBound || requestId <= 0) return;
+    try {
+      _withNativeUtf8(replyJson, (ptr) => completeFn(requestId, ptr));
+    } catch (_) {}
+  }
+
+  void _onNativeNetworkEpochChanged(int epoch) {
+    if (_disposed) return;
+    _attachedStreamingManager?.handleNetworkEpochChanged(epoch);
+  }
+
+  /// Pure testable JSON handler bridging Rust `StreamRefreshRequest` JSON to
+  /// `StreamingManager.refreshAfter403(...)` and encoding the exact reply JSON
+  /// schema expected by `core-ffi/src/streaming_bridge.rs`.
+  Future<String> handleStreamRefreshRequestJson(String requestJson) async {
+    final manager = _attachedStreamingManager;
+    if (manager == null) {
+      return jsonEncode(const <String, dynamic>{
+        'status': 'error',
+        'message': 'StreamingManager not attached',
+      });
+    }
+
+    try {
+      final decoded = jsonDecode(requestJson);
+      if (decoded is! Map) {
+        return jsonEncode(const <String, dynamic>{
+          'status': 'error',
+          'message': 'Stream refresh request JSON must be an object',
+        });
+      }
+
+      var providerId = decoded['provider_id']?.toString().trim() ?? '';
+      final trackId = decoded['track_id']?.toString().trim() ?? '';
+      final qualityKey = decoded['quality_key']?.toString().trim();
+      final failedUrl = decoded['failed_url']?.toString() ?? '';
+      if (providerId.isEmpty || trackId.isEmpty) {
+        return jsonEncode(const <String, dynamic>{
+          'status': 'error',
+          'message': 'Stream refresh request missing provider_id or track_id',
+        });
+      }
+      if (providerId.toLowerCase() == 'podcast') {
+        providerId = trackId.startsWith('http://') ||
+                trackId.startsWith('https://')
+            ? 'podcast_rss'
+            : 'youtube_music';
+      }
+
+      final key = StreamKey(
+        providerId,
+        trackId,
+        (qualityKey != null && qualityKey.isNotEmpty) ? qualityKey : 'default',
+      );
+      final expectedContentLength =
+          (decoded['expected_content_length'] as num?)?.toInt();
+      final expectedMimeType = decoded['expected_mime_type']?.toString();
+      final expectedKind = decoded['expected_kind']?.toString();
+      final allowFormatChange =
+          decoded['is_initial_probe'] == true ||
+          decoded['allow_format_change'] == true;
+
+      final outcome = await manager.refreshAfter403(
+        key,
+        failedUrl: failedUrl,
+        expectedContentLength: expectedContentLength,
+        expectedMimeType: expectedMimeType,
+        expectedStreamKind: expectedKind,
+        allowFormatChange: allowFormatChange,
+      );
+
+      return switch (outcome) {
+        RefreshAfter403Updated(:final spec) => jsonEncode(<String, dynamic>{
+          'status': 'refreshed',
+          'spec': spec.toJson(),
+        }),
+        RefreshAfter403FormatChanged(:final spec, :final reason) => jsonEncode(
+          <String, dynamic>{
+            'status': 'format_changed',
+            'spec': spec.toJson(),
+            'reason': reason,
+          },
+        ),
+        RefreshAfter403AuthRequired(:final providerId, :final message) =>
+          jsonEncode(<String, dynamic>{
+            'status': 'auth_required',
+            'provider_id': providerId,
+            'message': message,
+          }),
+        RefreshAfter403Failed(:final isCancelled, :final message) =>
+          isCancelled
+              ? jsonEncode(const <String, dynamic>{'status': 'cancelled'})
+              : jsonEncode(<String, dynamic>{
+                  'status': 'error',
+                  'message': message,
+                }),
+      };
+    } catch (e) {
+      return jsonEncode(<String, dynamic>{
+        'status': 'error',
+        'message': e.toString(),
+      });
+    }
+  }
+
+  /// Handles structured error codes polled from `lumina_playback_get_state_json`
+  /// (`AUTH_REQUIRED`, `DEVICE_LOST`, `FORMAT_SWITCH_FAILED`), deduplicating
+  /// `AUTH_REQUIRED` dispatches per error event so 200ms polling never spams.
+  Future<void> handlePolledPlaybackStateError({
+    required PlaybackStatus status,
+    String? lastErrorCode,
+    String? lastErrorProvider,
+    String? lastError,
+    int epoch = 0,
+  }) async {
+    if (status != PlaybackStatus.error) {
+      if (status == PlaybackStatus.playing ||
+          status == PlaybackStatus.loading ||
+          status == PlaybackStatus.stopped) {
+        _lastDispatchedAuthErrorKey = null;
+      }
+      return;
+    }
+
+    final code = lastErrorCode?.trim().toUpperCase() ?? '';
+    final providerId = lastErrorProvider?.trim() ?? '';
+    if (code != 'AUTH_REQUIRED' || providerId.isEmpty) {
+      return;
+    }
+
+    final message = (lastError != null && lastError.trim().isNotEmpty)
+        ? lastError.trim()
+        : '授權已失效（AUTH_REQUIRED），請重新登入';
+    final dedupKey = '$epoch|$providerId|$code|$message';
+    if (_lastDispatchedAuthErrorKey == dedupKey) {
+      return;
+    }
+    _lastDispatchedAuthErrorKey = dedupKey;
+
+    final manager = _attachedStreamingManager;
+    if (manager != null &&
+        !manager.authManager.isGuestPlaybackCapable(providerId)) {
+      await manager.authManager.handleUnauthorized(
+        providerId,
+        message,
+        alreadyRetried: true,
+      );
+    }
+  }
+
+  /// Triggers non-blocking HTTP/2 TLS pool warmup on Rust `core-audio`'s
+  /// shared `reqwest` client when native FFI is bound.
+  bool triggerStreamingHttp2Warmup() {
+    final fn = _streamingWarmupH2Fn;
+    if (fn == null) return false;
+    try {
+      return fn() == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
   VisualizerLifecycleCoordinator? _visualizerCoordinator;
   bool _visualizerSettingEnabled = true;
   bool _isNowPlayingVisible = false;
@@ -283,7 +699,25 @@ class FfiAudioService implements AudioService {
   bool _systemOutputActive = true;
   int _preferredBufferFrames = 512;
   StreamingTrackHandler? _streamingTrackHandler;
+  VoidCallback? _playbackInterruptHandler;
+  bool _activeStreamIsLocalProxy = false;
   int _activeRequestId = 0;
+  int _activeEpoch = 0;
+
+  @visibleForTesting
+  int get activeEpoch => _activeEpoch;
+
+  @visibleForTesting
+  void setActiveEpochForTest(int epoch) {
+    _activeEpoch = epoch;
+    _activeRequestId = epoch;
+  }
+
+  static bool _isLoopbackUrl(String? url) {
+    if (url == null || url.isEmpty) return false;
+    final host = Uri.tryParse(url.trim())?.host.toLowerCase();
+    return host == '127.0.0.1' || host == 'localhost' || host == '::1';
+  }
 
   @override
   String? get lastError => _lastError;
@@ -526,6 +960,50 @@ class FfiAudioService implements AudioService {
       _visualizerGetBandsFn = tryLookup(() => dylib.lookupFunction<
           LuminaVisualizerGetBandsNative,
           LuminaVisualizerGetBandsDart>('lumina_visualizer_get_bands'));
+      _streamingWarmupH2Fn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidIntNative,
+          _LuminaVoidIntDart>('lumina_streaming_warmup_h2'));
+      _streamSetRefreshCbFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStreamSetRefreshCbNative,
+          _LuminaStreamSetRefreshCbDart>('lumina_stream_set_refresh_callback'));
+      _streamCompleteRefreshFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStreamCompleteRefreshNative,
+          _LuminaStreamCompleteRefreshDart>('lumina_stream_complete_refresh'));
+      _networkGetEpochFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidU64Native,
+          _LuminaVoidU64Dart>('lumina_network_get_epoch'));
+      _networkSetEpochCbFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaNetworkSetEpochCbNative,
+          _LuminaNetworkSetEpochCbDart>('lumina_network_set_epoch_callback'));
+      _streamingCancelProviderFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrIntNative,
+          _LuminaStrIntDart>('lumina_streaming_cancel_provider'));
+      _l1CacheClearProviderFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrIntNative,
+          _LuminaStrIntDart>('lumina_l1_cache_clear_provider'));
+
+      // Phase 4 Dual-Deck & L2 Head Cache optional bindings
+      _playbackPrepareStandbyAsyncFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaPlayAsyncNative,
+          _LuminaPlayAsyncDart>('lumina_playback_prepare_standby_async'));
+      _playbackSkipToStandbyFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidIntNative,
+          _LuminaVoidIntDart>('lumina_playback_skip_to_standby'));
+      _l2CacheInitFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaL2CacheInitNative,
+          _LuminaL2CacheInitDart>('lumina_l2_cache_init'));
+      _l2CacheTotalBytesFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaL2TotalBytesNative,
+          _LuminaL2TotalBytesDart>('lumina_l2_cache_total_bytes'));
+      _l2CacheEvictNowFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidIntNative,
+          _LuminaVoidIntDart>('lumina_l2_cache_evict_now'));
+      _l2CacheFlushAccessFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidIntNative,
+          _LuminaVoidIntDart>('lumina_l2_cache_flush_access'));
+      _l2CacheRunOrphanSweepFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidIntNative,
+          _LuminaVoidIntDart>('lumina_l2_cache_run_orphan_sweep'));
 
       final initRc = headless ? _initHeadlessFn!() : _initFn!();
       if (initRc != 0) {
@@ -535,12 +1013,29 @@ class FfiAudioService implements AudioService {
 
       final dbPath = resolveDatabasePath(databasePathOverride: databasePath);
       _withNativeUtf8(dbPath, (ptr) => _libInitFn!(ptr));
+      if (_l2CacheInitFn != null) {
+        final l2Dir = resolveL2CacheRootDir(databasePathOverride: databasePath);
+        try {
+          _withNativeUtf8(
+            l2Dir,
+            (ptr) => _l2CacheInitFn!(
+              ptr,
+              1024 * 1024 * 1024,
+              800 * 1024 * 1024,
+            ),
+          );
+        } catch (_) {}
+      }
       _setVolumeFn?.call(_state.volume);
       _reloadTracksFromNative();
       _refreshSignalPath();
       _syncNativeDevicesAndZones();
     } catch (_) {
       _dylib = null;
+    } finally {
+      if (!_dbReadyCompleter.isCompleted) {
+        _dbReadyCompleter.complete();
+      }
     }
   }
 
@@ -597,6 +1092,112 @@ class FfiAudioService implements AudioService {
       return legacyPath;
     }
     return targetPath;
+  }
+
+  /// Resolves the persistent L2 audio head cache root directory alongside the
+  /// SQLite database while keeping `FLUTTER_TEST` isolated.
+  @visibleForTesting
+  static String resolveL2CacheRootDir({
+    String? rootDirOverride,
+    String? databasePathOverride,
+    String? localAppDataOverride,
+    String? tempDirOverride,
+    bool? isFlutterTestOverride,
+  }) {
+    if (rootDirOverride != null && rootDirOverride.isNotEmpty) {
+      return rootDirOverride;
+    }
+    if (databasePathOverride != null && databasePathOverride.isNotEmpty) {
+      return '${File(databasePathOverride).parent.path}${Platform.pathSeparator}l2_cache';
+    }
+    final isTest =
+        isFlutterTestOverride ?? Platform.environment.containsKey('FLUTTER_TEST');
+    final tempRoot = tempDirOverride ?? Directory.systemTemp.path;
+    if (isTest) {
+      return '$tempRoot${Platform.pathSeparator}lumina_l2_cache';
+    }
+    final localAppData =
+        localAppDataOverride ?? Platform.environment['LOCALAPPDATA'];
+    if (localAppData == null || localAppData.isEmpty) {
+      return '$tempRoot${Platform.pathSeparator}lumina_l2_cache';
+    }
+    return '$localAppData${Platform.pathSeparator}LuminaAudio${Platform.pathSeparator}l2_cache';
+  }
+
+  /// Initializes the Rust L2 head cache directory and watermark bounds.
+  Future<bool> initL2Cache({
+    String? rootDir,
+    int highWatermarkBytes = 1024 * 1024 * 1024,
+    int lowWatermarkBytes = 800 * 1024 * 1024,
+  }) async {
+    if (!isNativeBound || _l2CacheInitFn == null) return false;
+    final dir = resolveL2CacheRootDir(rootDirOverride: rootDir);
+    try {
+      return _withNativeUtf8(
+            dir,
+            (ptr) => _l2CacheInitFn!(
+              ptr,
+              highWatermarkBytes,
+              lowWatermarkBytes,
+            ),
+          ) ==
+          0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Queries total disk bytes currently occupied by the L2 head cache.
+  Future<int?> getL2CacheTotalBytes() async {
+    if (!isNativeBound ||
+        _l2CacheTotalBytesFn == null ||
+        _bytesAllocFn == null ||
+        _bytesFreeFn == null) {
+      return null;
+    }
+    final outPtr = _bytesAllocFn!(ffi.sizeOf<ffi.Uint64>()).cast<ffi.Uint64>();
+    try {
+      outPtr.value = 0;
+      final rc = _l2CacheTotalBytesFn!(outPtr);
+      if (rc == 0) {
+        return outPtr.value;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    } finally {
+      _bytesFreeFn!(outPtr.cast<ffi.Uint8>(), ffi.sizeOf<ffi.Uint64>());
+    }
+  }
+
+  /// Triggers an immediate LRU watermark eviction pass on the Rust L2 cache.
+  Future<bool> evictL2CacheNow() async {
+    if (!isNativeBound || _l2CacheEvictNowFn == null) return false;
+    try {
+      return _l2CacheEvictNowFn!() == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Flushes debounced L2 access timestamps to SQLite in a single transaction.
+  Future<bool> flushL2CacheAccess() async {
+    if (!isNativeBound || _l2CacheFlushAccessFn == null) return false;
+    try {
+      return _l2CacheFlushAccessFn!() == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Sweeps orphaned L2 cache files/rows left behind by interrupted writes.
+  Future<bool> runL2CacheOrphanSweep() async {
+    if (!isNativeBound || _l2CacheRunOrphanSweepFn == null) return false;
+    try {
+      return _l2CacheRunOrphanSweepFn!() == 0;
+    } catch (_) {
+      return false;
+    }
   }
 
   void _syncNativeDevicesAndZones() {
@@ -910,6 +1511,137 @@ class FfiAudioService implements AudioService {
     }
   }
 
+  static bool _hasDualDeckFields(Map<String, dynamic> json) {
+    return json.containsKey('active_deck') ||
+        json.containsKey('deck_a_state') ||
+        json.containsKey('deck_b_state') ||
+        json.containsKey('standby_buffered_ms') ||
+        json.containsKey('gapless_transitions') ||
+        json.containsKey('manual_zero_latency_switches') ||
+        json.containsKey('format_mismatch_recoveries') ||
+        json['dual_deck'] is Map;
+  }
+
+  void _updateDualDeckSnapshotFromJson(Map<String, dynamic> json) {
+    if (_hasDualDeckFields(json)) {
+      _lastDualDeckSnapshot = DualDeckStatus.fromJson(json);
+    }
+  }
+
+  @visibleForTesting
+  bool processStateJsonForTest(Map<String, dynamic> json) =>
+      _applyNativeStateJson(json);
+
+  bool _applyNativeStateJson(Map<String, dynamic> json) {
+    final stateCode = (json['state_code'] as num?)?.toInt() ?? 1;
+    final posMs = (json['position_ms'] as num?)?.toInt() ?? 0;
+    final durMs = (json['duration_ms'] as num?)?.toInt() ?? 0;
+    final seekEpoch = (json['seek_epoch'] as num?)?.toInt() ?? _state.seekEpoch;
+    final isSeeking = json['is_seeking'] == true;
+    final deviceLost = json['device_lost'] == true;
+    var lastErr = json['last_error']?.toString();
+    final lastErrCode = json['last_error_code']?.toString().trim();
+    final lastErrProvider = json['last_error_provider']?.toString().trim();
+    final clockSrc = json['clock_source']?.toString() ?? _state.clockSource;
+    final playReqId = (json['play_request_id'] as num?)?.toInt() ?? 0;
+    final loadedReqId = (json['loaded_request_id'] as num?)?.toInt() ?? 0;
+    final stateEpoch = (json['epoch'] as num?)?.toInt() ?? playReqId;
+    if (_activeEpoch > 0 && stateEpoch > 0 && stateEpoch < _activeEpoch) {
+      return false;
+    }
+    if (_activeRequestId > 0 &&
+        playReqId > 0 &&
+        playReqId != _activeRequestId) {
+      return false;
+    }
+    _updateDualDeckSnapshotFromJson(json);
+    var status = PlaybackStatus.fromCode(stateCode);
+    if (_activeRequestId > 0 && playReqId > loadedReqId) {
+      status = PlaybackStatus.loading;
+    }
+    if (status == PlaybackStatus.error &&
+        (lastErr == null || lastErr.trim().isEmpty) &&
+        _lastErrorMsgFn != null) {
+      final ffiErr = _takeRustString(_lastErrorMsgFn!());
+      if (ffiErr != null && ffiErr.trim().isNotEmpty) {
+        lastErr = ffiErr.trim();
+      }
+    }
+
+    if (status == PlaybackStatus.error &&
+        (lastErr == null || lastErr.trim().isEmpty) &&
+        lastErrCode == 'AUTH_REQUIRED' &&
+        lastErrProvider != null &&
+        lastErrProvider.isNotEmpty) {
+      lastErr = 'AUTH_REQUIRED: $lastErrProvider 授權已失效，請重新登入';
+    }
+
+    unawaited(
+      handlePolledPlaybackStateError(
+        status: status,
+        lastErrorCode: lastErrCode,
+        lastErrorProvider: lastErrProvider,
+        lastError: lastErr,
+        epoch: stateEpoch,
+      ),
+    );
+
+    final enteredPlaying =
+        _state.status != PlaybackStatus.playing &&
+        status == PlaybackStatus.playing;
+
+    final reportedTrackId = json['current_track_id']?.toString().trim();
+    TrackInfo? baseTrack = _state.track;
+    if (reportedTrackId != null &&
+        reportedTrackId.isNotEmpty &&
+        baseTrack?.id != reportedTrackId) {
+      if (_pendingStandbyTrack?.id == reportedTrackId) {
+        baseTrack = _pendingStandbyTrack;
+      } else {
+        final queueMatch = _queue
+            .where((t) => t.id == reportedTrackId)
+            .firstOrNull;
+        if (queueMatch != null) {
+          baseTrack = queueMatch;
+        }
+      }
+    }
+    final updatedTrack = baseTrack != null && durMs > 0
+        ? baseTrack.copyWith(duration: Duration(milliseconds: durMs))
+        : baseTrack;
+
+    if (status == PlaybackStatus.stopped ||
+        status == PlaybackStatus.error ||
+        status == PlaybackStatus.paused) {
+      if (_isReroutingDevice) return false;
+      if (lastErr != null && lastErr.isNotEmpty) {
+        _lastError = lastErr;
+      }
+      _positionTimer?.cancel();
+    }
+
+    _emitState(
+      _state.copyWith(
+        status: status,
+        track: updatedTrack,
+        position: Duration(milliseconds: posMs),
+        seekEpoch: seekEpoch,
+        isSeeking: isSeeking,
+        deviceLost: deviceLost,
+        lastError: lastErr,
+        clearLastError: lastErr == null || lastErr.isEmpty,
+        clockSource: clockSrc,
+      ),
+    );
+    if (enteredPlaying) {
+      _refreshSignalPath();
+      if (updatedTrack != null && _currentLyrics.isEmpty) {
+        _loadLyricsForTrack(updatedTrack);
+      }
+    }
+    return true;
+  }
+
   void _startPositionTimer() {
     _positionTimer?.cancel();
     _positionTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -922,63 +1654,7 @@ class FfiAudioService implements AudioService {
         if (raw != null) {
           try {
             final json = jsonDecode(raw) as Map<String, dynamic>;
-            final stateCode = (json['state_code'] as num?)?.toInt() ?? 1;
-            final posMs = (json['position_ms'] as num?)?.toInt() ?? 0;
-            final durMs = (json['duration_ms'] as num?)?.toInt() ?? 0;
-            final seekEpoch = (json['seek_epoch'] as num?)?.toInt() ?? _state.seekEpoch;
-            final isSeeking = json['is_seeking'] == true;
-            final deviceLost = json['device_lost'] == true;
-            final lastErr = json['last_error']?.toString();
-            final clockSrc = json['clock_source']?.toString() ?? _state.clockSource;
-            final playReqId = (json['play_request_id'] as num?)?.toInt() ?? 0;
-            final loadedReqId = (json['loaded_request_id'] as num?)?.toInt() ?? 0;
-            if (_activeRequestId > 0 &&
-                playReqId > 0 &&
-                playReqId != _activeRequestId) {
-              return;
-            }
-            var status = PlaybackStatus.fromCode(stateCode);
-            if (_activeRequestId > 0 && playReqId > loadedReqId) {
-              status = PlaybackStatus.loading;
-            }
-
-            final enteredPlaying =
-                _state.status != PlaybackStatus.playing &&
-                status == PlaybackStatus.playing;
-
-            final updatedTrack = _state.track != null && durMs > 0
-                ? _state.track!.copyWith(duration: Duration(milliseconds: durMs))
-                : _state.track;
-
-            if (status == PlaybackStatus.stopped ||
-                status == PlaybackStatus.error ||
-                status == PlaybackStatus.paused) {
-              if (_isReroutingDevice) return;
-              if (lastErr != null && lastErr.isNotEmpty) {
-                _lastError = lastErr;
-              }
-              _positionTimer?.cancel();
-            }
-
-            _emitState(
-              _state.copyWith(
-                status: status,
-                track: updatedTrack,
-                position: Duration(milliseconds: posMs),
-                seekEpoch: seekEpoch,
-                isSeeking: isSeeking,
-                deviceLost: deviceLost,
-                lastError: lastErr,
-                clearLastError: lastErr == null || lastErr.isEmpty,
-                clockSource: clockSrc,
-              ),
-            );
-            if (enteredPlaying) {
-              _refreshSignalPath();
-              if (updatedTrack != null && _currentLyrics.isEmpty) {
-                _loadLyricsForTrack(updatedTrack);
-              }
-            }
+            _applyNativeStateJson(json);
             return;
           } catch (_) {}
         }
@@ -1007,6 +1683,8 @@ class FfiAudioService implements AudioService {
             status: PlaybackStatus.fromCode(stateCode),
             track: updatedTrack,
             position: Duration(milliseconds: posMs),
+            lastError: stateCode == 4 ? _lastError : null,
+            clearLastError: stateCode != 4,
           ),
         );
       } else {
@@ -1061,6 +1739,12 @@ class FfiAudioService implements AudioService {
   void setStreamingTrackHandler(StreamingTrackHandler? handler) {
     _streamingTrackHandler = handler;
     _delegate.setStreamingTrackHandler(handler);
+  }
+
+  @override
+  void setPlaybackInterruptHandler(VoidCallback? handler) {
+    _playbackInterruptHandler = handler;
+    _delegate.setPlaybackInterruptHandler(handler);
   }
 
   @override
@@ -1121,10 +1805,15 @@ class FfiAudioService implements AudioService {
   }
 
   @override
-  Future<void> cancelPendingPlayback() async {
+  Future<void> cancelPendingPlayback({int epoch = 0}) async {
     _positionTimer?.cancel();
+    _pendingStandbyTrack = null;
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+      _activeRequestId = epoch;
+    }
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
-      await _remoteClient!.cancelPendingPlayback();
+      await _remoteClient!.cancelPendingPlayback(epoch: epoch);
       return;
     }
     if (!isNativeBound) {
@@ -1133,6 +1822,10 @@ class FfiAudioService implements AudioService {
     }
     _playbackCancelPendingFn?.call(0);
   }
+
+  @override
+  Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
+      cancelPendingPlayback(epoch: epoch);
 
   @override
   Future<void> play({TrackInfo? track}) {
@@ -1165,6 +1858,8 @@ class FfiAudioService implements AudioService {
             debounce: false,
           );
         }
+      } else if (candidate != null) {
+        _playbackInterruptHandler?.call();
       }
     }
     return _playInternal(track: track);
@@ -1217,23 +1912,188 @@ class FfiAudioService implements AudioService {
         hintExtension: hintExtension,
       );
     }
-    _activeRequestId = requestId;
-    _currentLyrics = const [];
-    _needsLoadOnResume = false;
-    _pendingResumePosition = null;
-    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
-    if (idx >= 0) {
-      _currentIndex = idx;
-      _queue[idx] = track;
-    }
 
     final payload = _encodeTrackPayload(
       track,
       streamUrl: streamUrl,
       headers: headers,
       hintExtension: hintExtension,
+      epoch: requestId,
     );
-    final rc = _withNativeUtf8(payload, (p) => _playbackPlayAsyncFn!(p, requestId));
+    _dispatchNativeAsyncPayload(
+      track: track,
+      payload: payload,
+      epoch: requestId,
+      isLocalProxy: _isLoopbackUrl(streamUrl),
+    );
+  }
+
+  @override
+  Future<void> playStreamSpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+  }) async {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter FfiAudioService',
+      );
+    }
+    if (epoch < _activeEpoch) return;
+
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.playStreamSpecAsync(track, spec, epoch: epoch);
+    }
+    if (!isNativeBound) {
+      return _delegate.playStreamSpecAsync(track, spec, epoch: epoch);
+    }
+
+    await cancelPendingPlayback(epoch: epoch);
+    if (epoch < _activeEpoch) return;
+
+    final resolvedFields = _legacyFieldsForSpec(spec);
+    if (_playbackPlayAsyncFn == null) {
+      return _playInternal(
+        track: spec is LocalFileSpec ? track.copyWith(filePath: spec.path) : track,
+        streamUrl: resolvedFields.streamUrl,
+        headers: resolvedFields.headers,
+        hintExtension: resolvedFields.hintExtension,
+      );
+    }
+
+    final payload = _encodeTrackPayload(
+      track,
+      streamUrl: resolvedFields.streamUrl,
+      filePathOverride: resolvedFields.filePath,
+      headers: resolvedFields.headers,
+      hintExtension: resolvedFields.hintExtension,
+      sourceSpec: spec,
+      epoch: epoch,
+    );
+    _dispatchNativeAsyncPayload(
+      track: track,
+      payload: payload,
+      epoch: epoch,
+      isLocalProxy: _isLoopbackUrl(resolvedFields.streamUrl),
+    );
+  }
+
+  @override
+  Future<void> prepareStandbySpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    int? epoch,
+  }) async {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter FfiAudioService',
+      );
+    }
+    final effectiveEpoch = epoch ?? _activeEpoch;
+    if (effectiveEpoch < _activeEpoch) return;
+
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      await _remoteClient!.prepareStandbySpecAsync(
+        track,
+        spec,
+        epoch: effectiveEpoch,
+      );
+      return;
+    }
+    if (!isNativeBound) {
+      await _delegate.prepareStandbySpecAsync(
+        track,
+        spec,
+        epoch: effectiveEpoch,
+      );
+      return;
+    }
+    final prepareFn = _playbackPrepareStandbyAsyncFn;
+    if (prepareFn == null) {
+      return;
+    }
+    final resolvedFields = _legacyFieldsForSpec(spec);
+    final payload = _encodeTrackPayload(
+      track,
+      streamUrl: resolvedFields.streamUrl,
+      filePathOverride: resolvedFields.filePath,
+      headers: resolvedFields.headers,
+      hintExtension: resolvedFields.hintExtension,
+      sourceSpec: spec,
+      epoch: effectiveEpoch,
+    );
+    _pendingStandbyTrack = track;
+    final rc = _withNativeUtf8(
+      payload,
+      (p) => prepareFn(p, effectiveEpoch),
+    );
+    if (rc != 0) {
+      _pendingStandbyTrack = null;
+    }
+  }
+
+  @override
+  Future<bool> skipToStandby({int? epoch}) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.skipToStandby(epoch: epoch);
+    }
+    if (!isNativeBound) {
+      return _delegate.skipToStandby(epoch: epoch);
+    }
+    final skipFn = _playbackSkipToStandbyFn;
+    if (skipFn == null) return false;
+    final rc = skipFn();
+    if (rc == 1) {
+      if (epoch != null && epoch > _activeEpoch) {
+        _activeEpoch = epoch;
+        _activeRequestId = epoch;
+      }
+      _lastError = null;
+      _needsLoadOnResume = false;
+      _pendingResumePosition = null;
+      if (_playbackGetStateJsonFn != null) {
+        final raw = _takeRustString(_playbackGetStateJsonFn!());
+        if (raw != null) {
+          try {
+            final map = jsonDecode(raw) as Map<String, dynamic>;
+            _applyNativeStateJson(map);
+          } catch (_) {}
+        }
+      }
+      _refreshSignalPath();
+      _startPositionTimer();
+      return true;
+    }
+    if (rc < 0 && _lastErrorMsgFn != null) {
+      final errMsg = _takeRustString(_lastErrorMsgFn!());
+      if (errMsg != null && errMsg.isNotEmpty) {
+        _lastError = errMsg;
+      }
+    }
+    return false;
+  }
+
+  void _dispatchNativeAsyncPayload({
+    required TrackInfo track,
+    required String payload,
+    required int epoch,
+    required bool isLocalProxy,
+  }) {
+    _activeEpoch = epoch;
+    _activeRequestId = epoch;
+    _activeStreamIsLocalProxy = isLocalProxy;
+    _currentLyrics = const [];
+    _needsLoadOnResume = false;
+    _pendingResumePosition = null;
+    _pendingStandbyTrack = null;
+    _lastDualDeckSnapshot = null;
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
+    if (idx >= 0) {
+      _currentIndex = idx;
+      _queue[idx] = track;
+    }
+
+    final rc = _withNativeUtf8(payload, (p) => _playbackPlayAsyncFn!(p, epoch));
     if (rc != 0) {
       final errMsg = _lastErrorMsgFn != null
           ? _takeRustString(_lastErrorMsgFn!())
@@ -1266,12 +2126,71 @@ class FfiAudioService implements AudioService {
     _startPositionTimer();
   }
 
+  static ({
+    String? streamUrl,
+    String? filePath,
+    Map<String, String> headers,
+    String? hintExtension,
+  }) _legacyFieldsForSpec(StreamSourceSpec spec) {
+    return switch (spec) {
+      DirectRangeSpec() => (
+        streamUrl: spec.url,
+        filePath: null,
+        headers: spec.headers,
+        hintExtension: spec.hintExtension,
+      ),
+      EncryptedRangeSpec() => (
+        streamUrl: spec.url,
+        filePath: null,
+        headers: spec.headers,
+        hintExtension: spec.hintExtension,
+      ),
+      SegmentedManifestSpec() => (
+        streamUrl: null,
+        filePath: null,
+        headers: spec.headers,
+        hintExtension: spec.format == ManifestFormat.dash ? 'mpd' : 'm3u8',
+      ),
+      LocalFileSpec() => (
+        streamUrl: null,
+        filePath: spec.path,
+        headers: const <String, String>{},
+        hintExtension: null,
+      ),
+      ExternalBackendSpec() => throw StateError(
+        'ExternalBackendSpec cannot be serialized for native playback',
+      ),
+    };
+  }
+
+  @visibleForTesting
+  String encodeStreamSpecPayloadForTest(
+    TrackInfo target,
+    StreamSourceSpec spec, {
+    required int epoch,
+  }) {
+    final fields = _legacyFieldsForSpec(spec);
+    return _encodeTrackPayload(
+      target,
+      streamUrl: fields.streamUrl,
+      filePathOverride: fields.filePath,
+      headers: fields.headers,
+      hintExtension: fields.hintExtension,
+      sourceSpec: spec,
+      epoch: epoch,
+    );
+  }
+
   String _encodeTrackPayload(
     TrackInfo target, {
     String? streamUrl,
+    String? filePathOverride,
     Map<String, String> headers = const {},
     String? hintExtension,
+    StreamSourceSpec? sourceSpec,
+    int? epoch,
   }) {
+    final effectivePath = filePathOverride ?? target.filePath;
     return jsonEncode({
       'id': target.id,
       'title': target.title,
@@ -1284,12 +2203,14 @@ class FfiAudioService implements AudioService {
       'bit_depth': target.format.bitDepth,
       'channels': target.format.channels,
       'is_dsd': target.format.isDsd,
-      if (target.filePath != null && target.filePath!.isNotEmpty)
-        'file_path': target.filePath,
+      if (effectivePath != null && effectivePath.isNotEmpty)
+        'file_path': effectivePath,
       if (streamUrl != null && streamUrl.isNotEmpty) 'stream_url': streamUrl,
       if (headers.isNotEmpty) 'headers': headers,
       if (hintExtension != null && hintExtension.isNotEmpty)
         'hint_extension': hintExtension,
+      'epoch': ?epoch,
+      if (sourceSpec != null) 'source_spec': sourceSpec.toJson(),
       'source': target.providerName,
     });
   }
@@ -1436,6 +2357,10 @@ class FfiAudioService implements AudioService {
     _needsLoadOnResume = false;
 
     _activeRequestId = 0;
+    _activeEpoch = 0;
+    _activeStreamIsLocalProxy = _isLoopbackUrl(streamUrl);
+    _pendingStandbyTrack = null;
+    _lastDualDeckSnapshot = null;
     final payload = _encodeTrackPayload(
       target,
       streamUrl: streamUrl,
@@ -1453,9 +2378,12 @@ class FfiAudioService implements AudioService {
       _positionTimer?.cancel();
       _emitState(
         _state.copyWith(
-          status: PlaybackStatus.stopped,
+          status: streamUrl != null
+              ? PlaybackStatus.error
+              : PlaybackStatus.stopped,
           track: target,
           position: Duration.zero,
+          lastError: streamUrl != null ? _lastError : null,
         ),
       );
       return;
@@ -1489,11 +2417,16 @@ class FfiAudioService implements AudioService {
 
   @override
   Future<void> pause() async {
+    _playbackInterruptHandler?.call();
     _positionTimer?.cancel();
     if (!isNativeBound) {
       return _delegate.pause();
     }
     _pauseFn!();
+    if (_activeStreamIsLocalProxy) {
+      _needsLoadOnResume = true;
+      _activeStreamIsLocalProxy = false;
+    }
     _emitState(_state.copyWith(status: PlaybackStatus.paused));
   }
 
@@ -1559,7 +2492,9 @@ class FfiAudioService implements AudioService {
       final raw = _takeRustString(_playbackGetStateJsonFn!());
       if (raw != null) {
         try {
-          return jsonDecode(raw) as Map<String, dynamic>;
+          final map = jsonDecode(raw) as Map<String, dynamic>;
+          _updateDualDeckSnapshotFromJson(map);
+          return map;
         } catch (_) {}
       }
     }
@@ -1755,10 +2690,15 @@ class FfiAudioService implements AudioService {
 
   @override
   Future<void> stop() async {
+    _playbackInterruptHandler?.call();
     _positionTimer?.cancel();
     _activeRequestId = 0;
+    _activeEpoch = 0;
     _pendingResumePosition = null;
     _needsLoadOnResume = false;
+    _activeStreamIsLocalProxy = false;
+    _pendingStandbyTrack = null;
+    _lastDualDeckSnapshot = null;
     if (!isNativeBound) {
       return _delegate.stop();
     }
@@ -2840,11 +3780,15 @@ class FfiAudioService implements AudioService {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    detachStreamingManager();
     _visualizerCoordinator?.dispose();
     _visualizerCoordinator = null;
     _positionTimer?.cancel();
     _remoteClient?.dispose();
     if (isNativeBound) {
+      try {
+        _l2CacheFlushAccessFn?.call();
+      } catch (_) {}
       _shutdownFn?.call();
       _dylib = null;
     }

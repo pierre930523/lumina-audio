@@ -2,9 +2,11 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/streaming_models.dart';
+import '../../services/streaming/local_browser_auth_service.dart';
 import '../../services/streaming/oauth_helper.dart';
 import '../../services/streaming/providers/apple_music_provider.dart';
 import '../../services/streaming/providers/qobuz_provider.dart';
+import '../../services/streaming/providers/tidal_provider.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../../services/streaming/streaming_provider.dart';
 import '../theme/lumina_tokens.dart';
@@ -48,6 +50,8 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
   bool _showTidalManualFallback = false;
   String? _progressMessage;
   String? _errorMessage;
+  String? _nonChromiumBrowserNotice;
+  DetectedDefaultBrowser? _detectedBrowser;
 
   // YouTube Music
   final _ytCookieCtrl = TextEditingController();
@@ -55,6 +59,8 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
   final _ytClientSecretCtrl = TextEditingController();
 
   // Tidal
+  final _tidalAccessTokenCtrl = TextEditingController();
+  final _tidalRefreshTokenCtrl = TextEditingController();
   final _tidalClientIdCtrl = TextEditingController();
   final _tidalClientSecretCtrl = TextEditingController();
   final _tidalManualCodeCtrl = TextEditingController();
@@ -78,15 +84,51 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
   final _appleUserTokenCtrl = TextEditingController();
 
   bool _obscureQobuzPassword = true;
+  bool _rememberTidalByok = true;
+  bool _hasRememberedTidalByok = false;
+  bool _tidalByokFromMemoryOnly = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.provider.authState == StreamingAuthState.error &&
+    _detectedBrowser = widget.streamingManager.detectLocalDefaultBrowser();
+    if ((widget.provider.authState == StreamingAuthState.error ||
+            widget.provider.authState == StreamingAuthState.authRequired) &&
         widget.provider.lastError != null &&
         widget.provider.lastError!.trim().isNotEmpty) {
       _errorMessage = widget.provider.lastError;
     }
+    if (widget.provider.kind == 'tidal' && widget.provider is TidalProvider) {
+      _loadRememberedTidalByok(widget.provider as TidalProvider);
+    }
+  }
+
+  Future<void> _loadRememberedTidalByok(TidalProvider tidal) async {
+    final byok = await tidal.readRememberedByok();
+    if (!mounted || byok == null) return;
+    setState(() {
+      _hasRememberedTidalByok = true;
+      if (_tidalClientIdCtrl.text.trim().isEmpty &&
+          _tidalClientSecretCtrl.text.trim().isEmpty) {
+        _tidalClientIdCtrl.text = byok.clientId;
+        _tidalClientSecretCtrl.text = byok.clientSecret;
+        _tidalByokFromMemoryOnly = true;
+      }
+    });
+  }
+
+  Future<void> _clearRememberedTidalByok() async {
+    final p = widget.provider;
+    if (p is TidalProvider) {
+      await p.clearRememberedByok();
+    }
+    if (!mounted) return;
+    setState(() {
+      _hasRememberedTidalByok = false;
+      _tidalByokFromMemoryOnly = false;
+      _tidalClientIdCtrl.clear();
+      _tidalClientSecretCtrl.clear();
+    });
   }
 
   @override
@@ -94,6 +136,8 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
     _ytCookieCtrl.dispose();
     _ytClientIdCtrl.dispose();
     _ytClientSecretCtrl.dispose();
+    _tidalAccessTokenCtrl.dispose();
+    _tidalRefreshTokenCtrl.dispose();
     _tidalClientIdCtrl.dispose();
     _tidalClientSecretCtrl.dispose();
     _tidalManualCodeCtrl.dispose();
@@ -149,6 +193,12 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
         _submittingWebView = false;
         _progressMessage = null;
         _errorMessage = e.isCancelled ? null : e.message;
+        if (!e.isCancelled &&
+            _kind == 'tidal' &&
+            !_showByokAdvanced &&
+            e.message.contains('Client ID')) {
+          _showByokAdvanced = true;
+        }
       });
     } catch (e) {
       if (!mounted) return;
@@ -163,7 +213,16 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
 
   Map<String, dynamic>? _collectPlanBFallbackParams() {
     switch (_kind) {
+      case 'youtube_music':
+        final clientId = _ytClientIdCtrl.text.trim();
+        if (clientId.isEmpty) return null;
+        final clientSecret = _ytClientSecretCtrl.text.trim();
+        return <String, dynamic>{
+          'client_id': clientId,
+          if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
+        };
       case 'tidal':
+        if (_tidalByokFromMemoryOnly && !_showByokAdvanced) return null;
         final clientId = _tidalClientIdCtrl.text.trim();
         if (clientId.isEmpty) return null;
         final clientSecret = _tidalClientSecretCtrl.text.trim();
@@ -190,17 +249,22 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
 
   Future<void> _submitWebViewLogin() async {
     if (_submitting) return;
+    final detectedName = _detectedBrowser?.displayName;
     setState(() {
       _submitting = true;
       _submittingWebView = true;
       _errorMessage = null;
-      _progressMessage = '正在準備安全網頁登入視窗...';
+      _nonChromiumBrowserNotice = null;
+      _progressMessage = detectedName != null
+          ? '正在啟動 $detectedName 登入視窗...'
+          : '正在啟動本地系統瀏覽器登入視窗...';
     });
 
     try {
-      await widget.streamingManager.authenticateWithWebView(
+      await widget.streamingManager.authenticateWithLocalBrowser(
         _kind,
-        clearSession: widget.provider.authState == StreamingAuthState.error,
+        clearSession: widget.provider.authState == StreamingAuthState.error ||
+            widget.provider.authState == StreamingAuthState.authRequired,
         fallbackParams: _collectPlanBFallbackParams(),
         onProgress: (msg) {
           if (!mounted) return;
@@ -222,17 +286,25 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       }
     } on StreamingException catch (e) {
       if (!mounted) return;
+      final isNonChromiumMsg = e.message.contains('非 Chromium') ||
+          (_detectedBrowser != null && !_detectedBrowser!.isChromium);
       setState(() {
         _submitting = false;
         _submittingWebView = false;
         _progressMessage = null;
         if (e.isCancelled) {
           _errorMessage = null;
+          _nonChromiumBrowserNotice = null;
         } else {
           if (e.isWebViewUnavailable) {
             _showManualTokenSection = true;
           }
-          _errorMessage = e.message;
+          if (e.isWebViewUnavailable && isNonChromiumMsg) {
+            _nonChromiumBrowserNotice = e.message;
+            _errorMessage = null;
+          } else {
+            _errorMessage = e.message;
+          }
         }
       });
     } catch (e) {
@@ -266,12 +338,24 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       case 'tidal':
         final clientId = _tidalClientIdCtrl.text.trim();
         final clientSecret = _tidalClientSecretCtrl.text.trim();
+        if (_selectedTab == 0) {
+          final refreshToken = _tidalRefreshTokenCtrl.text.trim();
+          await _authenticateWithParams(<String, dynamic>{
+            'mode': 'access_token',
+            'access_token': _tidalAccessTokenCtrl.text.trim(),
+            if (refreshToken.isNotEmpty) 'refresh_token': refreshToken,
+            'client_id': clientId,
+            if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
+            'remember_byok': _rememberTidalByok,
+          });
+          return;
+        }
         if (clientId.isEmpty && !_showByokAdvanced) {
           setState(() {
             _showByokAdvanced = true;
           });
         }
-        if (_selectedTab == 0) {
+        if (_selectedTab == 1) {
           final code = _tidalManualCodeCtrl.text.trim();
           final verifier = _tidalManualVerifierCtrl.text.trim();
           await _authenticateWithParams(<String, dynamic>{
@@ -280,12 +364,14 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
             if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
             if (code.isNotEmpty) 'code': code,
             if (verifier.isNotEmpty) 'code_verifier': verifier,
+            'remember_byok': _rememberTidalByok,
           });
         } else {
           await _authenticateWithParams(<String, dynamic>{
             'mode': 'device_code',
             'client_id': clientId,
             if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
+            'remember_byok': _rememberTidalByok,
           });
         }
         return;
@@ -471,6 +557,12 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                                       !_showManualTokenSection;
                                 }),
                       ),
+                      if (_nonChromiumBrowserNotice != null) ...[
+                        _buildNonChromiumAssistedBanner(
+                          _nonChromiumBrowserNotice!,
+                        ),
+                        const SizedBox(height: LuminaTokens.spaceMd),
+                      ],
                       if (_showManualTokenSection) ...[
                         const SizedBox(height: LuminaTokens.spaceSm),
                         _buildPlatformForm(),
@@ -535,7 +627,8 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
   String get _primarySubmitLabel {
     if (_submitting) return '驗證連線中...';
     return switch (_kind) {
-      'tidal' when _selectedTab == 0 => '啟動瀏覽器 PKCE 授權',
+      'tidal' when _selectedTab == 0 => '使用 Token 驗證登入',
+      'tidal' when _selectedTab == 1 => '啟動瀏覽器 PKCE 授權',
       'tidal' => '請求 Tidal 裝置驗證碼',
       'youtube_music' when _selectedTab == 1 => '請求 Google 裝置驗證碼',
       'deezer' when _selectedTab == 1 => '啟動 Deezer OAuth 登入',
@@ -712,11 +805,45 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _buildTabBar(const [
+          'Token / Refresh Token 登入',
           'OAuth 2.0 PKCE 瀏覽器登入',
           'Device Code 裝置登入',
         ]),
         const SizedBox(height: LuminaTokens.spaceMd),
         if (_selectedTab == 0) ...[
+          _buildHelperNote(
+            '可貼上 Tidal Access Token 直接驗證，或只貼 Refresh Token 並於下方「進階 / 自訂 Client ID (BYOK)」'
+            '填入對應 Client ID 與 Client Secret 自動換發登入（若將 o2_refresh 權杖直接貼於第一欄亦可自動識別；'
+            '系統會自動去除 Authorization: / Bearer 前綴）。',
+          ),
+          const SizedBox(height: LuminaTokens.spaceSm),
+          TextField(
+            key: const Key('input_tidal_access_token'),
+            controller: _tidalAccessTokenCtrl,
+            enabled: !_submitting,
+            minLines: 2,
+            maxLines: 4,
+            style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 12.5),
+            decoration: LuminaSettingsStyles.inputDecoration(
+              labelText: 'Tidal Access Token（若已填 Refresh Token + Client ID 可留空）',
+              hintText: 'eyJhbGciOi... 或 Bearer eyJhbGciOi...',
+              borderRadius: LuminaTokens.radiusSm,
+            ),
+          ),
+          const SizedBox(height: LuminaTokens.spaceSm),
+          TextField(
+            key: const Key('input_tidal_refresh_token'),
+            controller: _tidalRefreshTokenCtrl,
+            enabled: !_submitting,
+            minLines: 1,
+            maxLines: 2,
+            style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 12.5),
+            decoration: LuminaSettingsStyles.inputDecoration(
+              labelText: 'Tidal Refresh Token（可單獨搭配 BYOK Client ID / Secret 換發登入）',
+              borderRadius: LuminaTokens.radiusSm,
+            ),
+          ),
+        ] else if (_selectedTab == 1) ...[
           _buildHelperNote(
             '點擊下方按鈕將自動開啟系統瀏覽器並監聽本機 127.0.0.1 回呼完成 Tidal OAuth 2.0 PKCE 授權；'
             '若瀏覽器未自動導向，亦可於下方展開手動授權碼備援。',
@@ -759,12 +886,67 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
             '使用 Tidal Device Authorization 流程，將顯示驗證網址與一次性代碼，於任意瀏覽器確認授權即可完成登入。',
           ),
         ],
+        if (_hasRememberedTidalByok &&
+            _tidalClientIdCtrl.text.trim().isNotEmpty) ...[
+          const SizedBox(height: LuminaTokens.spaceSm),
+          Container(
+            key: const Key('tidal_remembered_byok_badge'),
+            padding: const EdgeInsets.symmetric(
+              horizontal: LuminaTokens.spaceSm,
+              vertical: LuminaTokens.spaceXs,
+            ),
+            decoration: BoxDecoration(
+              color: LuminaTokens.accentBlue.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+              border: Border.all(
+                color: LuminaTokens.accentBlue.withValues(alpha: 0.35),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.key_outlined,
+                  size: 16,
+                  color: LuminaTokens.accentBlue,
+                ),
+                const SizedBox(width: LuminaTokens.spaceXs),
+                Expanded(
+                  child: Text(
+                    '已載入本機 DPAPI 記憶的 Client ID（${maskSecretForLog(_tidalClientIdCtrl.text)}），可直接貼入 Refresh Token 登入',
+                    style: const TextStyle(
+                      color: LuminaTokens.textSecondary,
+                      fontSize: 11.5,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  key: const Key('btn_clear_tidal_byok'),
+                  onPressed: _submitting ? null : _clearRememberedTidalByok,
+                  child: const Text(
+                    '清除記憶',
+                    style: TextStyle(
+                      color: LuminaTokens.statusError,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: LuminaTokens.spaceSm),
         _buildCollapsibleToggle(
           toggleKey: const Key('tidal_byok_toggle'),
           expanded: _showByokAdvanced,
           title: '進階 / 自訂 Client ID (BYOK)',
-          onTap: () => setState(() => _showByokAdvanced = !_showByokAdvanced),
+          onTap: () => setState(() {
+            _showByokAdvanced = !_showByokAdvanced;
+            if (_showByokAdvanced) {
+              _tidalByokFromMemoryOnly = false;
+            }
+          }),
         ),
         if (_showByokAdvanced) ...[
           const SizedBox(height: LuminaTokens.spaceXs),
@@ -772,9 +954,12 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
             key: const Key('input_tidal_client_id'),
             controller: _tidalClientIdCtrl,
             enabled: !_submitting,
+            onChanged: (_) => _tidalByokFromMemoryOnly = false,
             style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 12.5),
             decoration: LuminaSettingsStyles.inputDecoration(
-              labelText: 'Tidal Client ID（必填）',
+              labelText: _selectedTab == 0
+                  ? 'Tidal Client ID（使用 Refresh Token 登入時必填）'
+                  : 'Tidal Client ID（必填）',
               borderRadius: LuminaTokens.radiusSm,
             ),
           ),
@@ -784,10 +969,42 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
             controller: _tidalClientSecretCtrl,
             enabled: !_submitting,
             obscureText: true,
+            onChanged: (_) => _tidalByokFromMemoryOnly = false,
             style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 12.5),
             decoration: LuminaSettingsStyles.inputDecoration(
-              labelText: 'Tidal Client Secret（選填）',
+              labelText: 'Tidal Client Secret（選填，部分客戶端需提供）',
               borderRadius: LuminaTokens.radiusSm,
+            ),
+          ),
+          const SizedBox(height: LuminaTokens.spaceXs),
+          InkWell(
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+            onTap: _submitting
+                ? null
+                : () => setState(
+                    () => _rememberTidalByok = !_rememberTidalByok,
+                  ),
+            child: Row(
+              children: [
+                Checkbox(
+                  key: const Key('chk_tidal_remember_byok'),
+                  value: _rememberTidalByok,
+                  onChanged: _submitting
+                      ? null
+                      : (v) => setState(
+                          () => _rememberTidalByok = v ?? true,
+                        ),
+                ),
+                const Expanded(
+                  child: Text(
+                    '記住此 Client ID / Client Secret 於本機（Windows DPAPI 加密，登出帳號時仍保留）',
+                    style: TextStyle(
+                      color: LuminaTokens.textSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -958,6 +1175,31 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
 
   Widget _buildWebViewPrimaryCard() {
     final meta = widget.provider.meta;
+    final detected = _detectedBrowser;
+    final String description;
+    final String idleLabel;
+    final String busyLabel;
+
+    if (detected != null && detected.isChromium) {
+      description =
+          '將使用系統預設瀏覽器（${detected.displayName}）開啟獨立工作階段登入 ${meta.name}，'
+          '自動擷取憑證並以 DPAPI 加密，結束後清除暫存資料。';
+      idleLabel = '使用 ${detected.displayName} 自動登入';
+      busyLabel = '${detected.displayName} 授權中...';
+    } else if (detected != null && !detected.isChromium) {
+      description =
+          '偵測到系統預設瀏覽器為 ${detected.displayName}（非 Chromium 核心）。'
+          '點擊下方按鈕將於 ${detected.displayName} 開啟 ${meta.name} 官方登入頁，並展開一步憑證綁定指引。';
+      idleLabel = '開啟 ${detected.displayName} 並完成授權';
+      busyLabel = '正在開啟 ${detected.displayName}...';
+    } else {
+      description =
+          '將啟動系統預設瀏覽器（Brave / Google Chrome / Microsoft Edge）登入 ${meta.name}，'
+          '自動擷取憑證並以 DPAPI 加密，結束後清除暫存資料。';
+      idleLabel = '開啟系統瀏覽器自動登入';
+      busyLabel = '系統瀏覽器授權中...';
+    }
+
     return Container(
       padding: const EdgeInsets.all(LuminaTokens.spaceMd),
       decoration: BoxDecoration(
@@ -971,7 +1213,7 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            '將於應用程式內開啟官方 ${meta.name} 安全登入頁面，完成登入後會自動擷取授權憑證並即時驗證（全程使用 Windows DPAPI 加密保存）。',
+            description,
             style: const TextStyle(
               color: LuminaTokens.textSecondary,
               fontSize: 12.5,
@@ -993,10 +1235,41 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                     ),
                   )
                 : const Icon(Icons.open_in_browser_rounded, size: 18),
-            label: Text(
-              _submittingWebView
-                  ? '網頁授權進行中...'
-                  : '開啟網頁登入（自動擷取憑證）',
+            label: Text(_submittingWebView ? busyLabel : idleLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNonChromiumAssistedBanner(String message) {
+    return Container(
+      key: const Key('non_chromium_assisted_banner'),
+      padding: const EdgeInsets.all(LuminaTokens.spaceSm),
+      decoration: BoxDecoration(
+        color: LuminaTokens.accentBlue.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+        border: Border.all(
+          color: LuminaTokens.accentBlue.withValues(alpha: 0.5),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.info_outline_rounded,
+            size: 18,
+            color: LuminaTokens.accentBlue,
+          ),
+          const SizedBox(width: LuminaTokens.spaceXs),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: LuminaTokens.textPrimary,
+                fontSize: 12.5,
+                height: 1.45,
+              ),
             ),
           ),
         ],

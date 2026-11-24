@@ -22,6 +22,8 @@ class DesktopWindowController {
   final ValueNotifier<bool> isFullScreenNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> isMinimizedNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> isHiddenToTrayNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> isMaximizedNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> isFocusedNotifier = ValueNotifier<bool>(true);
 
   bool wasMaximizedBeforeFullScreen = false;
   Rect? savedBoundsBeforeFullScreen;
@@ -45,10 +47,73 @@ class DesktopWindowController {
     }
   }
 
+  VoidCallback? _onSingleInstanceWakeup;
+  VoidCallback? get onSingleInstanceWakeup => _onSingleInstanceWakeup;
+  set onSingleInstanceWakeup(VoidCallback? callback) {
+    _onSingleInstanceWakeup = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
   void Function(String action)? _onTrayMenuAction;
   void Function(String action)? get onTrayMenuAction => _onTrayMenuAction;
   set onTrayMenuAction(void Function(String action)? callback) {
     _onTrayMenuAction = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowMinimize;
+  VoidCallback? get onWindowMinimize => _onWindowMinimize;
+  set onWindowMinimize(VoidCallback? callback) {
+    _onWindowMinimize = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowRestore;
+  VoidCallback? get onWindowRestore => _onWindowRestore;
+  set onWindowRestore(VoidCallback? callback) {
+    _onWindowRestore = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowMaximize;
+  VoidCallback? get onWindowMaximize => _onWindowMaximize;
+  set onWindowMaximize(VoidCallback? callback) {
+    _onWindowMaximize = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowUnmaximize;
+  VoidCallback? get onWindowUnmaximize => _onWindowUnmaximize;
+  set onWindowUnmaximize(VoidCallback? callback) {
+    _onWindowUnmaximize = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowFocus;
+  VoidCallback? get onWindowFocus => _onWindowFocus;
+  set onWindowFocus(VoidCallback? callback) {
+    _onWindowFocus = callback;
+    if (callback != null) {
+      _installMethodHandler();
+    }
+  }
+
+  VoidCallback? _onWindowBlur;
+  VoidCallback? get onWindowBlur => _onWindowBlur;
+  set onWindowBlur(VoidCallback? callback) {
+    _onWindowBlur = callback;
     if (callback != null) {
       _installMethodHandler();
     }
@@ -81,11 +146,45 @@ class DesktopWindowController {
       case 'onTrayClick':
         _onTrayClick?.call();
         return null;
+      case 'onSingleInstanceWakeup':
+        _onSingleInstanceWakeup?.call();
+        return null;
       case 'onTrayMenuAction':
         final action = call.arguments?.toString();
         if (action != null && action.isNotEmpty) {
           _onTrayMenuAction?.call(action);
         }
+        return null;
+      case 'onWindowMinimize':
+        isMinimizedNotifier.value = true;
+        _onWindowMinimize?.call();
+        return null;
+      case 'onWindowRestore':
+        isMinimizedNotifier.value = false;
+        isHiddenToTrayNotifier.value = false;
+        _onWindowRestore?.call();
+        return null;
+      case 'onWindowMaximize':
+        isMinimizedNotifier.value = false;
+        isHiddenToTrayNotifier.value = false;
+        isMaximizedNotifier.value = true;
+        _onWindowMaximize?.call();
+        return null;
+      case 'onWindowUnmaximize':
+        isMinimizedNotifier.value = false;
+        isHiddenToTrayNotifier.value = false;
+        isMaximizedNotifier.value = false;
+        _onWindowUnmaximize?.call();
+        return null;
+      case 'onWindowFocus':
+        isMinimizedNotifier.value = false;
+        isHiddenToTrayNotifier.value = false;
+        isFocusedNotifier.value = true;
+        _onWindowFocus?.call();
+        return null;
+      case 'onWindowBlur':
+        isFocusedNotifier.value = false;
+        _onWindowBlur?.call();
         return null;
       default:
         return null;
@@ -138,12 +237,14 @@ class DesktopWindowController {
   }
 
   Future<bool> isMaximized() async {
-    if (!isSupported) return false;
+    if (!isSupported) return isMaximizedNotifier.value;
     try {
       final res = await channel.invokeMethod<bool>('isMaximized');
-      return res ?? false;
+      final val = res ?? isMaximizedNotifier.value;
+      isMaximizedNotifier.value = val;
+      return val;
     } catch (_) {
-      return false;
+      return isMaximizedNotifier.value;
     }
   }
 

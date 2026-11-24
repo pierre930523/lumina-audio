@@ -8,6 +8,7 @@ use core_types::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::buffer::{Consumer, Producer, RingBufferControl, SpscRingBuffer};
 use crate::dsd::DopFramer;
 use crate::pcm::AudioChunk;
 
@@ -67,6 +68,102 @@ impl WireSampleFormat {
             Self::Float64Le => 64,
             Self::NativeDsd { .. } => 1,
         }
+    }
+
+    pub const fn wire_tag(self) -> u8 {
+        match self {
+            Self::Int16Le => 1,
+            Self::Int24PackedLe => 2,
+            Self::Int24In32MsbLe => 3,
+            Self::Int32Le => 4,
+            Self::Float32Le => 5,
+            Self::Float64Le => 6,
+            Self::Dop24In32MsbLe { .. } => 7,
+            Self::NativeDsd { .. } => 8,
+        }
+    }
+}
+
+/// Bit-packed 64-bit hardware wire format stamp shared via `AtomicU64` between the decode/control
+/// layer and real-time WASAPI Exclusive / ASIO callbacks to prevent raw PCM format mismatches.
+///
+/// Layout (LSB -> MSB):
+/// - bits `0..32`  (`u32`): `sample_rate`
+/// - bits `32..40` (`u8`):  `channels`
+/// - bits `40..48` (`u8`):  `wire_tag`
+/// - bits `48..56` (`u8`):  `valid_bits`
+/// - bits `56..64` (`u8`):  `flags`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct WireFormatStamp(pub u64);
+
+impl WireFormatStamp {
+    pub const FLAG_DOP: u8 = 1 << 0;
+    pub const FLAG_NATIVE_DSD: u8 = 1 << 1;
+
+    #[inline]
+    pub const fn pack(
+        sample_rate: u32,
+        channels: u8,
+        wire_tag: u8,
+        valid_bits: u8,
+        flags: u8,
+    ) -> Self {
+        let bits = (sample_rate as u64)
+            | ((channels as u64) << 32)
+            | ((wire_tag as u64) << 40)
+            | ((valid_bits as u64) << 48)
+            | ((flags as u64) << 56);
+        Self(bits)
+    }
+
+    #[inline]
+    pub const fn from_wire(sample_rate: u32, channels: u16, wire: WireSampleFormat) -> Self {
+        let flags = match wire {
+            WireSampleFormat::Dop24In32MsbLe { .. } => Self::FLAG_DOP,
+            WireSampleFormat::NativeDsd { .. } => Self::FLAG_NATIVE_DSD,
+            _ => 0,
+        };
+        let ch = if channels > u8::MAX as u16 {
+            u8::MAX
+        } else {
+            channels as u8
+        };
+        Self::pack(sample_rate, ch, wire.wire_tag(), wire.valid_bits(), flags)
+    }
+
+    #[inline]
+    pub const fn matches(self, other: Self) -> bool {
+        self.0 != 0 && self.0 == other.0
+    }
+
+    #[inline]
+    pub const fn sample_rate(self) -> u32 {
+        (self.0 & 0xFFFF_FFFF) as u32
+    }
+
+    #[inline]
+    pub const fn channels(self) -> u8 {
+        ((self.0 >> 32) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn wire_tag(self) -> u8 {
+        ((self.0 >> 40) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn valid_bits(self) -> u8 {
+        ((self.0 >> 48) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn flags(self) -> u8 {
+        ((self.0 >> 56) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub const fn raw(self) -> u64 {
+        self.0
     }
 }
 
@@ -232,7 +329,17 @@ pub fn pack_chunk_to_wire_bytes(
             }
             out
         }
-        (chunk, WireSampleFormat::Int24In32MsbLe) | (chunk, WireSampleFormat::Int32Le) => {
+        (chunk, WireSampleFormat::Int24In32MsbLe) => {
+            let floats = chunk.to_f64_interleaved();
+            let mut out = Vec::with_capacity(floats.len() * 4);
+            for s in floats {
+                let q = (s.clamp(-1.0, 0.99999988) * 8_388_608.0).round() as i32;
+                let word = q.clamp(-8_388_608, 8_388_607) << 8;
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+            out
+        }
+        (chunk, WireSampleFormat::Int32Le) => {
             let floats = chunk.to_f64_interleaved();
             let mut out = Vec::with_capacity(floats.len() * 4);
             for s in floats {
@@ -401,6 +508,46 @@ pub struct VerificationConfig {
     pub exclusive_unavailable_reason: Option<String>,
 }
 
+/// Lock-free, zero-allocation Stage 3 wire tap producer used inside real-time audio callbacks.
+pub struct VerificationTapProducer {
+    producer: Producer<u8>,
+    bytes_per_frame: usize,
+}
+
+impl VerificationTapProducer {
+    /// Wait-free, zero-allocation, zero-lock push of frame-aligned hardware wire bytes
+    /// into the verification SPSC ring buffer.
+    #[inline]
+    pub fn push_wire(&mut self, wire_bytes: &[u8]) {
+        if wire_bytes.is_empty() || self.bytes_per_frame == 0 {
+            return;
+        }
+        if self.producer.has_pending_flush() {
+            self.producer.sync_epoch();
+        }
+        let aligned_len = (wire_bytes.len() / self.bytes_per_frame) * self.bytes_per_frame;
+        if aligned_len == 0 {
+            return;
+        }
+        let free = self.producer.available_write();
+        let aligned_free = (free / self.bytes_per_frame) * self.bytes_per_frame;
+        let to_write = aligned_len.min(aligned_free);
+        if to_write > 0 {
+            let _ = self.producer.push_slice(&wire_bytes[..to_write]);
+        }
+    }
+}
+
+struct RtWireTapConsumer {
+    consumer: Consumer<u8>,
+    control: RingBufferControl,
+    wire: WireSampleFormat,
+    channels: u16,
+    sample_rate: u32,
+    bytes_per_frame: usize,
+    drain_scratch: Vec<u8>,
+}
+
 struct VerificationInner {
     decoder_sha: Sha256,
     processing_sha: Sha256,
@@ -415,6 +562,132 @@ struct VerificationInner {
     source_title: Option<String>,
     source_artist: Option<String>,
     source_album: Option<String>,
+    rt_tap: Option<RtWireTapConsumer>,
+}
+
+fn ingest_backend_wire_locked(
+    g: &mut VerificationInner,
+    raw_bytes: &[u8],
+    wire: WireSampleFormat,
+    channels: u16,
+    sample_rate: u32,
+) {
+    if raw_bytes.is_empty() {
+        return;
+    }
+    let mut unpacked = match wire {
+        WireSampleFormat::Dop24In32MsbLe { .. } => {
+            let mut tmp = g.dop_unframer.clone();
+            let res =
+                unpack_wire_bytes_to_chunk(raw_bytes, wire, channels, sample_rate, Some(&mut tmp));
+            g.dop_unframer = tmp;
+            res
+        }
+        _ => unpack_wire_bytes_to_chunk(raw_bytes, wire, channels, sample_rate, None),
+    };
+
+    match &mut unpacked {
+        Ok(chunk) => {
+            // Normalize 16-bit/24-bit promoted into larger containers back to logical source
+            // values so SHA-256 compares logical sample integers accurately.
+            let src_bits = g.config.source_format.valid_bits;
+            let norm_chunk = match (src_bits, chunk) {
+                (16, AudioChunk::PcmI24In32 { samples, channels, sample_rate }) => {
+                    AudioChunk::PcmI16 {
+                        samples: samples.iter().map(|&s| (s >> 8) as i16).collect(),
+                        channels: *channels,
+                        sample_rate: *sample_rate,
+                    }
+                }
+                (16, AudioChunk::PcmI32 { samples, channels, sample_rate }) => {
+                    AudioChunk::PcmI16 {
+                        samples: samples.iter().map(|&s| (s >> 16) as i16).collect(),
+                        channels: *channels,
+                        sample_rate: *sample_rate,
+                    }
+                }
+                (24, AudioChunk::PcmI32 { samples, channels, sample_rate }) => {
+                    AudioChunk::PcmI24In32 {
+                        samples: samples.iter().map(|&s| s >> 8).collect(),
+                        channels: *channels,
+                        sample_rate: *sample_rate,
+                    }
+                }
+                (_, c) => c.clone(),
+            };
+
+            let mut back_bytes = Vec::new();
+            norm_chunk.append_canonical_le_bytes(&mut back_bytes);
+            g.backend_sha.update(&back_bytes);
+            g.frames_verified += norm_chunk.frames() as u64;
+
+            let n = back_bytes.len();
+            if g.pending_processing_bytes.len() >= n {
+                let proc_slice: Vec<u8> = g.pending_processing_bytes.drain(..n).collect();
+                g.processing_sha.update(&proc_slice);
+            } else if !g.pending_processing_bytes.is_empty() {
+                let proc_slice: Vec<u8> = g.pending_processing_bytes.drain(..).collect();
+                g.processing_sha.update(&proc_slice);
+            }
+
+            if g.pending_decoder_bytes.len() >= n {
+                let dec_slice: Vec<u8> = g.pending_decoder_bytes.drain(..n).collect();
+                g.decoder_sha.update(&dec_slice);
+                if dec_slice != back_bytes {
+                    g.mismatched_samples += 1;
+                    if g.first_mismatch_detail.is_none() {
+                        g.first_mismatch_detail = Some(format!(
+                            "Sample bytes differ over {n}-byte block at verified frame {}",
+                            g.frames_verified
+                        ));
+                    }
+                }
+            } else if !g.pending_decoder_bytes.is_empty() {
+                // Resampled / altered sample rate means byte lengths don't track 1:1
+                let dec_slice: Vec<u8> = g.pending_decoder_bytes.drain(..).collect();
+                g.decoder_sha.update(&dec_slice);
+            }
+        }
+        Err(err) => {
+            g.mismatched_samples += 1;
+            if g.first_mismatch_detail.is_none() {
+                g.first_mismatch_detail = Some(err.clone());
+            }
+        }
+    }
+}
+
+fn drain_rt_tap_locked(g: &mut VerificationInner) {
+    let Some(mut tap) = g.rt_tap.take() else {
+        return;
+    };
+    let bpf = tap.bytes_per_frame.max(1);
+    let max_pop = (tap.drain_scratch.len() / bpf) * bpf;
+    if max_pop > 0 {
+        loop {
+            let avail = tap.consumer.available_read();
+            if avail < bpf {
+                break;
+            }
+            let want = ((avail.min(max_pop)) / bpf) * bpf;
+            if want == 0 {
+                break;
+            }
+            let got = tap.consumer.pop_slice(&mut tap.drain_scratch[..want]);
+            let aligned = (got / bpf) * bpf;
+            if aligned == 0 {
+                break;
+            }
+            ingest_backend_wire_locked(
+                g,
+                &tap.drain_scratch[..aligned],
+                tap.wire,
+                tap.channels,
+                tap.sample_rate,
+            );
+        }
+    }
+    g.rt_tap = Some(tap);
 }
 
 /// Real-time verification engine measuring equality & SHA-256 digests between:
@@ -442,7 +715,40 @@ impl AudioVerificationEngine {
                 source_title: None,
                 source_artist: None,
                 source_album: None,
+                rt_tap: None,
             })),
+        }
+    }
+
+    /// Attaches a lock-free SPSC Stage-3 wire tap for real-time audio callbacks.
+    /// Must be called on a non-RT setup thread before starting the audio callback.
+    pub fn attach_rt_tap(
+        &self,
+        wire: WireSampleFormat,
+        channels: u16,
+        sample_rate: u32,
+        capacity_bytes: usize,
+    ) -> VerificationTapProducer {
+        let ch = channels.max(1);
+        let bpf = wire.bytes_per_sample().max(1) * (ch as usize);
+        let cap = capacity_bytes.clamp(65_536, 4 * 1024 * 1024);
+        let (producer, consumer) = SpscRingBuffer::<u8>::new(cap);
+        let control = producer.control();
+        let scratch_len = (16_384 / bpf).max(1) * bpf;
+        if let Ok(mut g) = self.inner.lock() {
+            g.rt_tap = Some(RtWireTapConsumer {
+                consumer,
+                control,
+                wire,
+                channels: ch,
+                sample_rate,
+                bytes_per_frame: bpf,
+                drain_scratch: vec![0u8; scratch_len],
+            });
+        }
+        VerificationTapProducer {
+            producer,
+            bytes_per_frame: bpf,
         }
     }
 
@@ -473,6 +779,10 @@ impl AudioVerificationEngine {
 
     pub fn reset_streams(&self) {
         if let Ok(mut g) = self.inner.lock() {
+            if let Some(ref mut tap) = g.rt_tap {
+                tap.control.request_flush();
+                let _ = tap.consumer.flush_and_ack();
+            }
             g.decoder_sha = Sha256::new();
             g.processing_sha = Sha256::new();
             g.backend_sha = Sha256::new();
@@ -485,7 +795,7 @@ impl AudioVerificationEngine {
         }
     }
 
-    /// Stage 1 hook: called immediately after `AudioDecoder::next_chunk()`.
+    /// Stage 1 hook: called immediately after `AudioDecoder::next_chunk()` (non-RT decode thread).
     pub fn record_decoder_output(&self, chunk: &AudioChunk) {
         if chunk.is_empty() {
             return;
@@ -499,6 +809,7 @@ impl AudioVerificationEngine {
             } else {
                 chunk.update_sha256(&mut g.decoder_sha);
             }
+            drain_rt_tap_locked(&mut g);
         }
     }
 
@@ -515,10 +826,12 @@ impl AudioVerificationEngine {
             } else {
                 chunk.update_sha256(&mut g.processing_sha);
             }
+            drain_rt_tap_locked(&mut g);
         }
     }
 
-    /// Stage 3 hook: called directly inside/before `AudioOutputBackend::write_*` on actual hardware wire bytes.
+    /// Stage 3 direct hook for non-RT unit tests / offline verification pipelines.
+    /// Real-time audio callbacks MUST use [`Self::attach_rt_tap`] -> [`VerificationTapProducer::push_wire`].
     pub fn record_backend_input_wire(
         &self,
         raw_bytes: &[u8],
@@ -530,93 +843,15 @@ impl AudioVerificationEngine {
             return;
         }
         if let Ok(mut g) = self.inner.lock() {
-            let mut unpacked = match wire {
-                WireSampleFormat::Dop24In32MsbLe { .. } => {
-                    let mut tmp = g.dop_unframer.clone();
-                    let res =
-                        unpack_wire_bytes_to_chunk(raw_bytes, wire, channels, sample_rate, Some(&mut tmp));
-                    g.dop_unframer = tmp;
-                    res
-                }
-                _ => unpack_wire_bytes_to_chunk(raw_bytes, wire, channels, sample_rate, None),
-            };
-
-            match &mut unpacked {
-                Ok(chunk) => {
-                    // Normalize 16-bit/24-bit promoted into larger containers back to logical source
-                    // values so SHA-256 compares logical sample integers accurately.
-                    let src_bits = g.config.source_format.valid_bits;
-                    let norm_chunk = match (src_bits, chunk) {
-                        (16, AudioChunk::PcmI24In32 { samples, channels, sample_rate }) => {
-                            AudioChunk::PcmI16 {
-                                samples: samples.iter().map(|&s| (s >> 8) as i16).collect(),
-                                channels: *channels,
-                                sample_rate: *sample_rate,
-                            }
-                        }
-                        (16, AudioChunk::PcmI32 { samples, channels, sample_rate }) => {
-                            AudioChunk::PcmI16 {
-                                samples: samples.iter().map(|&s| (s >> 16) as i16).collect(),
-                                channels: *channels,
-                                sample_rate: *sample_rate,
-                            }
-                        }
-                        (24, AudioChunk::PcmI32 { samples, channels, sample_rate }) => {
-                            AudioChunk::PcmI24In32 {
-                                samples: samples.iter().map(|&s| s >> 8).collect(),
-                                channels: *channels,
-                                sample_rate: *sample_rate,
-                            }
-                        }
-                        (_, c) => c.clone(),
-                    };
-
-                    let mut back_bytes = Vec::new();
-                    norm_chunk.append_canonical_le_bytes(&mut back_bytes);
-                    g.backend_sha.update(&back_bytes);
-                    g.frames_verified += norm_chunk.frames() as u64;
-
-                    let n = back_bytes.len();
-                    if g.pending_processing_bytes.len() >= n {
-                        let proc_slice: Vec<u8> = g.pending_processing_bytes.drain(..n).collect();
-                        g.processing_sha.update(&proc_slice);
-                    } else if !g.pending_processing_bytes.is_empty() {
-                        let proc_slice: Vec<u8> = g.pending_processing_bytes.drain(..).collect();
-                        g.processing_sha.update(&proc_slice);
-                    }
-
-                    if g.pending_decoder_bytes.len() >= n {
-                        let dec_slice: Vec<u8> = g.pending_decoder_bytes.drain(..n).collect();
-                        g.decoder_sha.update(&dec_slice);
-                        if dec_slice != back_bytes {
-                            g.mismatched_samples += 1;
-                            if g.first_mismatch_detail.is_none() {
-                                g.first_mismatch_detail = Some(format!(
-                                    "Sample bytes differ over {n}-byte block at verified frame {}",
-                                    g.frames_verified
-                                ));
-                            }
-                        }
-                    } else if !g.pending_decoder_bytes.is_empty() {
-                        // Resampled / altered sample rate means byte lengths don't track 1:1
-                        let dec_slice: Vec<u8> = g.pending_decoder_bytes.drain(..).collect();
-                        g.decoder_sha.update(&dec_slice);
-                    }
-                }
-                Err(err) => {
-                    g.mismatched_samples += 1;
-                    if g.first_mismatch_detail.is_none() {
-                        g.first_mismatch_detail = Some(err.clone());
-                    }
-                }
-            }
+            ingest_backend_wire_locked(&mut g, raw_bytes, wire, channels, sample_rate);
         }
     }
 
     /// Evaluates Phase 9 + Phase 10 verification verdict. Never claims `BIT-PERFECT` without
     /// verified hash equality, exact format match, disabled DSP/SW volume, and non-shared output.
     pub fn snapshot(&self, audio_api: &str, device_name: &str) -> AudioEngineOutputInfo {
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
+        drain_rt_tap_locked(&mut g);
         let cfg = &g.config;
 
         let dec_hex = hex_digest(&g.decoder_sha);
@@ -670,6 +905,7 @@ impl AudioVerificationEngine {
             || cfg.resampled
             || !hashes_match
             || !format_match
+            || cfg.source_format.codec.is_lossy()
         {
             VerificationStatus::NotBitPerfect
         } else if matches!(

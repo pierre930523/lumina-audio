@@ -1,6 +1,6 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_BusTypeGuid, DEVPKEY_Device_EnumeratorName,
 };
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, PROPERTYKEY as ShellPropKey, S_FALSE, S_OK, WAIT_OBJECT_0,
+    CloseHandle, HANDLE, PROPERTYKEY as ShellPropKey, S_FALSE, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Media::Audio::{
     eAll, eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice,
@@ -38,7 +38,11 @@ const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 use crate::buffer::Consumer;
 use crate::error::BackendError;
-use crate::verification::{AudioVerificationEngine, WireSampleFormat};
+use crate::player::{
+    apply_fade_ramp_to_wire_bytes, fade_out_wire_tail, AudioFadeControl, FadeDirection, FadeTarget,
+    LinearFadeState,
+};
+use crate::verification::{AudioVerificationEngine, VerificationTapProducer, WireSampleFormat};
 
 const AUDIOPHILE_RATES: [u32; 10] = [
     44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000,
@@ -736,8 +740,16 @@ pub struct WasapiRenderControl {
     pub session_id: u64,
     pub current_session_id: Arc<AtomicU64>,
     pub flush_req_seq: AtomicU64,
-    pub flush_ack: (Mutex<u64>, Condvar),
+    pub flush_ack_seq: AtomicU64,
     pub clock_state: Arc<WasapiClockState>,
+    pub startup_watermark_bytes: AtomicUsize,
+    pub fade_ctrl: Option<Arc<AudioFadeControl>>,
+    pub buffered_ms: Option<Arc<AtomicU64>>,
+    pub underrun_count: Arc<AtomicU64>,
+    pub format_mismatch_flag: Arc<AtomicBool>,
+    pub published_format_stamp: Arc<AtomicU64>,
+    pub expected_format_stamp: u64,
+    pub wait_timeout_ms: AtomicU32,
 }
 
 impl WasapiRenderControl {
@@ -772,9 +784,57 @@ impl WasapiRenderControl {
             session_id,
             current_session_id,
             flush_req_seq: AtomicU64::new(0),
-            flush_ack: (Mutex::new(0), Condvar::new()),
+            flush_ack_seq: AtomicU64::new(0),
             clock_state: Arc::new(WasapiClockState::new(sample_rate)),
+            startup_watermark_bytes: AtomicUsize::new(0),
+            fade_ctrl: None,
+            buffered_ms: None,
+            underrun_count: Arc::new(AtomicU64::new(0)),
+            format_mismatch_flag: Arc::new(AtomicBool::new(false)),
+            published_format_stamp: Arc::new(AtomicU64::new(0)),
+            expected_format_stamp: 0,
+            wait_timeout_ms: AtomicU32::new(100),
         }
+    }
+
+    pub fn with_underrun_counter(mut self, underrun_count: Arc<AtomicU64>) -> Self {
+        self.underrun_count = underrun_count;
+        self
+    }
+
+    pub fn with_phase2_controls(
+        mut self,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+    ) -> Self {
+        self.startup_watermark_bytes = AtomicUsize::new(startup_watermark_bytes);
+        self.fade_ctrl = fade_ctrl;
+        self.buffered_ms = buffered_ms;
+        self
+    }
+
+    pub fn with_phase3_guards(
+        mut self,
+        device_lost: Arc<AtomicBool>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
+    ) -> Self {
+        self.device_lost = device_lost;
+        self.format_mismatch_flag = format_mismatch_flag;
+        self.published_format_stamp = published_format_stamp;
+        self.expected_format_stamp = expected_format_stamp;
+        self
+    }
+
+    pub fn with_wait_timeout_ms(self, ms: u32) -> Self {
+        self.wait_timeout_ms.store(ms.max(1), Ordering::Release);
+        self
+    }
+
+    pub fn is_format_mismatch(&self) -> bool {
+        self.format_mismatch_flag.load(Ordering::Acquire)
     }
 
     pub fn set_paused(&self, p: bool) {
@@ -797,16 +857,11 @@ impl WasapiRenderControl {
             return Ok(());
         }
 
-        let mut ack = self
-            .flush_ack
-            .0
-            .lock()
-            .map_err(|_| BackendError::DriverError("WASAPI flush mutex poisoned".into()))?;
         let req = self.flush_req_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.wake_event.signal();
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while *ack < req {
+        while self.flush_ack_seq.load(Ordering::Acquire) < req {
             if self.device_lost.load(Ordering::Acquire) {
                 return Err(BackendError::DeviceNotFound(
                     "WASAPI device invalidated during flush".into(),
@@ -819,19 +874,12 @@ impl WasapiRenderControl {
                     "WASAPI session stopped during flush".into(),
                 ));
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if Instant::now() >= deadline {
                 return Err(BackendError::DriverError(
                     "WASAPI flush timed out waiting for render thread".into(),
                 ));
             }
-            let wait_for = remaining.min(Duration::from_millis(100));
-            let (guard, _) = self
-                .flush_ack
-                .1
-                .wait_timeout(ack, wait_for)
-                .map_err(|_| BackendError::DriverError("WASAPI flush condvar poisoned".into()))?;
-            ack = guard;
+            thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }
@@ -876,19 +924,47 @@ fn record_wasapi_error(ctrl: &WasapiRenderControl, hr: HRESULT, msg: &str) {
     ctrl.state_code.store(4, Ordering::SeqCst);
 }
 
+#[inline]
 fn ack_flush_and_wake(ctrl: &WasapiRenderControl, seq: u64) {
-    if let Ok(mut g) = ctrl.flush_ack.0.lock() {
-        if *g < seq {
-            *g = seq;
-        }
-        ctrl.flush_ack.1.notify_all();
-    }
+    // Strictly wait-free, lock-free acknowledgment on the MMCSS Pro Audio render thread.
+    ctrl.flush_ack_seq.fetch_max(seq, Ordering::Release);
 }
 
-fn wake_all_flush_waiters(ctrl: &WasapiRenderControl) {
-    if let Ok(_g) = ctrl.flush_ack.0.lock() {
-        ctrl.flush_ack.1.notify_all();
+#[inline]
+fn wake_all_flush_waiters(_ctrl: &WasapiRenderControl) {
+    // Control-thread flush waiters observe `ctrl.stopped` / `ctrl.device_lost` atomically.
+}
+
+/// Lock-free real-time format stamp check. If the ring-buffer producer has switched to a
+/// different `WireFormatStamp`, sets `format_mismatch_flag` and forces silence output.
+#[inline]
+fn is_wasapi_format_mismatched(ctrl: &WasapiRenderControl) -> bool {
+    if ctrl.format_mismatch_flag.load(Ordering::Acquire) {
+        return true;
     }
+    if ctrl.expected_format_stamp != 0 {
+        let published = ctrl.published_format_stamp.load(Ordering::Acquire);
+        if published != ctrl.expected_format_stamp {
+            ctrl.format_mismatch_flag.store(true, Ordering::Release);
+            return true;
+        }
+    }
+    false
+}
+
+/// Joins a render/driver thread with an upper bound so wedged USB drivers after `device_lost`
+/// cannot deadlock the coordinator thread. Returns `true` if the thread exited cleanly in time.
+#[doc(hidden)]
+pub fn join_handle_bounded(handle: JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let _ = handle.join();
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -897,22 +973,66 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
     actual_frames: u32,
     spec: &WasapiExclusiveOpenSpec,
     consumer: &mut Consumer<u8>,
-    verification: &AudioVerificationEngine,
-    scratch: &mut Vec<u8>,
+    ver_tap: &mut VerificationTapProducer,
+    scratch: &mut [u8],
     dop_phase: &mut bool,
     ctrl: &WasapiRenderControl,
+    buffering_gate: &mut bool,
+    watermark_bytes: usize,
+    fade: &mut LinearFadeState,
 ) -> Result<(), HRESULT> {
     let bytes_per_frame = spec.wire_format.bytes_per_sample() * (spec.channels.max(1) as usize);
-    let needed = (actual_frames as usize) * bytes_per_frame;
-    if scratch.len() < needed {
-        scratch.resize(needed, 0);
-    }
+    let needed = ((actual_frames as usize) * bytes_per_frame).min(scratch.len());
 
     let ptr = ops.get_buffer(actual_frames)?;
-    let read = consumer.pop_slice(&mut scratch[..needed]);
-    let aligned_read = (read / bytes_per_frame) * bytes_per_frame;
-    if aligned_read > 0 && matches!(spec.wire_format, WireSampleFormat::Dop24In32MsbLe { .. }) {
-        *dop_phase = scratch[aligned_read - 1] == 0x05;
+    if is_wasapi_format_mismatched(ctrl) {
+        fill_wasapi_wire_silence(
+            &mut scratch[..needed],
+            spec.wire_format,
+            spec.channels,
+            dop_phase,
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+        }
+        ops.release_buffer(actual_frames, 0)?;
+        return Ok(());
+    }
+    if *buffering_gate {
+        if consumer.available_read() >= watermark_bytes || ctrl.eof_flag.load(Ordering::Acquire) {
+            *buffering_gate = false;
+        } else {
+            fill_wasapi_wire_silence(
+                &mut scratch[..needed],
+                spec.wire_format,
+                spec.channels,
+                dop_phase,
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+            }
+            ops.release_buffer(actual_frames, 0)?;
+            return Ok(());
+        }
+    }
+
+    let aligned_read = consumer.pop_slice_aligned(&mut scratch[..needed], bytes_per_frame);
+    if aligned_read > 0 {
+        if fade.gain() < 1.0 {
+            apply_fade_ramp_to_wire_bytes(
+                &mut scratch[..aligned_read],
+                spec.wire_format,
+                spec.channels as usize,
+                fade,
+                FadeDirection::Up,
+            );
+        }
+        if let Some(ref fc) = ctrl.fade_ctrl {
+            fc.mark_audible();
+        }
+        if matches!(spec.wire_format, WireSampleFormat::Dop24In32MsbLe { .. }) {
+            *dop_phase = scratch[aligned_read - 1] == 0x05;
+        }
     }
     if aligned_read < needed {
         fill_wasapi_wire_silence(
@@ -924,12 +1044,7 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
     }
     if aligned_read > 0 {
         let frames = (aligned_read / bytes_per_frame) as u64;
-        verification.record_backend_input_wire(
-            &scratch[..aligned_read],
-            spec.wire_format,
-            spec.channels,
-            spec.sample_rate,
-        );
+        ver_tap.push_wire(&scratch[..aligned_read]);
         crate::visualizer::global_tap().feed_wire(
             &scratch[..aligned_read],
             spec.wire_format,
@@ -963,19 +1078,46 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         ctrl.clock_state.set_frequency(freq);
     }
 
+    // Pre-start visualizer worker and attach lock-free SPSC verification tap BEFORE entering RT loop.
+    crate::visualizer::global_tap().ensure_worker_started();
+    let mut ver_tap =
+        verification.attach_rt_tap(spec.wire_format, spec.channels, spec.sample_rate, 1024 * 1024);
+
     let bytes_per_frame = spec.wire_format.bytes_per_sample() * (spec.channels.max(1) as usize);
+    let clock_rate = if matches!(spec.wire_format, WireSampleFormat::NativeDsd { .. }) {
+        (spec.sample_rate / 8).max(44_100) as u64
+    } else {
+        spec.sample_rate.max(8_000) as u64
+    };
     let mut scratch = vec![0u8; (actual_frames as usize) * bytes_per_frame];
     let mut dop_phase = false;
+    let watermark_bytes = ctrl.startup_watermark_bytes.load(Ordering::Acquire);
+    let mut buffering_gate = watermark_bytes > 0;
+    let mut last_ring_epoch = consumer.epoch();
+    let (fade_in, fade_out) = ctrl
+        .fade_ctrl
+        .as_ref()
+        .map(|fc| (fc.fade_in_enabled(), fc.fade_out_enabled()))
+        .unwrap_or((false, false));
+    let mut fade = LinearFadeState::new(
+        spec.sample_rate,
+        fade_in,
+        fade_out,
+        ctrl.paused.load(Ordering::Acquire),
+    );
 
     if let Err(hr) = prime_wasapi_buffer(
         ops,
         actual_frames,
         spec,
         consumer,
-        verification,
+        &mut ver_tap,
         &mut scratch,
         &mut dop_phase,
         ctrl,
+        &mut buffering_gate,
+        watermark_bytes,
+        &mut fade,
     ) {
         record_wasapi_error(
             ctrl,
@@ -1008,13 +1150,25 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
     let mut last_handled_flush_seq = 0u64;
     let mut draining_eof = false;
     let mut drain_deadline: Option<Instant> = None;
+    let mut consecutive_timeouts: u32 = 0;
+    let mut last_stall_probe: Option<(u32, Option<u64>)> = None;
+    let mut stall_unmoved_ticks: u32 = 0;
 
     loop {
-        let timeout_ms = if draining_eof { 10 } else { 100 };
+        let base_timeout_ms = ctrl.wait_timeout_ms.load(Ordering::Relaxed).max(1);
+        let timeout_ms = if draining_eof {
+            base_timeout_ms.min(10)
+        } else {
+            base_timeout_ms
+        };
         let wait = unsafe { WaitForMultipleObjects(&events, false, timeout_ms) };
 
+        let stop_fade_in_progress = ctrl.fade_ctrl.as_ref().is_some_and(|fc| {
+            fc.target() == FadeTarget::StopFadeOut && !fc.is_fade_out_done()
+        });
         if ctrl.stopped.load(Ordering::Acquire)
-            || ctrl.current_session_id.load(Ordering::Relaxed) != ctrl.session_id
+            || (!stop_fade_in_progress
+                && ctrl.current_session_id.load(Ordering::Relaxed) != ctrl.session_id)
         {
             break;
         }
@@ -1073,10 +1227,13 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
 
             ops.reset_buf_event();
             if consumer.has_pending_flush() {
-                consumer.flush_and_ack();
+                let _ = consumer.try_flush_and_ack();
             } else {
-                consumer.clear();
+                let _ = consumer.try_clear();
             }
+            last_ring_epoch = consumer.epoch();
+            buffering_gate = watermark_bytes > 0;
+            fade.reset_for_play_start();
             ctrl.clock_state.on_reset();
             draining_eof = false;
             drain_deadline = None;
@@ -1093,10 +1250,13 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     actual_frames,
                     spec,
                     consumer,
-                    verification,
+                    &mut ver_tap,
                     &mut scratch,
                     &mut dop_phase,
                     ctrl,
+                    &mut buffering_gate,
+                    watermark_bytes,
+                    &mut fade,
                 ) {
                     record_wasapi_error(
                         ctrl,
@@ -1126,6 +1286,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
             }
 
             last_handled_flush_seq = req_seq;
+            consecutive_timeouts = 0;
+            last_stall_probe = None;
+            stall_unmoved_ticks = 0;
             ack_flush_and_wake(ctrl, req_seq);
             continue;
         }
@@ -1145,6 +1308,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                 break;
             }
             was_paused = true;
+            consecutive_timeouts = 0;
+            last_stall_probe = None;
+            stall_unmoved_ticks = 0;
             continue;
         } else if !now_paused && was_paused {
             if needs_prime {
@@ -1153,10 +1319,13 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     actual_frames,
                     spec,
                     consumer,
-                    verification,
+                    &mut ver_tap,
                     &mut scratch,
                     &mut dop_phase,
                     ctrl,
+                    &mut buffering_gate,
+                    watermark_bytes,
+                    &mut fade,
                 ) {
                     record_wasapi_error(
                         ctrl,
@@ -1179,6 +1348,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                 break;
             }
             was_paused = false;
+            consecutive_timeouts = 0;
+            last_stall_probe = None;
+            stall_unmoved_ticks = 0;
             continue;
         }
         if now_paused {
@@ -1193,6 +1365,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                         ctrl.clock_state.record_position(pos, qpc);
                     }
                     if padding == 0 || drain_deadline.is_some_and(|d| Instant::now() >= d) {
+                        if let Some(ref fc) = ctrl.fade_ctrl {
+                            fc.mark_silent();
+                        }
                         ctrl.eof_drained.store(true, Ordering::SeqCst);
                         let target = ctrl.eof_target_state.load(Ordering::Relaxed);
                         let _ = ctrl.state_code.compare_exchange(
@@ -1219,26 +1394,247 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
             }
         }
 
-        // 4. Strict wake gate: only invoke GetBuffer when WASAPI signaled buf_event (WAIT_OBJECT_0).
+        // 4. Strict wake gate + hardware clock stall watchdog while playing.
         if wait.0 != WAIT_OBJECT_0.0 {
+            if wait.0 == WAIT_TIMEOUT.0 && !was_paused && !draining_eof {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                if consecutive_timeouts >= 10 {
+                    match ops.current_padding() {
+                        Err(hr) => {
+                            ctrl.device_lost.store(true, Ordering::SeqCst);
+                            record_wasapi_error(
+                                ctrl,
+                                hr,
+                                &format!(
+                                    "WASAPI stall watchdog GetCurrentPadding failed: HRESULT=0x{:08X}",
+                                    hr.0 as u32
+                                ),
+                            );
+                            break;
+                        }
+                        Ok(padding) => {
+                            let clock_pos = ops.clock_position().ok().map(|(pos, _)| pos);
+                            let sample = (padding, clock_pos);
+                            if last_stall_probe == Some(sample) {
+                                stall_unmoved_ticks = stall_unmoved_ticks.saturating_add(1);
+                                if stall_unmoved_ticks >= 10 {
+                                    ctrl.device_lost.store(true, Ordering::SeqCst);
+                                    if let Ok(mut g) = ctrl.last_error.write() {
+                                        *g = Some("WASAPI hardware clock stalled".to_string());
+                                    }
+                                    ctrl.state_code.store(4, Ordering::SeqCst);
+                                    break;
+                                }
+                            } else {
+                                last_stall_probe = Some(sample);
+                                stall_unmoved_ticks = 0;
+                            }
+                        }
+                    }
+                }
+            }
             continue;
         }
+        consecutive_timeouts = 0;
+        last_stall_probe = None;
+        stall_unmoved_ticks = 0;
 
-        // 5. Render next audio period.
+        // 5. Render next audio period (strictly zero-lock, zero-alloc on RT render thread).
         match ops.get_buffer(actual_frames) {
             Ok(ptr) => {
-                let needed = (actual_frames as usize) * bytes_per_frame;
-                if scratch.len() < needed {
-                    scratch.resize(needed, 0);
+                let needed = ((actual_frames as usize) * bytes_per_frame).min(scratch.len());
+                if is_wasapi_format_mismatched(ctrl) {
+                    fill_wasapi_wire_silence(
+                        &mut scratch[..needed],
+                        spec.wire_format,
+                        spec.channels,
+                        &mut dop_phase,
+                    );
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                    }
+                    if let Err(hr) = ops.release_buffer(actual_frames, 0) {
+                        record_wasapi_error(
+                            ctrl,
+                            hr,
+                            &format!(
+                                "WASAPI ReleaseBuffer(format-mismatch) failed: HRESULT=0x{:08X}",
+                                hr.0 as u32
+                            ),
+                        );
+                        break;
+                    }
+                    continue;
                 }
-                let got = consumer.pop_slice(&mut scratch[..needed]);
-                let aligned_bytes = (got / bytes_per_frame) * bytes_per_frame;
+                let fade_target = ctrl
+                    .fade_ctrl
+                    .as_ref()
+                    .map(|fc| fc.target())
+                    .unwrap_or(FadeTarget::Playing);
+
+                if matches!(
+                    fade_target,
+                    FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
+                ) {
+                    if let Some(ref fc) = ctrl.fade_ctrl {
+                        if !fade.fade_out_enabled() || fade.gain() <= 0.0 {
+                            fade.set_zero();
+                            fc.mark_fade_out_done();
+                            if fade_target == FadeTarget::SeekFadeOut {
+                                buffering_gate = watermark_bytes > 0;
+                            }
+                            fill_wasapi_wire_silence(
+                                &mut scratch[..needed],
+                                spec.wire_format,
+                                spec.channels,
+                                &mut dop_phase,
+                            );
+                        } else {
+                            let aligned_bytes =
+                                consumer.pop_slice_aligned(&mut scratch[..needed], bytes_per_frame);
+                            if aligned_bytes > 0 {
+                                apply_fade_ramp_to_wire_bytes(
+                                    &mut scratch[..aligned_bytes],
+                                    spec.wire_format,
+                                    spec.channels as usize,
+                                    &mut fade,
+                                    FadeDirection::Down,
+                                );
+                            } else {
+                                fade.set_zero();
+                            }
+                            if aligned_bytes < needed {
+                                fill_wasapi_wire_silence(
+                                    &mut scratch[aligned_bytes..needed],
+                                    spec.wire_format,
+                                    spec.channels,
+                                    &mut dop_phase,
+                                );
+                            }
+                            if fade.gain() <= 0.0 {
+                                fc.mark_fade_out_done();
+                                if fade_target == FadeTarget::SeekFadeOut {
+                                    buffering_gate = watermark_bytes > 0;
+                                }
+                            }
+                        }
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                    }
+                    if let Err(hr) = ops.release_buffer(actual_frames, 0) {
+                        record_wasapi_error(
+                            ctrl,
+                            hr,
+                            &format!(
+                                "WASAPI ReleaseBuffer(fade-out) failed: HRESULT=0x{:08X}",
+                                hr.0 as u32
+                            ),
+                        );
+                        break;
+                    }
+                    continue;
+                }
+
+                // Detect ring flush epoch change (e.g. post-seek) and re-arm watermark gate.
+                let req_ep = consumer.requested_epoch();
+                if req_ep != last_ring_epoch {
+                    if consumer.has_pending_flush() && consumer.try_flush_and_ack().is_none() {
+                        fill_wasapi_wire_silence(
+                            &mut scratch[..needed],
+                            spec.wire_format,
+                            spec.channels,
+                            &mut dop_phase,
+                        );
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                        }
+                        if let Err(hr) = ops.release_buffer(actual_frames, 0) {
+                            record_wasapi_error(
+                                ctrl,
+                                hr,
+                                &format!(
+                                    "WASAPI ReleaseBuffer(flush-sync) failed: HRESULT=0x{:08X}",
+                                    hr.0 as u32
+                                ),
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    last_ring_epoch = consumer.epoch();
+                    buffering_gate = watermark_bytes > 0;
+                    fade.reset_for_play_start();
+                }
+
+                // Update lock-free buffered_ms telemetry.
+                let avail_before = consumer.available_read();
+                if let Some(ref bms) = ctrl.buffered_ms {
+                    let frames_avail = (avail_before / bytes_per_frame) as u64;
+                    bms.store((frames_avail * 1000) / clock_rate, Ordering::Relaxed);
+                }
+
+                if buffering_gate {
+                    if avail_before >= watermark_bytes || ctrl.eof_flag.load(Ordering::Acquire) {
+                        buffering_gate = false;
+                    } else {
+                        fill_wasapi_wire_silence(
+                            &mut scratch[..needed],
+                            spec.wire_format,
+                            spec.channels,
+                            &mut dop_phase,
+                        );
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                        }
+                        if let Err(hr) = ops.release_buffer(actual_frames, 0) {
+                            record_wasapi_error(
+                                ctrl,
+                                hr,
+                                &format!(
+                                    "WASAPI ReleaseBuffer(watermark-wait) failed: HRESULT=0x{:08X}",
+                                    hr.0 as u32
+                                ),
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                let aligned_bytes =
+                    consumer.pop_slice_aligned(&mut scratch[..needed], bytes_per_frame);
 
                 if aligned_bytes > 0 {
+                    if fade.gain() < 1.0 {
+                        apply_fade_ramp_to_wire_bytes(
+                            &mut scratch[..aligned_bytes],
+                            spec.wire_format,
+                            spec.channels as usize,
+                            &mut fade,
+                            FadeDirection::Up,
+                        );
+                    }
+                    if let Some(ref fc) = ctrl.fade_ctrl {
+                        fc.mark_audible();
+                    }
                     if matches!(spec.wire_format, WireSampleFormat::Dop24In32MsbLe { .. }) {
                         dop_phase = scratch[aligned_bytes - 1] == 0x05;
                     }
                     if aligned_bytes < needed {
+                        if !ctrl.eof_flag.load(Ordering::Acquire) {
+                            ctrl.underrun_count.fetch_add(1, Ordering::Relaxed);
+                            fade_out_wire_tail(
+                                &mut scratch[..aligned_bytes],
+                                spec.wire_format,
+                                spec.channels as usize,
+                                128,
+                            );
+                            if watermark_bytes > 0 {
+                                buffering_gate = true;
+                                fade.reset_for_play_start();
+                            }
+                        }
                         fill_wasapi_wire_silence(
                             &mut scratch[aligned_bytes..needed],
                             spec.wire_format,
@@ -1250,12 +1646,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                         std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
                     }
                     let frames = (aligned_bytes / bytes_per_frame) as u64;
-                    verification.record_backend_input_wire(
-                        &scratch[..aligned_bytes],
-                        spec.wire_format,
-                        spec.channels,
-                        spec.sample_rate,
-                    );
+                    ver_tap.push_wire(&scratch[..aligned_bytes]);
                     crate::visualizer::global_tap().feed_wire(
                         &scratch[..aligned_bytes],
                         spec.wire_format,
@@ -1333,7 +1724,13 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                         }
                     }
                 } else {
-                    // Transient underrun while track still playing: emit format-appropriate silence.
+                    // Transient underrun while track still playing: increment atomic counter,
+                    // emit format-appropriate silence, and re-arm watermark gate so recovery fades in cleanly.
+                    ctrl.underrun_count.fetch_add(1, Ordering::Relaxed);
+                    if watermark_bytes > 0 {
+                        buffering_gate = true;
+                        fade.reset_for_play_start();
+                    }
                     fill_wasapi_wire_silence(
                         &mut scratch[..needed],
                         spec.wire_format,
@@ -1373,7 +1770,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         }
     }
 
-    let _ = ops.stop();
+    if !ctrl.device_lost.load(Ordering::Acquire) {
+        let _ = ops.stop();
+    }
     ctrl.stopped.store(true, Ordering::Release);
     wake_all_flush_waiters(ctrl);
 }
@@ -1392,6 +1791,115 @@ impl WasapiExclusiveSession {
     #[allow(clippy::too_many_arguments)]
     pub fn open_and_start(
         spec: WasapiExclusiveOpenSpec,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+    ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_controls(
+            spec,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            last_error,
+            session_id,
+            current_session_id,
+            0,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_controls(
+        spec: WasapiExclusiveOpenSpec,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_phase3_controls(
+            spec,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            last_error,
+            session_id,
+            current_session_id,
+            startup_watermark_bytes,
+            fade_ctrl,
+            buffered_ms,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_phase3_controls(
+        spec: WasapiExclusiveOpenSpec,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+        device_lost: Arc<AtomicBool>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
+    ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_telemetry(
+            spec,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            last_error,
+            session_id,
+            current_session_id,
+            startup_watermark_bytes,
+            fade_ctrl,
+            buffered_ms,
+            Arc::new(AtomicU64::new(0)),
+            device_lost,
+            format_mismatch_flag,
+            published_format_stamp,
+            expected_format_stamp,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_telemetry(
+        spec: WasapiExclusiveOpenSpec,
         mut consumer: Consumer<u8>,
         verification: AudioVerificationEngine,
         frames_rendered: Arc<AtomicU64>,
@@ -1401,6 +1909,14 @@ impl WasapiExclusiveSession {
         last_error: Arc<RwLock<Option<String>>>,
         session_id: u64,
         current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+        underrun_count: Arc<AtomicU64>,
+        device_lost: Arc<AtomicBool>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
     ) -> Result<Self, BackendError> {
         let stop_event = Arc::new(Win32Event::new_manual_reset()?);
         let wake_event = Arc::new(Win32Event::new_auto_reset()?);
@@ -1425,19 +1941,29 @@ impl WasapiExclusiveSession {
                     }
                 };
 
-                let ctrl = Arc::new(WasapiRenderControl::new(
-                    Arc::clone(&buf_event),
-                    thread_stop_event,
-                    thread_wake_event,
-                    thread_spec.sample_rate,
-                    frames_rendered,
-                    nonzero_frames,
-                    state_code,
-                    eof_flag,
-                    last_error,
-                    session_id,
-                    current_session_id,
-                ));
+                let ctrl = Arc::new(
+                    WasapiRenderControl::new(
+                        Arc::clone(&buf_event),
+                        thread_stop_event,
+                        thread_wake_event,
+                        thread_spec.sample_rate,
+                        frames_rendered,
+                        nonzero_frames,
+                        state_code,
+                        eof_flag,
+                        last_error,
+                        session_id,
+                        current_session_id,
+                    )
+                    .with_phase2_controls(startup_watermark_bytes, fade_ctrl, buffered_ms)
+                    .with_underrun_counter(underrun_count)
+                    .with_phase3_guards(
+                        device_lost,
+                        format_mismatch_flag,
+                        published_format_stamp,
+                        expected_format_stamp,
+                    ),
+                );
 
                 if ack_tx
                     .send(Ok((dev_name, actual_frames, Arc::clone(&ctrl))))
@@ -1512,6 +2038,10 @@ impl WasapiExclusiveSession {
         self.ctrl.is_device_lost()
     }
 
+    pub fn is_format_mismatch(&self) -> bool {
+        self.ctrl.is_format_mismatch()
+    }
+
     pub fn is_eof_drained(&self) -> bool {
         self.ctrl.is_eof_drained()
     }
@@ -1538,7 +2068,29 @@ impl WasapiExclusiveSession {
         self.ctrl.wake_event.signal();
         wake_all_flush_waiters(&self.ctrl);
         if let Some(h) = self.handle.take() {
-            let _ = h.join();
+            if self.ctrl.is_device_lost() {
+                if !join_handle_bounded(h, Duration::from_millis(500)) {
+                    tracing::warn!(
+                        "WASAPI Exclusive render thread wedged after device_lost; detaching after 500ms"
+                    );
+                }
+            } else {
+                let mut lost_deadline: Option<Instant> = None;
+                while !h.is_finished() {
+                    if self.ctrl.is_device_lost() {
+                        let dl = *lost_deadline
+                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(500));
+                        if Instant::now() >= dl {
+                            tracing::warn!(
+                                "WASAPI Exclusive render thread lost device during shutdown; detaching after 500ms"
+                            );
+                            return;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let _ = h.join();
+            }
         }
     }
 

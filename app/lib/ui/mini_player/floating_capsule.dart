@@ -9,6 +9,7 @@ import '../../models/streaming_provider_meta.dart';
 import '../../services/audio_service.dart';
 import '../../services/escape_dismiss_registry.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/podcast_store.dart';
 import '../../services/ui_scale_controller.dart';
 import '../artwork/album_artwork_view.dart';
 import '../signal_path/quality_badge.dart';
@@ -256,6 +257,8 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
           AlbumArtworkView(
             track: track,
             size: size,
+            fullResolution: false,
+            coverTargetSize: 300,
             audioService: widget.audioService,
             libraryCache: widget.libraryCache,
             borderRadius: BorderRadius.circular(LuminaTokens.space2xs),
@@ -344,11 +347,17 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
   }
 
   Widget _buildTrackTitles(TrackInfo? track) {
+    final isPodcast = PodcastPlaybackTracker.isPodcastTrack(track);
     final artistSubtitle = track == null
         ? ''
-        : (track.hasDistinctAlbumArtist
-            ? '${track.artist} (${track.albumArtist})'
-            : track.artist);
+        : (isPodcast && track.album.trim().isNotEmpty
+            ? (track.artist.trim().isNotEmpty &&
+                    track.artist.trim() != track.album.trim()
+                ? '${track.album} · ${track.artist}'
+                : track.album)
+            : (track.hasDistinctAlbumArtist
+                ? '${track.artist} (${track.albumArtist})'
+                : track.artist));
     final streamingMeta = _resolveStreamingMeta(track);
 
     return Column(
@@ -519,6 +528,20 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   onTap: _toggleOutputPopover,
                 );
 
+                final isPodcast = PodcastPlaybackTracker.isPodcastTrack(track);
+                final VoidCallback? onSkipBack15s = isPodcast
+                    ? () => PodcastPlaybackTracker.seekRelative(
+                        widget.audioService,
+                        PodcastPlaybackTracker.skipBackwardDelta,
+                      )
+                    : null;
+                final VoidCallback? onSkipForward30s = isPodcast
+                    ? () => PodcastPlaybackTracker.seekRelative(
+                        widget.audioService,
+                        PodcastPlaybackTracker.skipForwardDelta,
+                      )
+                    : null;
+
                 final Widget content;
                 if (isWide) {
                   // Equal symmetric side widths guarantee the Expanded center column
@@ -553,6 +576,8 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                                 onPlayPause:
                                     widget.audioService.togglePlayPause,
                                 onNext: widget.audioService.next,
+                                onSkipBackward15s: onSkipBack15s,
+                                onSkipForward30s: onSkipForward30s,
                               ),
                             ),
                             const SizedBox(height: 2),
@@ -644,6 +669,8 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                             onPrevious: widget.audioService.previous,
                             onPlayPause: widget.audioService.togglePlayPause,
                             onNext: widget.audioService.next,
+                            onSkipBackward15s: onSkipBack15s,
+                            onSkipForward30s: onSkipForward30s,
                           ),
                           const SizedBox(width: LuminaTokens.spaceXs),
                           Expanded(

@@ -7,6 +7,8 @@ class PlaybackControls extends StatelessWidget {
   final VoidCallback onPrevious;
   final VoidCallback onPlayPause;
   final VoidCallback onNext;
+  final VoidCallback? onSkipBackward15s;
+  final VoidCallback? onSkipForward30s;
   final bool compact;
 
   const PlaybackControls({
@@ -15,6 +17,8 @@ class PlaybackControls extends StatelessWidget {
     required this.onPrevious,
     required this.onPlayPause,
     required this.onNext,
+    this.onSkipBackward15s,
+    this.onSkipForward30s,
     this.compact = false,
   });
 
@@ -51,6 +55,20 @@ class PlaybackControls extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (onSkipBackward15s != null)
+          IconButton(
+            key: const Key('btn_podcast_skip_back_15s'),
+            visualDensity: density,
+            padding: padding,
+            constraints: btnConstraints,
+            style: _transportStyle(isPrimary: false),
+            icon: Icon(
+              Icons.replay_10_rounded,
+              size: compact ? 19 : 21,
+            ),
+            tooltip: '倒退 15 秒 (-15s)',
+            onPressed: onSkipBackward15s,
+          ),
         IconButton(
           key: const Key('btn_previous'),
           visualDensity: density,
@@ -104,6 +122,20 @@ class PlaybackControls extends StatelessWidget {
           tooltip: '下一首',
           onPressed: onNext,
         ),
+        if (onSkipForward30s != null)
+          IconButton(
+            key: const Key('btn_podcast_skip_forward_30s'),
+            visualDensity: density,
+            padding: padding,
+            constraints: btnConstraints,
+            style: _transportStyle(isPrimary: false),
+            icon: Icon(
+              Icons.forward_30_rounded,
+              size: compact ? 19 : 21,
+            ),
+            tooltip: '快轉 30 秒 (+30s)',
+            onPressed: onSkipForward30s,
+          ),
       ],
     );
   }

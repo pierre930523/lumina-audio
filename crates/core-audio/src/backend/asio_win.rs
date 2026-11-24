@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr::{null_mut, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,11 @@ use windows::Win32::System::Registry::{
 
 use crate::buffer::Consumer;
 use crate::error::BackendError;
-use crate::verification::{AudioVerificationEngine, WireSampleFormat};
+use crate::player::{
+    apply_fade_ramp_to_wire_bytes, fade_out_wire_tail, AudioFadeControl, FadeDirection, FadeTarget,
+    LinearFadeState,
+};
+use crate::verification::{AudioVerificationEngine, VerificationTapProducer, WireSampleFormat};
 
 // Standard Steinberg ASIO SDK integer/float/DSD sample types & selectors (clean-room binary ABI).
 pub const ASIO_OK: i32 = 0;
@@ -462,11 +466,11 @@ fn probe_single_asio_com(entry: &mut AsioDriverEntry) {
         if unsafe { (asio.vtbl().get_channel_info)(asio.raw(), &mut ch_info) } == ASIO_OK {
             entry.sample_type = Some(ch_info.sample_type);
             match ch_info.sample_type {
-                ASIO_ST_INT16_LSB => entry.supported_bit_depths.push(16),
+                ASIO_ST_INT16_LSB => entry.supported_bit_depths = vec![16],
                 ASIO_ST_INT24_LSB => entry.supported_bit_depths = vec![16, 24],
-                ASIO_ST_INT32_LSB | ASIO_ST_FLOAT32_LSB | ASIO_ST_FLOAT64_LSB => {
-                    entry.supported_bit_depths = vec![16, 24, 32]
-                }
+                ASIO_ST_INT32_LSB => entry.supported_bit_depths = vec![16, 24, 32],
+                ASIO_ST_FLOAT32_LSB => entry.supported_bit_depths = vec![32],
+                ASIO_ST_FLOAT64_LSB => entry.supported_bit_depths = vec![64],
                 ASIO_ST_DSD_INT8_LSB1 | ASIO_ST_DSD_INT8_MSB1 | ASIO_ST_DSD_INT8_LSB8 => {
                     entry.supports_native_dsd = true;
                 }
@@ -548,16 +552,21 @@ pub struct AsioCallbackSignals {
     pub resync_requested: AtomicBool,
     pub latencies_changed: AtomicBool,
     pub requested_buffer_size: AtomicI32,
-    pub device_lost: AtomicBool,
+    pub device_lost: Arc<AtomicBool>,
     pub resync_count: AtomicU64,
     pub output_latency_frames: AtomicU32,
     pub sample_rate: AtomicU32,
+    pub observed_driver_sample_rate: AtomicU32,
+    pub format_mismatch_flag: Arc<AtomicBool>,
+    pub published_format_stamp: Arc<AtomicU64>,
+    pub expected_format_stamp: AtomicU64,
     pub hw_sample_pos: AtomicU64,
     pub hw_timestamp_ns: AtomicU64,
     pub hw_clock_valid: AtomicBool,
     pub callback_count: AtomicU64,
+    pub underrun_count: Arc<AtomicU64>,
     clock_seq: AtomicU64,
-    pub last_error: RwLock<Option<String>>,
+    pub last_error: Arc<RwLock<Option<String>>>,
 }
 
 impl AsioCallbackSignals {
@@ -571,17 +580,60 @@ impl AsioCallbackSignals {
             resync_requested: AtomicBool::new(false),
             latencies_changed: AtomicBool::new(false),
             requested_buffer_size: AtomicI32::new(0),
-            device_lost: AtomicBool::new(false),
+            device_lost: Arc::new(AtomicBool::new(false)),
             resync_count: AtomicU64::new(0),
             output_latency_frames: AtomicU32::new(0),
             sample_rate: AtomicU32::new(sample_rate),
+            observed_driver_sample_rate: AtomicU32::new(0),
+            format_mismatch_flag: Arc::new(AtomicBool::new(false)),
+            published_format_stamp: Arc::new(AtomicU64::new(0)),
+            expected_format_stamp: AtomicU64::new(0),
             hw_sample_pos: AtomicU64::new(0),
             hw_timestamp_ns: AtomicU64::new(0),
             hw_clock_valid: AtomicBool::new(false),
             callback_count: AtomicU64::new(0),
+            underrun_count: Arc::new(AtomicU64::new(0)),
             clock_seq: AtomicU64::new(0),
-            last_error: RwLock::new(None),
+            last_error: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn with_underrun_counter(mut self, underrun_count: Arc<AtomicU64>) -> Self {
+        self.underrun_count = underrun_count;
+        self
+    }
+
+    pub fn with_phase3_guards(
+        mut self,
+        device_lost: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
+    ) -> Self {
+        self.device_lost = device_lost;
+        self.last_error = last_error;
+        self.format_mismatch_flag = format_mismatch_flag;
+        self.published_format_stamp = published_format_stamp;
+        self.expected_format_stamp = AtomicU64::new(expected_format_stamp);
+        self
+    }
+
+    /// Wait-free update when the ASIO driver reports `sampleRateDidChange(s_rate)`.
+    pub fn on_sample_rate_changed(&self, s_rate: f64) {
+        if s_rate.is_finite() && s_rate > 0.0 && s_rate <= u32::MAX as f64 {
+            let hz = s_rate.round() as u32;
+            self.observed_driver_sample_rate
+                .store(hz, Ordering::Release);
+            let expected_hz = self.sample_rate.load(Ordering::Relaxed);
+            if expected_hz != 0 && hz != expected_hz {
+                self.format_mismatch_flag.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn is_format_mismatch(&self) -> bool {
+        self.format_mismatch_flag.load(Ordering::Acquire)
     }
 
     pub fn request_flush(&self) -> u64 {
@@ -738,12 +790,52 @@ fn asio_chunk_has_nonzero(data: &[u8], wire: WireSampleFormat) -> bool {
     }
 }
 
+/// Tracks ASIO `bufferSwitch` callback progression to detect stalled/disconnected DAC drivers.
+#[doc(hidden)]
+pub struct AsioCallbackWatchdog {
+    stall_timeout: Duration,
+    last_count: u64,
+    last_progress_at: Instant,
+    was_active: bool,
+}
+
+impl AsioCallbackWatchdog {
+    pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    pub fn new(stall_timeout: Duration, initial_count: u64) -> Self {
+        Self {
+            stall_timeout,
+            last_count: initial_count,
+            last_progress_at: Instant::now(),
+            was_active: false,
+        }
+    }
+
+    /// Returns `true` when active playback has seen zero `bufferSwitch` progress for `>= stall_timeout`.
+    pub fn check(&mut self, now: Instant, is_active: bool, callback_count: u64) -> bool {
+        if !is_active {
+            self.was_active = false;
+            self.last_count = callback_count;
+            self.last_progress_at = now;
+            return false;
+        }
+        if !self.was_active || callback_count != self.last_count {
+            self.was_active = true;
+            self.last_count = callback_count;
+            self.last_progress_at = now;
+            return false;
+        }
+        now.saturating_duration_since(self.last_progress_at) >= self.stall_timeout
+    }
+}
+
 /// Driver-independent ASIO double-buffer render state machine, factored for deterministic unit
 /// testing without COM or physical ASIO hardware.
 #[doc(hidden)]
 pub struct AsioRenderCore {
     pub consumer: Consumer<u8>,
     pub verification: AudioVerificationEngine,
+    ver_tap: VerificationTapProducer,
     pub frames_rendered: Arc<AtomicU64>,
     pub nonzero_frames: Arc<AtomicU64>,
     pub state_code: Arc<AtomicI32>,
@@ -758,11 +850,18 @@ pub struct AsioRenderCore {
     pub sample_rate: u32,
     pub sample_type: i32,
     pub wire: WireSampleFormat,
+    pub expected_format_stamp: u64,
     pub scratch: Vec<u8>,
     last_handled_flush_epoch: u64,
+    last_ring_epoch: u64,
     eof_drain_remaining: Option<u32>,
     dop_silence_phase: bool,
     was_paused: bool,
+    startup_watermark_bytes: usize,
+    buffering_gate: bool,
+    fade_ctrl: Option<Arc<AudioFadeControl>>,
+    fade: LinearFadeState,
+    buffered_ms: Option<Arc<AtomicU64>>,
 }
 
 impl AsioRenderCore {
@@ -785,9 +884,16 @@ impl AsioRenderCore {
         sample_type: i32,
         wire: WireSampleFormat,
     ) -> Self {
+        crate::visualizer::global_tap().ensure_worker_started();
+        let ver_tap =
+            verification.attach_rt_tap(wire, channels as u16, sample_rate, 1024 * 1024);
+        let last_ring_epoch = consumer.epoch();
+        let start_paused = paused.load(Ordering::Acquire);
+        let expected_format_stamp = signals.expected_format_stamp.load(Ordering::Acquire);
         Self {
             consumer,
             verification,
+            ver_tap,
             frames_rendered,
             nonzero_frames,
             state_code,
@@ -802,12 +908,50 @@ impl AsioRenderCore {
             sample_rate,
             sample_type,
             wire,
-            scratch: vec![0; buffer_size * channels.max(1) * 8],
+            expected_format_stamp,
+            scratch: vec![0; buffer_size * channels.max(1) * wire.bytes_per_sample().max(8)],
             last_handled_flush_epoch: 0,
+            last_ring_epoch,
             eof_drain_remaining: None,
             dop_silence_phase: false,
             was_paused: false,
+            startup_watermark_bytes: 0,
+            buffering_gate: false,
+            fade_ctrl: None,
+            fade: LinearFadeState::new(sample_rate, false, false, start_paused),
+            buffered_ms: None,
         }
+    }
+
+    pub fn with_expected_format_stamp(mut self, expected_format_stamp: u64) -> Self {
+        self.expected_format_stamp = expected_format_stamp;
+        self.signals
+            .expected_format_stamp
+            .store(expected_format_stamp, Ordering::Release);
+        self
+    }
+
+    pub fn with_phase2_controls(
+        mut self,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+    ) -> Self {
+        self.startup_watermark_bytes = startup_watermark_bytes;
+        self.buffering_gate = startup_watermark_bytes > 0;
+        let (fade_in, fade_out) = fade_ctrl
+            .as_ref()
+            .map(|fc| (fc.fade_in_enabled(), fc.fade_out_enabled()))
+            .unwrap_or((false, false));
+        self.fade = LinearFadeState::new(
+            self.sample_rate,
+            fade_in,
+            fade_out,
+            self.paused.load(Ordering::Acquire),
+        );
+        self.fade_ctrl = fade_ctrl;
+        self.buffered_ms = buffered_ms;
+        self
     }
 
     fn fill_half_buffer_silence(&mut self, channel_buffers: &[[*mut u8; 2]], idx: usize) {
@@ -841,7 +985,374 @@ impl AsioRenderCore {
         self.fill_half_buffer_silence(channel_buffers, 1);
     }
 
+    #[inline]
+    fn is_format_mismatched(&self) -> bool {
+        if self.signals.format_mismatch_flag.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.expected_format_stamp != 0 {
+            let published = self.signals.published_format_stamp.load(Ordering::Acquire);
+            if published != self.expected_format_stamp {
+                self.signals
+                    .format_mismatch_flag
+                    .store(true, Ordering::Release);
+                return true;
+            }
+        }
+        let drv_sr = self.signals.observed_driver_sample_rate.load(Ordering::Acquire);
+        if drv_sr != 0 && drv_sr != self.sample_rate {
+            self.signals
+                .format_mismatch_flag
+                .store(true, Ordering::Release);
+            return true;
+        }
+        if ASIO_MSG_SESSION_ID.load(Ordering::Acquire) == self.session_id {
+            let msg_sr = ASIO_MSG_SAMPLE_RATE_HZ.load(Ordering::Acquire);
+            if msg_sr != 0 && msg_sr != self.sample_rate {
+                self.signals
+                    .observed_driver_sample_rate
+                    .store(msg_sr, Ordering::Release);
+                self.signals
+                    .format_mismatch_flag
+                    .store(true, Ordering::Release);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn write_interleaved_to_planar(
+        &mut self,
+        channel_buffers: &[[*mut u8; 2]],
+        idx: usize,
+        aligned: usize,
+        frames_in_callback_bytes: usize,
+    ) {
+        let ch = self.channels.min(channel_buffers.len());
+        let drv_bps = asio_sample_bytes(self.sample_type);
+        let src_bps = self.wire.bytes_per_sample();
+        let wire_bpf = src_bps * self.channels.max(1);
+        let valid_frames = if wire_bpf > 0 { aligned / wire_bpf } else { 0 };
+        let tail_start_phase = self.dop_silence_phase;
+        let mut tail_next_phase = tail_start_phase;
+
+        for (c, pair) in channel_buffers.iter().enumerate().take(ch) {
+            let dst_ptr = pair[idx];
+            if dst_ptr.is_null() {
+                continue;
+            }
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(dst_ptr, frames_in_callback_bytes * drv_bps)
+            };
+            match (self.wire, self.sample_type) {
+                // Exact bit-identical wire <-> ASIO driver container matches (bit-perfect fast path).
+                (WireSampleFormat::Int16Le, ASIO_ST_INT16_LSB)
+                | (WireSampleFormat::Int24PackedLe, ASIO_ST_INT24_LSB)
+                | (
+                    WireSampleFormat::Int24In32MsbLe
+                    | WireSampleFormat::Int32Le
+                    | WireSampleFormat::Dop24In32MsbLe { .. },
+                    ASIO_ST_INT32_LSB,
+                )
+                | (WireSampleFormat::Float32Le, ASIO_ST_FLOAT32_LSB)
+                | (WireSampleFormat::Float64Le, ASIO_ST_FLOAT64_LSB)
+                | (
+                    WireSampleFormat::NativeDsd { .. },
+                    ASIO_ST_DSD_INT8_LSB1 | ASIO_ST_DSD_INT8_MSB1 | ASIO_ST_DSD_INT8_LSB8,
+                ) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * src_bps;
+                        let d_off = f * drv_bps;
+                        dst[d_off..d_off + drv_bps]
+                            .copy_from_slice(&self.scratch[s_off..s_off + drv_bps]);
+                    }
+                }
+                // Bit-exact lossless integer container promotions / MSB alignment.
+                (WireSampleFormat::Int16Le, ASIO_ST_INT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 2;
+                        let s16 = i16::from_le_bytes([self.scratch[s_off], self.scratch[s_off + 1]]);
+                        let s32 = (s16 as i32) << 16;
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&s32.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Int24PackedLe, ASIO_ST_INT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 3;
+                        let bytes = [
+                            0u8,
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                        ];
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&bytes);
+                    }
+                }
+                (WireSampleFormat::Int16Le, ASIO_ST_INT24_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 2;
+                        let bytes = [0u8, self.scratch[s_off], self.scratch[s_off + 1]];
+                        dst[f * 3..(f + 1) * 3].copy_from_slice(&bytes);
+                    }
+                }
+                (
+                    WireSampleFormat::Int24In32MsbLe | WireSampleFormat::Dop24In32MsbLe { .. },
+                    ASIO_ST_INT24_LSB,
+                ) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let bytes = [
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ];
+                        dst[f * 3..(f + 1) * 3].copy_from_slice(&bytes);
+                    }
+                }
+                // Proper integer/double -> Float32 conversion (NEVER raw-copy i32 bits as f32!).
+                (WireSampleFormat::Int16Le, ASIO_ST_FLOAT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 2;
+                        let s16 = i16::from_le_bytes([self.scratch[s_off], self.scratch[s_off + 1]]);
+                        let sample = (s16 as f32) / 32_768.0;
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Int24PackedLe, ASIO_ST_FLOAT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 3;
+                        let sign = if (self.scratch[s_off + 2] & 0x80) != 0 {
+                            0xFF
+                        } else {
+                            0x00
+                        };
+                        let s24 = i32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            sign,
+                        ]);
+                        let sample = (s24 as f64 / 8_388_608.0) as f32;
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Int24In32MsbLe | WireSampleFormat::Int32Le, ASIO_ST_FLOAT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s32 = i32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let sample = (s32 as f64 / 2_147_483_648.0) as f32;
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Float64Le, ASIO_ST_FLOAT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 8;
+                        let s64 = f64::from_le_bytes(
+                            self.scratch[s_off..s_off + 8].try_into().unwrap(),
+                        );
+                        let sample = s64 as f32;
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                // Proper integer/float -> Float64 conversion.
+                (WireSampleFormat::Int16Le, ASIO_ST_FLOAT64_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 2;
+                        let s16 = i16::from_le_bytes([self.scratch[s_off], self.scratch[s_off + 1]]);
+                        let sample = (s16 as f64) / 32_768.0;
+                        dst[f * 8..(f + 1) * 8].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Int24PackedLe, ASIO_ST_FLOAT64_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 3;
+                        let sign = if (self.scratch[s_off + 2] & 0x80) != 0 {
+                            0xFF
+                        } else {
+                            0x00
+                        };
+                        let s24 = i32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            sign,
+                        ]);
+                        let sample = (s24 as f64) / 8_388_608.0;
+                        dst[f * 8..(f + 1) * 8].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Int24In32MsbLe | WireSampleFormat::Int32Le, ASIO_ST_FLOAT64_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s32 = i32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let sample = (s32 as f64) / 2_147_483_648.0;
+                        dst[f * 8..(f + 1) * 8].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Float32Le, ASIO_ST_FLOAT64_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s32 = f32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let sample = s32 as f64;
+                        dst[f * 8..(f + 1) * 8].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                // Proper Float32/Float64 -> integer ASIO quantization (NEVER raw-copy f32 bits as i32!).
+                (WireSampleFormat::Float32Le, ASIO_ST_INT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s = f32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let clamped = if s.is_finite() {
+                            ((s.clamp(-1.0, 1.0) as f64) * 2_147_483_648.0)
+                                .round()
+                                .clamp(i32::MIN as f64, i32::MAX as f64)
+                                as i32
+                        } else {
+                            0
+                        };
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&clamped.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Float32Le, ASIO_ST_INT24_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s = f32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let clamped = if s.is_finite() {
+                            ((s.clamp(-1.0, 1.0) as f64) * 8_388_608.0)
+                                .round()
+                                .clamp(-8_388_608.0, 8_388_607.0)
+                                as i32
+                        } else {
+                            0
+                        };
+                        dst[f * 3..(f + 1) * 3].copy_from_slice(&clamped.to_le_bytes()[0..3]);
+                    }
+                }
+                (WireSampleFormat::Float32Le, ASIO_ST_INT16_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 4;
+                        let s = f32::from_le_bytes([
+                            self.scratch[s_off],
+                            self.scratch[s_off + 1],
+                            self.scratch[s_off + 2],
+                            self.scratch[s_off + 3],
+                        ]);
+                        let clamped = if s.is_finite() {
+                            ((s.clamp(-1.0, 1.0) as f64) * 32_768.0)
+                                .round()
+                                .clamp(i16::MIN as f64, i16::MAX as f64)
+                                as i16
+                        } else {
+                            0
+                        };
+                        dst[f * 2..(f + 1) * 2].copy_from_slice(&clamped.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Float64Le, ASIO_ST_INT32_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 8;
+                        let s = f64::from_le_bytes(
+                            self.scratch[s_off..s_off + 8].try_into().unwrap(),
+                        );
+                        let clamped = if s.is_finite() {
+                            (s.clamp(-1.0, 1.0) * 2_147_483_648.0)
+                                .round()
+                                .clamp(i32::MIN as f64, i32::MAX as f64)
+                                as i32
+                        } else {
+                            0
+                        };
+                        dst[f * 4..(f + 1) * 4].copy_from_slice(&clamped.to_le_bytes());
+                    }
+                }
+                (WireSampleFormat::Float64Le, ASIO_ST_INT24_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 8;
+                        let s = f64::from_le_bytes(
+                            self.scratch[s_off..s_off + 8].try_into().unwrap(),
+                        );
+                        let clamped = if s.is_finite() {
+                            (s.clamp(-1.0, 1.0) * 8_388_608.0)
+                                .round()
+                                .clamp(-8_388_608.0, 8_388_607.0)
+                                as i32
+                        } else {
+                            0
+                        };
+                        dst[f * 3..(f + 1) * 3].copy_from_slice(&clamped.to_le_bytes()[0..3]);
+                    }
+                }
+                (WireSampleFormat::Float64Le, ASIO_ST_INT16_LSB) => {
+                    for f in 0..valid_frames {
+                        let s_off = (f * ch + c) * 8;
+                        let s = f64::from_le_bytes(
+                            self.scratch[s_off..s_off + 8].try_into().unwrap(),
+                        );
+                        let clamped = if s.is_finite() {
+                            (s.clamp(-1.0, 1.0) * 32_768.0)
+                                .round()
+                                .clamp(i16::MIN as f64, i16::MAX as f64)
+                                as i16
+                        } else {
+                            0
+                        };
+                        dst[f * 2..(f + 1) * 2].copy_from_slice(&clamped.to_le_bytes());
+                    }
+                }
+                _ => {
+                    // Unsupported wire/driver combination: emit safe silence rather than corrupted audio.
+                    let mut ch_phase = tail_start_phase;
+                    fill_asio_buffer_silence(
+                        &mut dst[..valid_frames * drv_bps],
+                        self.wire,
+                        drv_bps,
+                        &mut ch_phase,
+                    );
+                }
+            }
+            if valid_frames < frames_in_callback_bytes {
+                let mut ch_phase = tail_start_phase;
+                fill_asio_buffer_silence(
+                    &mut dst[valid_frames * drv_bps..],
+                    self.wire,
+                    drv_bps,
+                    &mut ch_phase,
+                );
+                tail_next_phase = ch_phase;
+            }
+        }
+        if valid_frames < frames_in_callback_bytes {
+            self.dop_silence_phase = tail_next_phase;
+        }
+    }
+
     /// Processes a single ASIO `bufferSwitch` period. Returns `true` if `output_ready()` should be invoked.
+    /// Strictly real-time safe: ZERO mutex locks, ZERO heap allocations, ZERO I/O.
     pub fn process_buffer_switch(
         &mut self,
         idx: usize,
@@ -849,18 +1360,24 @@ impl AsioRenderCore {
     ) -> bool {
         self.signals.callback_count.fetch_add(1, Ordering::Relaxed);
 
-        // 1. Lock-free flush epoch handling (works in both Playing and Paused states).
+        // 1. Lock-free bounded flush epoch handling (works in both Playing and Paused states).
         let req_epoch = self.signals.flush_requested_epoch.load(Ordering::Acquire);
         if req_epoch != self.last_handled_flush_epoch {
-            if self.consumer.has_pending_flush() {
-                self.consumer.flush_and_ack();
+            let flushed = if self.consumer.has_pending_flush() {
+                self.consumer.try_flush_and_ack().is_some()
             } else {
-                self.consumer.clear();
+                self.consumer.try_clear().is_some()
+            };
+            self.fill_both_double_buffers_silence(channel_buffers);
+            if !flushed {
+                return true;
             }
+            self.last_ring_epoch = self.consumer.epoch();
+            self.buffering_gate = self.startup_watermark_bytes > 0;
+            self.fade.reset_for_play_start();
             self.eof_drain_remaining = None;
             self.signals.eof_drained.store(false, Ordering::Release);
             self.dop_silence_phase = false;
-            self.fill_both_double_buffers_silence(channel_buffers);
             self.last_handled_flush_epoch = req_epoch;
             self.signals
                 .flush_completed_epoch
@@ -871,9 +1388,12 @@ impl AsioRenderCore {
         // 2. Stopped / session mismatch / paused gate.
         let session_mismatch =
             self.current_session_id.load(Ordering::Relaxed) != self.session_id;
+        let stop_fade_in_progress = self.fade_ctrl.as_ref().is_some_and(|fc| {
+            fc.target() == FadeTarget::StopFadeOut && !fc.is_fade_out_done()
+        });
         let is_stopped = self.stopped.load(Ordering::Relaxed);
         let is_paused = self.paused.load(Ordering::Relaxed);
-        if is_stopped || session_mismatch || is_paused {
+        if is_stopped || (session_mismatch && !stop_fade_in_progress) || is_paused {
             if is_paused && !self.was_paused {
                 self.fill_both_double_buffers_silence(channel_buffers);
                 self.was_paused = true;
@@ -883,6 +1403,13 @@ impl AsioRenderCore {
             return is_paused && !is_stopped && !session_mismatch;
         }
         self.was_paused = false;
+
+        // 2b. Lock-free real-time format-mismatch guard: emit silence & signal control layer
+        // instead of popping/outputting mismatched sample-rate or wire-container PCM.
+        if self.is_format_mismatched() {
+            self.fill_half_buffer_silence(channel_buffers, idx);
+            return true;
+        }
 
         let wire_bpf = self.wire.bytes_per_sample() * self.channels.max(1);
         let is_dsd_bit_packed = matches!(
@@ -894,28 +1421,137 @@ impl AsioRenderCore {
         } else {
             self.buffer_size
         };
-        let needed_bytes = frames_in_callback_bytes * wire_bpf;
-        if self.scratch.len() < needed_bytes {
-            self.scratch.resize(needed_bytes, 0);
+        let needed_bytes = (frames_in_callback_bytes * wire_bpf).min(self.scratch.len());
+
+        // 3. Lock-free micro-fade-out handling (Pause / Stop / Seek click/pop prevention).
+        let fade_target = self
+            .fade_ctrl
+            .as_ref()
+            .map(|fc| fc.target())
+            .unwrap_or(FadeTarget::Playing);
+        if matches!(
+            fade_target,
+            FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
+        ) {
+            if let Some(ref fc) = self.fade_ctrl {
+                if !self.fade.fade_out_enabled() || self.fade.gain() <= 0.0 {
+                    self.fade.set_zero();
+                    fc.mark_fade_out_done();
+                    if fade_target == FadeTarget::SeekFadeOut {
+                        self.buffering_gate = self.startup_watermark_bytes > 0;
+                    }
+                    self.fill_half_buffer_silence(channel_buffers, idx);
+                    return true;
+                }
+                let aligned = self
+                    .consumer
+                    .pop_slice_aligned(&mut self.scratch[..needed_bytes], wire_bpf);
+                if aligned > 0 {
+                    apply_fade_ramp_to_wire_bytes(
+                        &mut self.scratch[..aligned],
+                        self.wire,
+                        self.channels,
+                        &mut self.fade,
+                        FadeDirection::Down,
+                    );
+                } else {
+                    self.fade.set_zero();
+                }
+                if self.fade.gain() <= 0.0 {
+                    fc.mark_fade_out_done();
+                    if fade_target == FadeTarget::SeekFadeOut {
+                        self.buffering_gate = self.startup_watermark_bytes > 0;
+                    }
+                }
+                if aligned > 0 {
+                    self.write_interleaved_to_planar(
+                        channel_buffers,
+                        idx,
+                        aligned,
+                        frames_in_callback_bytes,
+                    );
+                } else {
+                    self.fill_half_buffer_silence(channel_buffers, idx);
+                }
+                return true;
+            }
         }
 
-        let got = self.consumer.pop_slice(&mut self.scratch[..needed_bytes]);
-        let aligned = (got / wire_bpf) * wire_bpf;
+        // 4. Detect ring flush epoch change (post-seek) and re-arm watermark gate.
+        let req_ring_ep = self.consumer.requested_epoch();
+        if req_ring_ep != self.last_ring_epoch {
+            if self.consumer.has_pending_flush() && self.consumer.try_flush_and_ack().is_none() {
+                self.fill_half_buffer_silence(channel_buffers, idx);
+                return true;
+            }
+            self.last_ring_epoch = self.consumer.epoch();
+            self.buffering_gate = self.startup_watermark_bytes > 0;
+            self.fade.reset_for_play_start();
+        }
+
+        // 5. Update lock-free buffered_ms telemetry & startup/post-seek watermark gate.
+        let avail_before = self.consumer.available_read();
+        if let Some(ref bms) = self.buffered_ms {
+            let clock_rate = if matches!(self.wire, WireSampleFormat::NativeDsd { .. }) {
+                (self.sample_rate / 8).max(44_100) as u64
+            } else {
+                self.sample_rate.max(8_000) as u64
+            };
+            let frames_avail = (avail_before / wire_bpf) as u64;
+            bms.store((frames_avail * 1000) / clock_rate, Ordering::Relaxed);
+        }
+
+        if self.buffering_gate {
+            if avail_before >= self.startup_watermark_bytes
+                || self.eof_flag.load(Ordering::Acquire)
+            {
+                self.buffering_gate = false;
+            } else {
+                self.fill_half_buffer_silence(channel_buffers, idx);
+                return true;
+            }
+        }
+
+        let aligned = self
+            .consumer
+            .pop_slice_aligned(&mut self.scratch[..needed_bytes], wire_bpf);
 
         if aligned > 0 {
             self.eof_drain_remaining = None;
             self.signals.eof_drained.store(false, Ordering::Release);
 
+            if self.fade.gain() < 1.0 {
+                apply_fade_ramp_to_wire_bytes(
+                    &mut self.scratch[..aligned],
+                    self.wire,
+                    self.channels,
+                    &mut self.fade,
+                    FadeDirection::Up,
+                );
+            }
+            if let Some(ref fc) = self.fade_ctrl {
+                fc.mark_audible();
+            }
+
             if matches!(self.wire, WireSampleFormat::Dop24In32MsbLe { .. }) {
                 self.dop_silence_phase = self.scratch[aligned - 1] == 0x05;
             }
 
-            self.verification.record_backend_input_wire(
-                &self.scratch[..aligned],
-                self.wire,
-                self.channels as u16,
-                self.sample_rate,
-            );
+            if aligned < needed_bytes && !self.eof_flag.load(Ordering::Acquire) {
+                self.signals.underrun_count.fetch_add(1, Ordering::Relaxed);
+                fade_out_wire_tail(
+                    &mut self.scratch[..aligned],
+                    self.wire,
+                    self.channels,
+                    128,
+                );
+                if self.startup_watermark_bytes > 0 {
+                    self.buffering_gate = true;
+                    self.fade.reset_for_play_start();
+                }
+            }
+
+            self.ver_tap.push_wire(&self.scratch[..aligned]);
             crate::visualizer::global_tap().feed_wire(
                 &self.scratch[..aligned],
                 self.wire,
@@ -940,6 +1576,9 @@ impl AsioRenderCore {
             let rem = self.eof_drain_remaining.get_or_insert(drain_periods);
             if *rem <= 1 {
                 *rem = 0;
+                if let Some(ref fc) = self.fade_ctrl {
+                    fc.mark_silent();
+                }
                 self.signals.eof_drained.store(true, Ordering::Release);
                 let target = self.signals.eof_target_state.load(Ordering::Relaxed);
                 let _ = self.state_code.compare_exchange(
@@ -953,69 +1592,17 @@ impl AsioRenderCore {
             }
             return true;
         } else {
-            // Transient underrun while track still active.
+            // Transient underrun while track still active: increment counter, re-arm watermark gate & fade-in.
+            self.signals.underrun_count.fetch_add(1, Ordering::Relaxed);
+            if self.startup_watermark_bytes > 0 {
+                self.buffering_gate = true;
+                self.fade.reset_for_play_start();
+            }
             self.fill_half_buffer_silence(channel_buffers, idx);
             return true;
         }
 
-        // Write interleaved wire bytes into ASIO driver's planar channel buffers cleanly.
-        let ch = self.channels.min(channel_buffers.len());
-        let drv_bps = asio_sample_bytes(self.sample_type);
-        let src_bps = self.wire.bytes_per_sample();
-        let valid_frames = aligned / wire_bpf;
-        let tail_start_phase = self.dop_silence_phase;
-        let mut tail_next_phase = tail_start_phase;
-
-        for (c, pair) in channel_buffers.iter().enumerate().take(ch) {
-            let dst_ptr = pair[idx];
-            if dst_ptr.is_null() {
-                continue;
-            }
-            let dst = unsafe {
-                std::slice::from_raw_parts_mut(dst_ptr, frames_in_callback_bytes * drv_bps)
-            };
-            if src_bps == drv_bps {
-                for f in 0..valid_frames {
-                    let s_off = (f * ch + c) * src_bps;
-                    let d_off = f * drv_bps;
-                    dst[d_off..d_off + drv_bps]
-                        .copy_from_slice(&self.scratch[s_off..s_off + drv_bps]);
-                }
-            } else if src_bps == 2 && drv_bps == 4 {
-                // Left-justify 16-bit integer into 32-bit ASIO LSB integer container losslessly
-                for f in 0..valid_frames {
-                    let s_off = (f * ch + c) * 2;
-                    let s16 = i16::from_le_bytes([self.scratch[s_off], self.scratch[s_off + 1]]);
-                    let s32 = (s16 as i32) << 16;
-                    dst[f * 4..(f + 1) * 4].copy_from_slice(&s32.to_le_bytes());
-                }
-            } else if src_bps == 3 && drv_bps == 4 {
-                for f in 0..valid_frames {
-                    let s_off = (f * ch + c) * 3;
-                    let bytes = [
-                        0u8,
-                        self.scratch[s_off],
-                        self.scratch[s_off + 1],
-                        self.scratch[s_off + 2],
-                    ];
-                    dst[f * 4..(f + 1) * 4].copy_from_slice(&bytes);
-                }
-            }
-            if valid_frames < frames_in_callback_bytes {
-                let mut ch_phase = tail_start_phase;
-                fill_asio_buffer_silence(
-                    &mut dst[valid_frames * drv_bps..],
-                    self.wire,
-                    drv_bps,
-                    &mut ch_phase,
-                );
-                tail_next_phase = ch_phase;
-            }
-        }
-        if valid_frames < frames_in_callback_bytes {
-            self.dop_silence_phase = tail_next_phase;
-        }
-
+        self.write_interleaved_to_planar(channel_buffers, idx, aligned, frames_in_callback_bytes);
         true
     }
 }
@@ -1028,20 +1615,51 @@ struct ActiveAsioCallbackState {
     core: AsioRenderCore,
 }
 
-// ASIO double-buffer pointers come from the COM STA host thread and are exclusively guarded by ACTIVE_ASIO_SLOT.
+// ASIO double-buffer pointers come from the COM STA host thread; lifecycle is coordinated via
+// `ACTIVE_ASIO_PTR` + `ACTIVE_ASIO_IN_CALLBACK` with zero mutexes on the RT callback path.
 unsafe impl Send for ActiveAsioCallbackState {}
 unsafe impl Sync for ActiveAsioCallbackState {}
 
-static ACTIVE_ASIO_SLOT: Mutex<Option<ActiveAsioCallbackState>> = Mutex::new(None);
+static ACTIVE_ASIO_PTR: AtomicPtr<ActiveAsioCallbackState> = AtomicPtr::new(null_mut());
+static ACTIVE_ASIO_IN_CALLBACK: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_ASIO_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_ASIO_BUFFER_FRAMES: AtomicUsize = AtomicUsize::new(0);
 
-// Wait-free message atomics updated inside driver `asio_message` callback (never locks ACTIVE_ASIO_SLOT).
+fn clear_and_drop_active_asio_state() {
+    let old = ACTIVE_ASIO_PTR.swap(null_mut(), Ordering::AcqRel);
+    if !old.is_null() {
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while ACTIVE_ASIO_IN_CALLBACK.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        if ACTIVE_ASIO_IN_CALLBACK.load(Ordering::Acquire) == 0 {
+            unsafe {
+                drop(Box::from_raw(old));
+            }
+        }
+    }
+}
+
+// Wait-free message atomics updated inside driver `asio_message` / `sampleRateDidChange` callbacks (zero locks).
 static ASIO_MSG_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 static ASIO_MSG_RESET: AtomicBool = AtomicBool::new(false);
 static ASIO_MSG_RESYNC: AtomicBool = AtomicBool::new(false);
 static ASIO_MSG_LATENCIES_CHANGED: AtomicBool = AtomicBool::new(false);
 static ASIO_MSG_BUFFER_SIZE: AtomicI32 = AtomicI32::new(0);
+static ASIO_MSG_SAMPLE_RATE_HZ: AtomicU32 = AtomicU32::new(0);
+
+#[doc(hidden)]
+pub fn simulate_asio_sample_rate_changed(session_id: u64, s_rate: f64) {
+    ASIO_MSG_SESSION_ID.store(session_id, Ordering::Release);
+    unsafe {
+        asio_sample_rate_changed(s_rate);
+    }
+}
+
+#[doc(hidden)]
+pub fn read_asio_msg_sample_rate_hz() -> u32 {
+    ASIO_MSG_SAMPLE_RATE_HZ.load(Ordering::Acquire)
+}
 
 unsafe extern "C" fn asio_buffer_switch(double_buffer_index: i32, direct_process: i32) {
     asio_buffer_switch_impl(double_buffer_index, direct_process, None);
@@ -1053,12 +1671,15 @@ fn asio_buffer_switch_impl(
     time_info_pos: Option<(u64, u64)>,
 ) {
     let idx = if double_buffer_index == 0 { 0usize } else { 1usize };
-    let Ok(mut guard) = ACTIVE_ASIO_SLOT.lock() else {
+    ACTIVE_ASIO_IN_CALLBACK.fetch_add(1, Ordering::AcqRel);
+    let ptr = ACTIVE_ASIO_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        ACTIVE_ASIO_IN_CALLBACK.fetch_sub(1, Ordering::Release);
         return;
-    };
-    let Some(st) = guard.as_mut() else {
-        return;
-    };
+    }
+    // SAFETY: `ACTIVE_ASIO_PTR` is only reclaimed after `asio.stop()` AND
+    // `ACTIVE_ASIO_IN_CALLBACK == 0`, and ASIO drivers serialize `bufferSwitch` calls.
+    let st = unsafe { &mut *ptr };
 
     if let Some((pos, sys_ns)) = time_info_pos {
         st.core.signals.record_clock(pos, sys_ns);
@@ -1084,6 +1705,8 @@ fn asio_buffer_switch_impl(
             let _ = (vtbl.output_ready)(st.asio_raw as *mut c_void);
         }
     }
+
+    ACTIVE_ASIO_IN_CALLBACK.fetch_sub(1, Ordering::Release);
 }
 
 fn asio_sample_bytes(sample_type: i32) -> usize {
@@ -1096,7 +1719,11 @@ fn asio_sample_bytes(sample_type: i32) -> usize {
     }
 }
 
-unsafe extern "C" fn asio_sample_rate_changed(_s_rate: f64) {}
+unsafe extern "C" fn asio_sample_rate_changed(s_rate: f64) {
+    if s_rate.is_finite() && s_rate > 0.0 && s_rate <= u32::MAX as f64 {
+        ASIO_MSG_SAMPLE_RATE_HZ.store(s_rate.round() as u32, Ordering::Release);
+    }
+}
 
 unsafe extern "C" fn asio_message(
     selector: i32,
@@ -1183,6 +1810,149 @@ impl AsioNativeSession {
         session_id: u64,
         current_session_id: Arc<AtomicU64>,
     ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_controls(
+            driver_id,
+            sample_rate,
+            channels,
+            wire,
+            native_dsd,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            session_id,
+            current_session_id,
+            0,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_controls(
+        driver_id: Option<&str>,
+        sample_rate: u32,
+        channels: u16,
+        wire: WireSampleFormat,
+        native_dsd: bool,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_phase3_controls(
+            driver_id,
+            sample_rate,
+            channels,
+            wire,
+            native_dsd,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            session_id,
+            current_session_id,
+            startup_watermark_bytes,
+            fade_ctrl,
+            buffered_ms,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(RwLock::new(None)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            0,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_phase3_controls(
+        driver_id: Option<&str>,
+        sample_rate: u32,
+        channels: u16,
+        wire: WireSampleFormat,
+        native_dsd: bool,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+        device_lost: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
+        stall_timeout: Option<Duration>,
+    ) -> Result<Self, BackendError> {
+        Self::open_and_start_with_telemetry(
+            driver_id,
+            sample_rate,
+            channels,
+            wire,
+            native_dsd,
+            consumer,
+            verification,
+            frames_rendered,
+            nonzero_frames,
+            state_code,
+            eof_flag,
+            session_id,
+            current_session_id,
+            startup_watermark_bytes,
+            fade_ctrl,
+            buffered_ms,
+            Arc::new(AtomicU64::new(0)),
+            device_lost,
+            last_error,
+            format_mismatch_flag,
+            published_format_stamp,
+            expected_format_stamp,
+            stall_timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_and_start_with_telemetry(
+        driver_id: Option<&str>,
+        sample_rate: u32,
+        channels: u16,
+        wire: WireSampleFormat,
+        native_dsd: bool,
+        consumer: Consumer<u8>,
+        verification: AudioVerificationEngine,
+        frames_rendered: Arc<AtomicU64>,
+        nonzero_frames: Arc<AtomicU64>,
+        state_code: Arc<AtomicI32>,
+        eof_flag: Arc<AtomicBool>,
+        session_id: u64,
+        current_session_id: Arc<AtomicU64>,
+        startup_watermark_bytes: usize,
+        fade_ctrl: Option<Arc<AudioFadeControl>>,
+        buffered_ms: Option<Arc<AtomicU64>>,
+        underrun_count: Arc<AtomicU64>,
+        device_lost: Arc<AtomicBool>,
+        last_error: Arc<RwLock<Option<String>>>,
+        format_mismatch_flag: Arc<AtomicBool>,
+        published_format_stamp: Arc<AtomicU64>,
+        expected_format_stamp: u64,
+        stall_timeout: Option<Duration>,
+    ) -> Result<Self, BackendError> {
         let drivers = enumerate_asio_drivers(false);
         let chosen = if let Some(raw_target) = driver_id {
             let target = raw_target.strip_prefix("asio::").unwrap_or(raw_target);
@@ -1203,10 +1973,21 @@ impl AsioNativeSession {
 
         let paused = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
-        let signals = Arc::new(AsioCallbackSignals::new(sample_rate));
+        let signals = Arc::new(
+            AsioCallbackSignals::new(sample_rate)
+                .with_underrun_counter(underrun_count)
+                .with_phase3_guards(
+                    device_lost,
+                    last_error,
+                    format_mismatch_flag,
+                    published_format_stamp,
+                    expected_format_stamp,
+                ),
+        );
         let th_paused = Arc::clone(&paused);
         let th_stopped = Arc::clone(&stopped);
         let th_signals = Arc::clone(&signals);
+        let watchdog_timeout = stall_timeout.unwrap_or(AsioCallbackWatchdog::DEFAULT_STALL_TIMEOUT);
 
         let (ack_tx, ack_rx) = mpsc::sync_channel::<Result<(String, u32), BackendError>>(1);
 
@@ -1335,6 +2116,7 @@ impl AsioNativeSession {
                 ASIO_MSG_RESYNC.store(false, Ordering::Release);
                 ASIO_MSG_LATENCIES_CHANGED.store(false, Ordering::Release);
                 ASIO_MSG_BUFFER_SIZE.store(0, Ordering::Release);
+                ASIO_MSG_SAMPLE_RATE_HZ.store(0, Ordering::Release);
                 ASIO_MSG_SESSION_ID.store(session_id, Ordering::Release);
 
                 if unsafe {
@@ -1369,6 +2151,7 @@ impl AsioNativeSession {
                     .map(|bi| [bi.buffers[0] as *mut u8, bi.buffers[1] as *mut u8])
                     .collect();
 
+                let sta_fade_ctrl = fade_ctrl.clone();
                 let core = AsioRenderCore::new(
                     consumer,
                     verification,
@@ -1386,38 +2169,49 @@ impl AsioNativeSession {
                     sample_rate,
                     ch_info.sample_type,
                     wire,
-                );
+                )
+                .with_phase2_controls(startup_watermark_bytes, fade_ctrl, buffered_ms);
 
                 let vtbl_raw = unsafe { *asio.0.as_ptr() } as usize;
                 ACTIVE_ASIO_SESSION_ID.store(session_id, Ordering::SeqCst);
-                if let Ok(mut slot) = ACTIVE_ASIO_SLOT.lock() {
-                    *slot = Some(ActiveAsioCallbackState {
-                        asio_raw: asio.raw() as usize,
-                        vtbl_raw,
-                        _buffer_infos: buffer_infos,
-                        channel_buffers,
-                        core,
-                    });
-                }
+                clear_and_drop_active_asio_state();
+                let boxed = Box::into_raw(Box::new(ActiveAsioCallbackState {
+                    asio_raw: asio.raw() as usize,
+                    vtbl_raw,
+                    _buffer_infos: buffer_infos,
+                    channel_buffers,
+                    core,
+                }));
+                ACTIVE_ASIO_PTR.store(boxed, Ordering::Release);
 
                 if unsafe { (asio.vtbl().start)(asio.raw()) } != ASIO_OK {
                     let err = unsafe { asio.driver_error() };
                     let _ = ack_tx.send(Err(BackendError::DriverError(format!(
                         "ASIO start failed: {err}"
                     ))));
-                    if let Ok(mut slot) = ACTIVE_ASIO_SLOT.lock() {
-                        *slot = None;
-                    }
+                    clear_and_drop_active_asio_state();
                     let _ = unsafe { (asio.vtbl().dispose_buffers)(asio.raw()) };
                     return;
                 }
 
                 let _ = ack_tx.send(Ok((chosen.name.clone(), buf_frames as u32)));
 
+                let mut watchdog = AsioCallbackWatchdog::new(
+                    watchdog_timeout,
+                    th_signals.callback_count.load(Ordering::Relaxed),
+                );
+
                 while !th_stopped.load(Ordering::Acquire)
-                    && current_session_id.load(Ordering::Relaxed) == session_id
+                    && (current_session_id.load(Ordering::Relaxed) == session_id
+                        || sta_fade_ctrl.as_ref().is_some_and(|fc| {
+                            fc.target() == FadeTarget::StopFadeOut && !fc.is_fade_out_done()
+                        }))
                 {
                     if ASIO_MSG_SESSION_ID.load(Ordering::Acquire) == session_id {
+                        let drv_sr = ASIO_MSG_SAMPLE_RATE_HZ.load(Ordering::Acquire);
+                        if drv_sr != 0 && drv_sr != sample_rate {
+                            th_signals.on_sample_rate_changed(drv_sr as f64);
+                        }
                         if ASIO_MSG_RESET.swap(false, Ordering::AcqRel) {
                             let req_buf = ASIO_MSG_BUFFER_SIZE.load(Ordering::Acquire);
                             th_signals
@@ -1465,14 +2259,45 @@ impl AsioNativeSession {
                             }
                         }
                     }
+
+                    let watchdog_active = !th_paused.load(Ordering::Acquire)
+                        && !th_stopped.load(Ordering::Acquire)
+                        && !th_signals.eof_drained.load(Ordering::Acquire);
+                    if watchdog.check(
+                        Instant::now(),
+                        watchdog_active,
+                        th_signals.callback_count.load(Ordering::Relaxed),
+                    ) {
+                        th_signals.device_lost.store(true, Ordering::SeqCst);
+                        if let Ok(mut g) = th_signals.last_error.write() {
+                            *g = Some(
+                                "ASIO driver callback stalled / DAC disconnected".to_string(),
+                            );
+                        }
+                        let cur_state = state_code.load(Ordering::Acquire);
+                        if cur_state == 2 || cur_state == 3 {
+                            let _ = state_code.compare_exchange(
+                                cur_state,
+                                4,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            );
+                        }
+                        th_stopped.store(true, Ordering::Release);
+                        break;
+                    }
                     thread::sleep(Duration::from_millis(10));
                 }
 
-                let _ = unsafe { (asio.vtbl().stop)(asio.raw()) };
-                if let Ok(mut slot) = ACTIVE_ASIO_SLOT.lock() {
-                    *slot = None;
+                if th_signals.device_lost.load(Ordering::Acquire) {
+                    clear_and_drop_active_asio_state();
+                    let _ = unsafe { (asio.vtbl().stop)(asio.raw()) };
+                    let _ = unsafe { (asio.vtbl().dispose_buffers)(asio.raw()) };
+                } else {
+                    let _ = unsafe { (asio.vtbl().stop)(asio.raw()) };
+                    clear_and_drop_active_asio_state();
+                    let _ = unsafe { (asio.vtbl().dispose_buffers)(asio.raw()) };
                 }
-                let _ = unsafe { (asio.vtbl().dispose_buffers)(asio.raw()) };
             })
             .map_err(|e| BackendError::DriverError(format!("Spawn ASIO STA thread failed: {e}")))?;
 
@@ -1559,6 +2384,10 @@ impl AsioNativeSession {
         self.signals.device_lost.load(Ordering::Acquire)
     }
 
+    pub fn is_format_mismatch(&self) -> bool {
+        self.signals.is_format_mismatch()
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.signals.last_error.read().ok().and_then(|g| g.clone())
     }
@@ -1571,19 +2400,42 @@ impl AsioNativeSession {
         self.signals.eof_target_state.store(code, Ordering::SeqCst);
     }
 
-    pub fn stop(mut self) {
+    fn shutdown_internal(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
-            let _ = h.join();
+            if self.is_device_lost() {
+                if !crate::backend::wasapi_win::join_handle_bounded(h, Duration::from_millis(500)) {
+                    tracing::warn!(
+                        "ASIO STA thread wedged after device_lost; detaching after 500ms"
+                    );
+                }
+            } else {
+                let mut lost_deadline: Option<Instant> = None;
+                while !h.is_finished() {
+                    if self.is_device_lost() {
+                        let dl = *lost_deadline
+                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(500));
+                        if Instant::now() >= dl {
+                            tracing::warn!(
+                                "ASIO STA thread lost device during shutdown; detaching after 500ms"
+                            );
+                            return;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let _ = h.join();
+            }
         }
+    }
+
+    pub fn stop(mut self) {
+        self.shutdown_internal();
     }
 }
 
 impl Drop for AsioNativeSession {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+        self.shutdown_internal();
     }
 }

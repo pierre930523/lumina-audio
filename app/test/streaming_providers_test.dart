@@ -17,6 +17,22 @@ import 'package:lumina_app/services/streaming/providers/youtube_music_provider.d
 import 'package:lumina_app/services/streaming/secure_credential_store.dart';
 import 'package:lumina_app/services/streaming/streaming_manager.dart';
 import 'package:lumina_app/services/streaming/streaming_provider.dart';
+import 'package:lumina_app/services/streaming/yt_dlp_service.dart';
+
+class _UnavailableYtDlpService extends YtDlpService {
+  @override
+  Future<YtDlpResolvedStream> resolveVideo(
+    String videoId, {
+    required int playRequestId,
+    String? cookiesFilePath,
+    bool bypassCache = false,
+    String? formatSelector,
+    String? extractorArgs,
+    String? remoteComponents,
+  }) async {
+    throw const YtDlpException('yt-dlp unavailable in unit test');
+  }
+}
 
 typedef RouteHandler = FutureOr<void> Function(
   HttpRequest req,
@@ -287,7 +303,7 @@ void main() {
                   'contents': [
                     {
                       'musicResponsiveListItemRenderer': {
-                        'playlistItemData': {'videoId': 'vid_ytm_1'},
+                        'playlistItemData': {'videoId': 'vid_ytm_001'},
                         'flexColumns': [
                           {
                             'musicResponsiveListItemFlexColumnRenderer': {
@@ -429,7 +445,7 @@ void main() {
                 'contents': [
                   {
                     'musicResponsiveListItemRenderer': {
-                      'playlistItemData': {'videoId': 'vid_search_9'},
+                      'playlistItemData': {'videoId': 'vid_srch_09'},
                       'flexColumns': [
                         {
                           'musicResponsiveListItemFlexColumnRenderer': {
@@ -504,12 +520,15 @@ void main() {
       addTearDown(() => server.close(force: true));
 
       final store = MemorySecureCredentialStore();
+      final offlineYtDlp = _UnavailableYtDlpService();
+      addTearDown(offlineYtDlp.dispose);
       DateTime fixedClock() =>
           DateTime.fromMillisecondsSinceEpoch(1700000000000);
       final provider = YouTubeMusicProvider(
         credentialStore: store,
         baseUrl: 'http://127.0.0.1:${server.port}',
         clock: fixedClock,
+        ytDlpService: offlineYtDlp,
       );
 
       // Reject cookie missing SAPISID.
@@ -562,7 +581,7 @@ void main() {
 
       final catalog = await provider.syncLibrary();
       expect(catalog.tracks.length, 1);
-      expect(catalog.tracks.first.id, 'ytm:vid_ytm_1');
+      expect(catalog.tracks.first.id, 'ytm:vid_ytm_001');
       expect(catalog.tracks.first.title, 'Night Drive');
       expect(catalog.tracks.first.artist, 'Midnight Synth');
       expect(
@@ -573,16 +592,17 @@ void main() {
       expect(catalog.albums.single.title, 'Neon Horizon');
 
       final playlistTracks = await provider.fetchPlaylistTracks('VL_FAVS');
-      expect(playlistTracks.single.id, 'ytm:vid_ytm_1');
+      expect(playlistTracks.single.id, 'ytm:vid_ytm_001');
 
       final searchRes = await provider.search('Search');
-      expect(searchRes.tracks.single.id, 'ytm:vid_search_9');
+      expect(searchRes.tracks.single.id, 'ytm:vid_srch_09');
 
+      // Prefers Symphonia-native M4A/AAC (itag 140) over Opus (itag 251).
       final stream = await provider.resolveStream(catalog.tracks.first);
-      expect(stream.url, 'https://rr1.example.com/audio_251.webm');
-      expect(stream.format.codec, AudioCodec.opus);
-      expect(stream.format.sampleRateHz, 48000);
-      expect(stream.hintExtension, 'webm');
+      expect(stream.url, 'https://rr1.example.com/audio_140.m4a');
+      expect(stream.format.codec, AudioCodec.aac);
+      expect(stream.format.sampleRateHz, 44100);
+      expect(stream.hintExtension, 'm4a');
 
       returnCipheredOnly = true;
       await expectLater(
@@ -847,7 +867,11 @@ void main() {
           if (returnDashDrm) {
             return _sendJson(req.response, HttpStatus.ok, {
               'manifestMimeType': 'application/dash+xml',
-              'manifest': base64Encode(utf8.encode('<MPD></MPD>')),
+              'manifest': base64Encode(
+                utf8.encode(
+                  '<MPD><Period><AdaptationSet><ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/></AdaptationSet></Period></MPD>',
+                ),
+              ),
             });
           }
           final btsManifest = jsonEncode({
@@ -936,6 +960,320 @@ void main() {
       );
       expect(provider.authState, StreamingAuthState.error);
       expect(provider.lastError, contains('Token expired'));
+    });
+
+    test(
+        'access_token mode strips Bearer/Authorization prefixes, rejects empty, persists normalized token, and auto-refreshes expired JWT with refresh_token',
+        () async {
+      final seenSessionAuths = <String?>[];
+      final refreshForms = <Map<String, String>>[];
+      var rejectAuth = false;
+
+      String makeJwt(int expSec) {
+        final header = base64Url
+            .encode(utf8.encode('{"alg":"HS256","typ":"JWT"}'))
+            .replaceAll('=', '');
+        final payload = base64Url
+            .encode(utf8.encode('{"sub":"778899","exp":$expSec}'))
+            .replaceAll('=', '');
+        return '$header.$payload.sig';
+      }
+
+      final server = await _startTestServer((req, body) async {
+        final path = req.uri.path;
+        if (path == '/v1/oauth2/token') {
+          final form = Uri.splitQueryString(body);
+          refreshForms.add(form);
+          if (form['grant_type'] == 'refresh_token' &&
+              form['refresh_token'] == 'tidal_ref_jwt_ok' &&
+              form['client_id'] == 'lumina_cid') {
+            return _sendJson(req.response, HttpStatus.ok, {
+              'access_token': 'tidal_refreshed_from_jwt',
+              'refresh_token': 'tidal_ref_rotated',
+              'expires_in': 3600,
+              'user_id': 778899,
+            });
+          }
+          return _sendJson(req.response, HttpStatus.badRequest, {
+            'error': 'invalid_grant',
+          });
+        }
+        if (path == '/sessions') {
+          final auth = req.headers.value('authorization');
+          seenSessionAuths.add(auth);
+          if (rejectAuth) {
+            return _sendJson(req.response, HttpStatus.unauthorized, {
+              'userMessage': 'Rejected live token',
+            });
+          }
+          if (auth == 'Bearer tidal_plain_tok' ||
+              auth == 'Bearer tidal_refreshed_from_jwt' ||
+              auth?.startsWith('Bearer eyJ') == true) {
+            return _sendJson(req.response, HttpStatus.ok, {
+              'sessionId': 'sess-tok',
+              'userId': 778899,
+              'countryCode': 'TW',
+            });
+          }
+          return _sendJson(req.response, HttpStatus.unauthorized, {
+            'userMessage': 'Invalid token',
+          });
+        }
+        if (path == '/users/778899') {
+          return _sendJson(req.response, HttpStatus.ok, {
+            'id': 778899,
+            'username': 'Token User',
+          });
+        }
+        if (path == '/users/778899/subscription') {
+          return _sendJson(req.response, HttpStatus.ok, {
+            'subscription': {'type': 'HIFI_PLUS'},
+            'highestSoundQuality': 'HI_RES_LOSSLESS',
+          });
+        }
+        return _sendJson(req.response, HttpStatus.notFound, {});
+      });
+      addTearDown(() => server.close(force: true));
+
+      final base = 'http://127.0.0.1:${server.port}';
+      final fixedNow = DateTime.utc(2026, 11, 23, 0, 0, 0);
+      final store = MemorySecureCredentialStore();
+      final provider = TidalProvider(
+        credentialStore: store,
+        authBaseUrl: base,
+        tokenBaseUrl: base,
+        apiBaseUrl: base,
+        clock: () => fixedNow,
+      );
+
+      // Rejects empty / prefix-only input.
+      await expectLater(
+        provider.authenticate({'mode': 'access_token', 'access_token': '   '}),
+        throwsA(isA<StreamingException>()),
+      );
+      await expectLater(
+        provider.authenticate({
+          'mode': 'access_token',
+          'access_token': 'Bearer   ',
+        }),
+        throwsA(isA<StreamingException>()),
+      );
+      await expectLater(
+        provider.authenticate({
+          'mode': 'access_token',
+          'access_token': 'Authorization: Bearer   ',
+        }),
+        throwsA(isA<StreamingException>()),
+      );
+
+      // Strips Bearer prefix and persists raw normalized token.
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': 'Bearer tidal_plain_tok',
+      });
+      expect(provider.authState, StreamingAuthState.connected);
+      expect(seenSessionAuths.last, 'Bearer tidal_plain_tok');
+      final persisted1 = jsonDecode((await store.read('streaming:tidal'))!)
+          as Map<String, dynamic>;
+      expect(persisted1['access_token'], 'tidal_plain_tok');
+
+      // Strips Authorization: Bearer prefix too.
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': 'Authorization: Bearer tidal_plain_tok',
+      });
+      expect(seenSessionAuths.last, 'Bearer tidal_plain_tok');
+
+      // Future JWT without refresh_token sets expiresAt from JWT exp.
+      final futureExp =
+          fixedNow.add(const Duration(hours: 2)).millisecondsSinceEpoch ~/ 1000;
+      final futureJwt = makeJwt(futureExp);
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': futureJwt,
+      });
+      expect(provider.accountInfo?.expiresAt, isNotNull);
+      expect(
+        provider.accountInfo!.expiresAt!.millisecondsSinceEpoch,
+        futureExp * 1000,
+      );
+
+      // Expired JWT without refresh_token still hits /sessions live so server decides.
+      final expiredExp =
+          fixedNow.subtract(const Duration(minutes: 10)).millisecondsSinceEpoch ~/
+              1000;
+      final expiredJwt = makeJwt(expiredExp);
+      rejectAuth = true;
+      await expectLater(
+        provider.authenticate({
+          'mode': 'access_token',
+          'access_token': expiredJwt,
+        }),
+        throwsA(
+          predicate<StreamingException>(
+            (e) => e.message.contains('Rejected live token'),
+          ),
+        ),
+      );
+      expect(seenSessionAuths.last, 'Bearer $expiredJwt');
+      rejectAuth = false;
+
+      // Expired JWT + refresh_token + client_id refreshes automatically before /sessions.
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': 'Bearer $expiredJwt',
+        'refresh_token': 'tidal_ref_jwt_ok',
+        'client_id': 'lumina_cid',
+      });
+      expect(provider.authState, StreamingAuthState.connected);
+      expect(refreshForms.length, 1);
+      expect(refreshForms.single['grant_type'], 'refresh_token');
+      expect(refreshForms.single['refresh_token'], 'tidal_ref_jwt_ok');
+      expect(refreshForms.single['client_id'], 'lumina_cid');
+      expect(seenSessionAuths.last, 'Bearer tidal_refreshed_from_jwt');
+
+      final persisted2 = jsonDecode((await store.read('streaming:tidal'))!)
+          as Map<String, dynamic>;
+      expect(persisted2['access_token'], 'tidal_refreshed_from_jwt');
+      expect(persisted2['refresh_token'], 'tidal_ref_rotated');
+      expect(persisted2['client_id'], 'lumina_cid');
+    });
+
+    test(
+        'supports pure refresh_token login with BYOK client_id/client_secret, detects o2_refresh JWTs, and remembers BYOK across logout',
+        () async {
+      final tokenForms = <Map<String, String>>[];
+      var sessionCalls = 0;
+
+      String makeRefreshJwt({required int cid}) {
+        final header = base64Url
+            .encode(utf8.encode('{"alg":"ES512"}'))
+            .replaceAll('=', '');
+        final payload = base64Url
+            .encode(utf8.encode('{"type":"o2_refresh","uid":778899,"cid":$cid}'))
+            .replaceAll('=', '');
+        return '$header.$payload.sig';
+      }
+
+      final server = await _startTestServer((req, body) async {
+        final path = req.uri.path;
+        if (path == '/v1/oauth2/token') {
+          final form = Uri.splitQueryString(body);
+          tokenForms.add(form);
+          if (form['grant_type'] == 'refresh_token' &&
+              form['client_id'] == 'mock_byok_cid' &&
+              form['client_secret'] == 'mock_byok_csec' &&
+              (form['refresh_token'] == 'mock_pure_rt' ||
+                  form['refresh_token']!.startsWith('eyJ'))) {
+            // Simulate TIDAL returning access_token without a rotated refresh_token.
+            return _sendJson(req.response, HttpStatus.ok, {
+              'access_token': 'tidal_exchanged_acc',
+              'token_type': 'Bearer',
+              'expires_in': 14400,
+              'user_id': 778899,
+            });
+          }
+          return _sendJson(req.response, HttpStatus.unauthorized, {
+            'error': 'invalid_client',
+            'error_description': 'This token was issued to another client',
+          });
+        }
+        if (path == '/sessions') {
+          sessionCalls++;
+          if (req.headers.value('authorization') !=
+              'Bearer tidal_exchanged_acc') {
+            return _sendJson(req.response, HttpStatus.unauthorized, {
+              'userMessage': 'Expected OAUTH2_ACCESS_TOKEN',
+            });
+          }
+          return _sendJson(req.response, HttpStatus.ok, {
+            'userId': 778899,
+            'countryCode': 'TW',
+          });
+        }
+        if (path == '/users/778899') {
+          return _sendJson(req.response, HttpStatus.ok, {
+            'id': 778899,
+            'username': 'Mock Refresh User',
+          });
+        }
+        if (path == '/users/778899/subscription') {
+          return _sendJson(req.response, HttpStatus.ok, {
+            'subscription': {'type': 'PREMIUM'},
+            'highestSoundQuality': 'HI_RES',
+          });
+        }
+        return _sendJson(req.response, HttpStatus.notFound, {});
+      });
+      addTearDown(() => server.close(force: true));
+
+      final base = 'http://127.0.0.1:${server.port}';
+      final store = MemorySecureCredentialStore();
+      final provider = TidalProvider(
+        credentialStore: store,
+        authBaseUrl: base,
+        tokenBaseUrl: base,
+        apiBaseUrl: base,
+      );
+
+      final refreshJwt = makeRefreshJwt(cid: 13319);
+
+      // 1. Pasting o2_refresh JWT into access_token without client_id fails fast locally with cid hint.
+      await expectLater(
+        provider.authenticate({'mode': 'access_token', 'access_token': refreshJwt}),
+        throwsA(
+          predicate<StreamingException>(
+            (e) => e.message.contains('Refresh Token') && e.message.contains('cid=13319'),
+          ),
+        ),
+      );
+      expect(sessionCalls, 0);
+
+      // 2. Pure refresh_token mode (empty access_token) with client_id + client_secret + remember_byok.
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': '',
+        'refresh_token': 'mock_pure_rt',
+        'client_id': 'mock_byok_cid',
+        'client_secret': 'mock_byok_csec',
+        'remember_byok': true,
+      });
+      expect(provider.authState, StreamingAuthState.connected);
+      expect(provider.accountInfo?.displayName, 'Mock Refresh User');
+      expect(tokenForms.last['grant_type'], 'refresh_token');
+      expect(tokenForms.last['client_id'], 'mock_byok_cid');
+      expect(tokenForms.last['client_secret'], 'mock_byok_csec');
+
+      // Preserved original refresh_token when server didn't rotate it, and saved BYOK separately.
+      final sessionSaved = jsonDecode((await store.read('streaming:tidal'))!)
+          as Map<String, dynamic>;
+      expect(sessionSaved['access_token'], 'tidal_exchanged_acc');
+      expect(sessionSaved['refresh_token'], 'mock_pure_rt');
+
+      final byokSaved = jsonDecode(
+        (await store.read(TidalProvider.byokCredentialStorageKey))!,
+      ) as Map<String, dynamic>;
+      expect(byokSaved['client_id'], 'mock_byok_cid');
+      expect(byokSaved['client_secret'], 'mock_byok_csec');
+
+      // 3. Logout clears streaming:tidal session but retains streaming:tidal:byok.
+      await provider.logout();
+      expect(await store.read('streaming:tidal'), isNull);
+      expect(await store.read(TidalProvider.byokCredentialStorageKey), isNotNull);
+
+      // 4. Subsequent o2_refresh JWT pasted in access_token without re-passing client_id uses remembered BYOK.
+      await provider.authenticate({
+        'mode': 'access_token',
+        'access_token': refreshJwt,
+      });
+      expect(provider.authState, StreamingAuthState.connected);
+      expect(tokenForms.last['refresh_token'], refreshJwt);
+      expect(tokenForms.last['client_id'], 'mock_byok_cid');
+      expect(tokenForms.last['client_secret'], 'mock_byok_csec');
+
+      // 5. clearRememberedByok deletes the remembered BYOK key.
+      await provider.clearRememberedByok();
+      expect(await store.read(TidalProvider.byokCredentialStorageKey), isNull);
     });
   });
 
@@ -1648,6 +1986,11 @@ void main() {
           'qobuz': QobuzProvider(
             credentialStore: store,
             baseUrl: 'http://127.0.0.1:${server.port}',
+          ),
+          'youtube_music': YouTubeMusicProvider(
+            credentialStore: store,
+            baseUrl: 'http://127.0.0.1:${server.port}',
+            oauthBaseUrl: 'http://127.0.0.1:${server.port}',
           ),
         },
       );

@@ -12,6 +12,7 @@ import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 // ─── Standalone Album Detail Page ─────────────────────────────────────────────
@@ -588,6 +589,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         audioService: widget.audioService,
         libraryCache: widget.libraryCache,
         fullResolution: true,
+        coverTargetSize: 1200,
         borderRadius: BorderRadius.circular(12),
         boxShadow: const [
           BoxShadow(
@@ -847,24 +849,38 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                   itemCount: trackEntries.length,
                   itemBuilder: (context, i) {
                     final entry = trackEntries[i];
+                    final isStreamingVersion =
+                        selectedVersion != null &&
+                        selectedVersion.provider != 'local';
                     final row = RepaintBoundary(
-                      child: _AlbumTrackRow(
-                        key: Key('album_track_$i'),
-                        index: i,
-                        track: entry.track,
-                        displayNumber: entry.displayNumber,
-                        artistName: detail.artistName,
-                        albumTitle: detail.title,
-                        playbackListenable: _playbackNotifier,
-                        onPlay: () => _playTrack(
-                          detail,
-                          title: entry.track.title,
-                          versionTrack: entry.track,
+                      child: TrackHoverPrefetch(
+                        enabled: isStreamingVersion,
+                        trackIdentity: entry.track.id,
+                        trackBuilder: isStreamingVersion
+                            ? () => _toTrackInfo(
+                                detail,
+                                selectedVersion,
+                                entry.track,
+                              )
+                            : null,
+                        child: _AlbumTrackRow(
+                          key: Key('album_track_$i'),
+                          index: i,
+                          track: entry.track,
+                          displayNumber: entry.displayNumber,
+                          artistName: detail.artistName,
+                          albumTitle: detail.title,
+                          playbackListenable: _playbackNotifier,
+                          onPlay: () => _playTrack(
+                            detail,
+                            title: entry.track.title,
+                            versionTrack: entry.track,
+                          ),
+                          onAddToQueue: () =>
+                              _addTrackToQueue(detail, entry.track),
+                          onOpenArtist: () =>
+                              _handleOpenArtist(detail.artistName, detail),
                         ),
-                        onAddToQueue: () =>
-                            _addTrackToQueue(detail, entry.track),
-                        onOpenArtist: () =>
-                            _handleOpenArtist(detail.artistName, detail),
                       ),
                     );
                     if (!entry.showDiscHeader) {

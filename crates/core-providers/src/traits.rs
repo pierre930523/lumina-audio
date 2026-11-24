@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use async_trait::async_trait;
-use core_types::{AudioFormat, CanonicalAlbum, ProviderKind, TrackSource};
+use core_types::{
+    AudioFormat, CanonicalAlbum, ProviderKind, StreamKey, StreamProviderCapabilities,
+    StreamSourceSpec, TrackSource,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
@@ -18,6 +21,8 @@ pub struct ProviderCapabilities {
     pub supports_catalog_search: bool,
     pub supports_stream_resolution: bool,
     pub supports_favorites_sync: bool,
+    #[serde(default)]
+    pub streaming: StreamProviderCapabilities,
 }
 
 impl ProviderCapabilities {
@@ -31,6 +36,7 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            streaming: StreamProviderCapabilities::local(),
         }
     }
 
@@ -44,6 +50,7 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            streaming: StreamProviderCapabilities::default(),
         }
     }
 
@@ -57,6 +64,7 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            streaming: StreamProviderCapabilities::default(),
         }
     }
 
@@ -70,6 +78,7 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            streaming: StreamProviderCapabilities::qobuz(),
         }
     }
 
@@ -83,6 +92,7 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            streaming: StreamProviderCapabilities::tidal(),
         }
     }
 
@@ -96,6 +106,7 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            streaming: StreamProviderCapabilities::deezer(),
         }
     }
 }
@@ -284,4 +295,42 @@ pub trait MusicProvider: Send + Sync {
     async fn last_sync_album_metadata(&self) -> HashMap<String, AlbumSyncMetadata> {
         HashMap::new()
     }
+}
+
+/// Additive stream resolution contract keyed by composite [`StreamKey`].
+#[async_trait]
+pub trait StreamResolver: Send + Sync {
+    fn provider_id(&self) -> &'static str;
+    fn capabilities(&self) -> StreamProviderCapabilities;
+    async fn resolve_source(&self, key: &StreamKey) -> Result<StreamSourceSpec, ProviderError>;
+}
+
+pub(crate) fn validate_stream_key(expected_provider: &str, key: &StreamKey) -> Result<(), ProviderError> {
+    if !key.provider_id.eq_ignore_ascii_case(expected_provider) {
+        return Err(ProviderError::UnsupportedFormat(format!(
+            "Cannot resolve '{}' stream key on '{}' resolver",
+            key.provider_id, expected_provider
+        )));
+    }
+    if key.track_id.trim().is_empty() {
+        return Err(ProviderError::track_not_found(expected_provider, &key.track_id));
+    }
+    Ok(())
+}
+
+pub(crate) fn extract_expire_at_from_url(raw_url: &str) -> Option<u64> {
+    let parsed = url::Url::parse(raw_url).ok()?;
+    for (k, v) in parsed.query_pairs() {
+        if k.eq_ignore_ascii_case("expire")
+            || k.eq_ignore_ascii_case("expires")
+            || k.eq_ignore_ascii_case("exp")
+        {
+            if let Ok(ts) = v.trim().parse::<u64>() {
+                if ts >= 1_000_000_000 {
+                    return Some(ts);
+                }
+            }
+        }
+    }
+    None
 }

@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 
+#include "external_music_host.h"
 #include "webview_auth_window.h"
 #include "win32_window.h"
 
@@ -21,6 +22,8 @@ class FlutterWindow : public Win32Window {
   static constexpr UINT kTrayCallbackMessage = WM_APP + 101;
   static constexpr UINT kForceDestroyMessage = WM_APP + 102;
   static constexpr UINT kWebViewAuthClosedMessage = WM_APP + 103;
+  static constexpr UINT kDeferredRedrawMessage = WM_APP + 104;
+  static constexpr UINT_PTR kRestoreRedrawTimerId = 3001;
   static constexpr UINT kTrayMenuShow = 2001;
   static constexpr UINT kTrayMenuPlayPause = 2002;
   static constexpr UINT kTrayMenuPrev = 2003;
@@ -36,11 +39,17 @@ class FlutterWindow : public Win32Window {
   bool OnCreate() override;
   void OnDestroy() override;
   void OnDisplayOrDpiChanged() override;
+  void OnWindowMinimized() override;
+  void OnWindowRestored(bool from_minimized, bool is_maximized) override;
+  void OnWindowMaximizeChanged(bool is_maximized) override;
+  void OnWindowFocusChanged(bool focused) override;
+  void OnWindowShown() override;
   bool OnWindowCloseRequested() override;
   LRESULT MessageHandler(HWND window, UINT const message, WPARAM const wparam,
                          LPARAM const lparam) noexcept override;
 
  private:
+  void RefreshFlutterSurface(bool schedule_deferred_recovery);
   void InitTray();
   void UpdateTray(const std::string& tooltip_utf8,
                   const std::string& now_playing_label_utf8,
@@ -57,6 +66,11 @@ class FlutterWindow : public Win32Window {
 
   // Window management method channel.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> window_channel_;
+
+  // External Apple Music playback method channel and hidden WebView2 host.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      external_playback_channel_;
+  std::unique_ptr<ExternalMusicHost> external_music_host_;
 
   // Native Win32 system tray state.
   bool tray_active_ = false;

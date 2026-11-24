@@ -9,13 +9,14 @@ import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
+import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
 import 'audio_service.dart';
 import 'per_device_playback_tracker.dart';
 import 'playback_persistence_service.dart';
 import 'server_audio_service.dart';
 
-class MockAudioService implements AudioService {
+class MockAudioService implements AudioService, DualDeckAudioService {
   final StreamController<PlaybackState> _stateController =
       StreamController<PlaybackState>.broadcast();
   final StreamController<SignalPath> _signalPathController =
@@ -28,6 +29,34 @@ class MockAudioService implements AudioService {
   late final List<TrackInfo> _queue;
   late final List<LyricLine> _lyrics;
   int _currentIndex = 0;
+  int _activeEpoch = 0;
+  StreamSourceSpec? _lastSourceSpec;
+  TrackInfo? _standbyTrack;
+  StreamSourceSpec? _standbySpec;
+  int _standbyEpoch = 0;
+  bool _standbyReady = false;
+
+  @visibleForTesting
+  int get activeEpoch => _activeEpoch;
+
+  @visibleForTesting
+  StreamSourceSpec? get lastSourceSpec => _lastSourceSpec;
+
+  @visibleForTesting
+  TrackInfo? get standbyTrack => _standbyTrack;
+
+  @visibleForTesting
+  StreamSourceSpec? get standbySpec => _standbySpec;
+
+  @visibleForTesting
+  int get standbyEpoch => _standbyEpoch;
+
+  void _clearStandby() {
+    _standbyTrack = null;
+    _standbySpec = null;
+    _standbyEpoch = 0;
+    _standbyReady = false;
+  }
   final PerDevicePlaybackTracker _tracker = PerDevicePlaybackTracker();
   bool _dspBypassed = false;
   bool _strictBitPerfect = false;
@@ -44,6 +73,7 @@ class MockAudioService implements AudioService {
   int _preferredBufferFrames = 512;
   bool _needsLoadOnResume = false;
   StreamingTrackHandler? _streamingTrackHandler;
+  VoidCallback? _playbackInterruptHandler;
   final Map<String, String> _userCovers = {};
   final Map<String, String> _userLyrics = {};
 
@@ -463,6 +493,11 @@ class MockAudioService implements AudioService {
   }
 
   @override
+  void setPlaybackInterruptHandler(VoidCallback? handler) {
+    _playbackInterruptHandler = handler;
+  }
+
+  @override
   void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {
     if (queue != null && queue.isNotEmpty) {
       _queue
@@ -503,6 +538,7 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> cancelPendingPlayback() async {
+    _clearStandby();
     if (_state.status == PlaybackStatus.loading) {
       _emitState(
         _state.copyWith(
@@ -534,8 +570,12 @@ class MockAudioService implements AudioService {
         return;
       }
     }
+    _clearStandby();
     _needsLoadOnResume = false;
     if (track != null) {
+      if (!AudioService.isStreamingTrackId(track.id)) {
+        _playbackInterruptHandler?.call();
+      }
       final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
       if (idx >= 0) {
         _currentIndex = idx;
@@ -565,6 +605,7 @@ class MockAudioService implements AudioService {
     Map<String, String> headers = const {},
     String? hintExtension,
   }) async {
+    _clearStandby();
     final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
     if (idx >= 0) {
       _currentIndex = idx;
@@ -592,12 +633,124 @@ class MockAudioService implements AudioService {
     Map<String, String> headers = const {},
     String? hintExtension,
     required int requestId,
-  }) => playStreamUrl(
-    track: track,
-    streamUrl: streamUrl,
-    headers: headers,
-    hintExtension: hintExtension,
-  );
+  }) {
+    _activeEpoch = requestId;
+    return playStreamUrl(
+      track: track,
+      streamUrl: streamUrl,
+      headers: headers,
+      hintExtension: hintExtension,
+    );
+  }
+
+  @override
+  Future<void> playStreamSpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+  }) async {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter MockAudioService',
+      );
+    }
+    if (epoch < _activeEpoch) return;
+    _activeEpoch = epoch;
+    _lastSourceSpec = spec;
+    switch (spec) {
+      case DirectRangeSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.url,
+          headers: spec.headers,
+          hintExtension: spec.hintExtension,
+          requestId: epoch,
+        );
+      case EncryptedRangeSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.url,
+          headers: spec.headers,
+          hintExtension: spec.hintExtension,
+          requestId: epoch,
+        );
+      case SegmentedManifestSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.manifestUrlOrXml,
+          headers: spec.headers,
+          hintExtension: spec.format == ManifestFormat.dash ? 'mpd' : 'm3u8',
+          requestId: epoch,
+        );
+      case LocalFileSpec():
+        await play(track: track.copyWith(filePath: spec.path));
+      case ExternalBackendSpec():
+        throw StateError(
+          'ExternalBackendSpec (${spec.providerId}) cannot enter MockAudioService',
+        );
+    }
+  }
+
+  @override
+  bool get isStandbyDeckReady =>
+      _standbyReady && _standbyTrack != null && _standbySpec != null;
+
+  @override
+  Future<void> prepareStandbySpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    int? epoch,
+  }) async {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter MockAudioService',
+      );
+    }
+    final targetEpoch = epoch ?? _activeEpoch;
+    if (targetEpoch < _activeEpoch) return;
+    _standbyTrack = track;
+    _standbySpec = spec;
+    _standbyEpoch = targetEpoch;
+    _standbyReady = true;
+  }
+
+  @override
+  Future<bool> skipToStandby({int? epoch}) async {
+    if (!isStandbyDeckReady) return false;
+    if (epoch != null && epoch < _standbyEpoch) return false;
+
+    final nextTrack = _standbyTrack!;
+    final nextSpec = _standbySpec!;
+    final nextEpoch = epoch ??
+        (_standbyEpoch > _activeEpoch ? _standbyEpoch : _activeEpoch);
+    _clearStandby();
+
+    _activeEpoch = nextEpoch;
+    _lastSourceSpec = nextSpec;
+    final idx = PlaybackPersistenceService.findTrackIndex(_queue, nextTrack);
+    if (idx >= 0) {
+      _currentIndex = idx;
+    }
+    if (nextTrack.format.isDsd) {
+      _visualizerBandsNotifier.value = Float32List(64);
+    }
+    _needsLoadOnResume = false;
+    _lastError = null;
+    _emitState(
+      _state.copyWith(
+        status: PlaybackStatus.playing,
+        track: nextTrack,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+    _emitSignalPath();
+    return true;
+  }
+
+  @override
+  Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
+      cancelPendingPlayback();
 
   @override
   Future<void> restorePlaybackSession({
@@ -608,6 +761,7 @@ class MockAudioService implements AudioService {
     double? volume,
     bool? isMuted,
   }) async {
+    _clearStandby();
     if (queue != null && queue.isNotEmpty) {
       _queue
         ..clear()
@@ -660,6 +814,7 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> pause() async {
+    _playbackInterruptHandler?.call();
     _emitState(_state.copyWith(status: PlaybackStatus.paused));
   }
 
@@ -839,6 +994,9 @@ class MockAudioService implements AudioService {
 
   @override
   Future<void> stop() async {
+    _playbackInterruptHandler?.call();
+    _clearStandby();
+    _activeEpoch = 0;
     _emitState(
       _state.copyWith(
         status: PlaybackStatus.stopped,
@@ -895,6 +1053,7 @@ class MockAudioService implements AudioService {
       );
       return;
     }
+    _playbackInterruptHandler?.call();
     _emitState(
       _state.copyWith(
         track: target,
@@ -918,6 +1077,7 @@ class MockAudioService implements AudioService {
       );
       return;
     }
+    _playbackInterruptHandler?.call();
     _emitState(
       _state.copyWith(
         track: target,

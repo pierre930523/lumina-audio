@@ -38,6 +38,9 @@ pub struct ReplayGain {
 }
 
 impl ReplayGain {
+    pub const MIN_GAIN_DB: f64 = -24.0;
+    pub const MAX_POSITIVE_GAIN_DB: f64 = 6.0;
+
     pub fn new(config: ReplayGainConfig) -> Self {
         let linear_gain = Self::compute_linear_gain(&config);
         Self {
@@ -84,18 +87,29 @@ impl ReplayGain {
             ),
         };
 
-        let gain_db = raw_gain_db.unwrap_or(0.0) + config.preamp_db;
+        let raw_db = raw_gain_db.filter(|v| v.is_finite()).unwrap_or(0.0);
+        let preamp = if config.preamp_db.is_finite() {
+            config.preamp_db
+        } else {
+            0.0
+        };
+        let gain_db = (raw_db + preamp).clamp(Self::MIN_GAIN_DB, Self::MAX_POSITIVE_GAIN_DB);
         let mut linear = 10.0f64.powf(gain_db / 20.0);
 
         if config.prevent_clipping
             && let Some(peak_val) = peak
+            && peak_val.is_finite()
             && peak_val > 0.0
             && linear * peak_val > 1.0
         {
             linear = 1.0 / peak_val;
         }
 
-        linear
+        if linear.is_finite() && linear >= 0.0 {
+            linear
+        } else {
+            1.0
+        }
     }
 
     #[inline(always)]

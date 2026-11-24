@@ -96,12 +96,45 @@ class Win32Window {
   // size changes so subclasses can resync child rendering.
   virtual void OnDisplayOrDpiChanged();
 
+  // Called when the window is minimized (SIZE_MINIMIZED).
+  virtual void OnWindowMinimized();
+
+  // Called when the window is restored from a minimized state.
+  virtual void OnWindowRestored(bool from_minimized, bool is_maximized);
+
+  // Called when the window's maximized state changes outside fullscreen mode.
+  virtual void OnWindowMaximizeChanged(bool is_maximized);
+
+  // Called when the top-level window gains or loses activation focus.
+  virtual void OnWindowFocusChanged(bool focused);
+
+  // Called when the window transitions to a shown, non-minimized state.
+  virtual void OnWindowShown();
+
   // Called when WM_CLOSE is received while prevent_close_ is true.
   // Return true to suppress OS window destruction.
   virtual bool OnWindowCloseRequested();
 
+  // Applies the 1px top DWM glass margin required for frameless shadow/border.
+  void ApplyDwmFrameMargins();
+
   // Synchronizes child content HWND bounds to match the current client area.
-  void SyncChildContentBounds();
+  void SyncChildContentBounds(bool force_frame_sync = false);
+
+  // Shared message-processing helpers also invoked if a subclass top-level
+  // delegate consumes the message before Win32Window::MessageHandler runs.
+  void HandleSizeMessage(HWND hwnd, WPARAM wparam);
+  LRESULT HandleActivateMessage(HWND hwnd,
+                                UINT message,
+                                WPARAM wparam,
+                                LPARAM lparam,
+                                bool call_def_window_proc);
+  LRESULT HandleShowWindowMessage(HWND hwnd,
+                                  UINT message,
+                                  WPARAM wparam,
+                                  LPARAM lparam,
+                                  bool call_def_window_proc);
+  void HandleSetFocusMessage(HWND hwnd);
 
  private:
   friend class WindowClassRegistrar;
@@ -136,6 +169,8 @@ class Win32Window {
   UINT last_dpi_ = 96;
   LONG last_client_width_ = -1;
   LONG last_client_height_ = -1;
+  bool was_minimized_ = false;
+  bool was_maximized_ = false;
 
   // True Win32 fullscreen state tracking and window geometry restoration.
   bool is_fullscreen_ = false;

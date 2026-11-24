@@ -4,6 +4,7 @@ import '../models/audio_output_info.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
+import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
 
 typedef StreamingTrackHandler = Future<void> Function(
@@ -18,6 +19,13 @@ abstract class AudioService {
   static bool isStreamingTrackId(String id) {
     return id.startsWith('apple:') ||
         id.startsWith('ytm:') ||
+        id.startsWith('ytm_') ||
+        id.startsWith('streaming:') ||
+        id.startsWith('youtube_music:') ||
+        id.startsWith('podcast_rss:') ||
+        id.startsWith('rss:') ||
+        id.startsWith('http://') ||
+        id.startsWith('https://') ||
         id.startsWith('qobuz:') ||
         id.startsWith('tidal:') ||
         id.startsWith('deezer:');
@@ -68,10 +76,51 @@ abstract class AudioService {
     headers: headers,
     hintExtension: hintExtension,
   );
+  Future<void> playStreamSpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+  }) async {
+    switch (spec) {
+      case DirectRangeSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.url,
+          headers: spec.headers,
+          hintExtension: spec.hintExtension,
+          requestId: epoch,
+        );
+      case EncryptedRangeSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.url,
+          headers: spec.headers,
+          hintExtension: spec.hintExtension,
+          requestId: epoch,
+        );
+      case SegmentedManifestSpec():
+        await playStreamUrlAsync(
+          track: track,
+          streamUrl: spec.manifestUrlOrXml,
+          headers: spec.headers,
+          hintExtension: spec.format == ManifestFormat.dash ? 'mpd' : 'm3u8',
+          requestId: epoch,
+        );
+      case LocalFileSpec():
+        await play(track: track.copyWith(filePath: spec.path));
+      case ExternalBackendSpec():
+        throw StateError(
+          'ExternalBackendSpec (${spec.providerId}) cannot enter native AudioService',
+        );
+    }
+  }
   void setStreamingTrackHandler(StreamingTrackHandler? handler) {}
+  void setPlaybackInterruptHandler(VoidCallback? handler) {}
   void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {}
   void failOptimisticTrackLoad(TrackInfo track, String message) {}
   Future<void> cancelPendingPlayback() async {}
+  Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
+      cancelPendingPlayback();
   Future<void> restorePlaybackSession({
     required TrackInfo track,
     required Duration position,
@@ -256,6 +305,52 @@ extension AudioServiceVisualizerExt on AudioService {
     try {
       (this as dynamic).setWindowMinimized(minimized);
     } catch (_) {}
+  }
+}
+
+/// Optional Dual-Deck pre-decode and zero-latency skip capability for
+/// [AudioService] implementations supporting standby track preparation.
+abstract interface class DualDeckAudioService {
+  Future<void> prepareStandbySpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    int? epoch,
+  });
+
+  Future<bool> skipToStandby({int? epoch});
+
+  bool get isStandbyDeckReady;
+}
+
+/// Safe dual-deck extension forwarding standby operations to
+/// [DualDeckAudioService] implementations without breaking remote/server contracts.
+extension AudioServiceDualDeckExt on AudioService {
+  Future<void> prepareStandbySpecAsync(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    int? epoch,
+  }) async {
+    if (this is DualDeckAudioService) {
+      await (this as DualDeckAudioService).prepareStandbySpecAsync(
+        track,
+        spec,
+        epoch: epoch,
+      );
+    }
+  }
+
+  Future<bool> skipToStandby({int? epoch}) async {
+    if (this is DualDeckAudioService) {
+      return (this as DualDeckAudioService).skipToStandby(epoch: epoch);
+    }
+    return false;
+  }
+
+  bool get isStandbyDeckReady {
+    if (this is DualDeckAudioService) {
+      return (this as DualDeckAudioService).isStandbyDeckReady;
+    }
+    return false;
   }
 }
 

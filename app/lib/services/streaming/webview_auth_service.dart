@@ -11,15 +11,18 @@ class WebViewAuthRequest {
   final String title;
   final String initialUrl;
   final String? cookieDomain;
+  final List<String> cookieDomainSubstrings;
   final String? requiredHostSubstring;
   final List<String> excludedUrlSubstrings;
   final List<String> requiredAnyCookies;
   final List<String> requiredAllCookies;
   final List<String> headerUrlSubstrings;
+  final List<String> responseBodyUrlSubstrings;
   final List<String> captureHeaderNames;
   final List<String> captureQueryParams;
   final List<String> requiredHeaders;
   final List<List<String>> requiredGroups;
+  final bool inspectWebStorage;
   final bool clearSession;
 
   const WebViewAuthRequest({
@@ -27,15 +30,18 @@ class WebViewAuthRequest {
     required this.title,
     required this.initialUrl,
     this.cookieDomain,
+    this.cookieDomainSubstrings = const [],
     this.requiredHostSubstring,
     this.excludedUrlSubstrings = const [],
     this.requiredAnyCookies = const [],
     this.requiredAllCookies = const [],
     this.headerUrlSubstrings = const [],
+    this.responseBodyUrlSubstrings = const [],
     this.captureHeaderNames = const [],
     this.captureQueryParams = const [],
     this.requiredHeaders = const [],
     this.requiredGroups = const [],
+    this.inspectWebStorage = false,
     this.clearSession = false,
   });
 
@@ -44,16 +50,19 @@ class WebViewAuthRequest {
         'title': title,
         'initialUrl': initialUrl,
         if (cookieDomain != null) 'cookieDomain': cookieDomain,
+        'cookieDomainSubstrings': cookieDomainSubstrings,
         if (requiredHostSubstring != null)
           'requiredHostSubstring': requiredHostSubstring,
         'excludedUrlSubstrings': excludedUrlSubstrings,
         'requiredAnyCookies': requiredAnyCookies,
         'requiredAllCookies': requiredAllCookies,
         'headerUrlSubstrings': headerUrlSubstrings,
+        'responseBodyUrlSubstrings': responseBodyUrlSubstrings,
         'captureHeaderNames': captureHeaderNames,
         'captureQueryParams': captureQueryParams,
         'requiredHeaders': requiredHeaders,
         'requiredGroups': requiredGroups,
+        'inspectWebStorage': inspectWebStorage,
         'clearSession': clearSession,
       };
 
@@ -67,6 +76,7 @@ class WebViewAuthRequest {
           title: '登入 YouTube Music',
           initialUrl: 'https://music.youtube.com',
           cookieDomain: 'https://music.youtube.com',
+          cookieDomainSubstrings: const ['.youtube.com', 'youtube.com'],
           requiredHostSubstring: 'music.youtube.com',
           excludedUrlSubstrings: const [
             'accounts.google.com',
@@ -87,6 +97,7 @@ class WebViewAuthRequest {
           title: '登入 Deezer',
           initialUrl: 'https://www.deezer.com/login',
           cookieDomain: 'https://www.deezer.com',
+          cookieDomainSubstrings: const ['.deezer.com', 'deezer.com'],
           requiredHostSubstring: 'deezer.com',
           excludedUrlSubstrings: const ['/login', '/signup'],
           requiredAllCookies: const ['arl'],
@@ -99,13 +110,27 @@ class WebViewAuthRequest {
           providerKind: kind,
           title: '登入 TIDAL',
           initialUrl: 'https://listen.tidal.com',
+          cookieDomain: 'https://listen.tidal.com',
+          cookieDomainSubstrings: const ['.tidal.com', 'tidal.com'],
           requiredHostSubstring: 'tidal.com',
           excludedUrlSubstrings: const ['login.tidal.com', 'auth.tidal.com'],
-          headerUrlSubstrings: const ['api.tidal.com', 'openapi.tidal.com'],
+          headerUrlSubstrings: const [
+            'api.tidal.com',
+            'openapi.tidal.com',
+            'listen.tidal.com',
+          ],
           captureHeaderNames: const ['Authorization', 'x-tidal-token'],
-          requiredHeaders: const ['authorization'],
+          inspectWebStorage: true,
           requiredGroups: const [
-            ['header:authorization'],
+            [
+              'header:authorization',
+              'header:x-tidal-token',
+              'storage:access_token',
+              'storage:oAuthAccessToken',
+              'storage:token',
+              'storage:authorization',
+              'cookie:access_token',
+            ],
           ],
           clearSession: clearSession,
         ),
@@ -113,14 +138,30 @@ class WebViewAuthRequest {
           providerKind: kind,
           title: '登入 Qobuz',
           initialUrl: 'https://play.qobuz.com/login',
+          cookieDomain: 'https://play.qobuz.com',
+          cookieDomainSubstrings: const ['.qobuz.com', 'qobuz.com'],
           requiredHostSubstring: 'qobuz.com',
           excludedUrlSubstrings: const ['/login', '/signin', '/signup'],
-          headerUrlSubstrings: const ['qobuz.com/api.json'],
+          headerUrlSubstrings: const ['qobuz.com/api.json', 'play.qobuz.com'],
+          responseBodyUrlSubstrings: const ['qobuz.com/api.json', '/user/login'],
           captureHeaderNames: const ['X-User-Auth-Token', 'X-App-Id'],
           captureQueryParams: const ['app_id', 'user_auth_token'],
+          inspectWebStorage: true,
           requiredGroups: const [
-            ['header:x-user-auth-token', 'query:user_auth_token'],
-            ['header:x-app-id', 'query:app_id'],
+            [
+              'header:x-user-auth-token',
+              'query:user_auth_token',
+              'cookie:user_auth_token',
+              'response:user_auth_token',
+              'storage:user_auth_token',
+            ],
+            [
+              'header:x-app-id',
+              'query:app_id',
+              'cookie:app_id',
+              'response:app_id',
+              'storage:app_id',
+            ],
           ],
           clearSession: clearSession,
         ),
@@ -129,21 +170,37 @@ class WebViewAuthRequest {
           title: '登入 Apple Music',
           initialUrl: 'https://music.apple.com',
           cookieDomain: 'https://music.apple.com',
+          cookieDomainSubstrings: const [
+            '.apple.com',
+            'apple.com',
+            'music.apple.com',
+          ],
           requiredHostSubstring: 'music.apple.com',
           excludedUrlSubstrings: const ['idmsa.apple.com', '/auth/'],
-          headerUrlSubstrings: const ['music.apple.com'],
+          headerUrlSubstrings: const [
+            'music.apple.com',
+            'amp-api.music.apple.com',
+          ],
           captureHeaderNames: const [
             'Media-User-Token',
             'Music-User-Token',
             'Authorization',
           ],
+          inspectWebStorage: true,
           requiredGroups: const [
-            ['header:authorization'],
+            [
+              'header:authorization',
+              'storage:developer_token',
+              'storage:developerToken',
+              'storage:authorization',
+            ],
             [
               'header:media-user-token',
               'header:music-user-token',
               'cookie:media-user-token',
               'cookie:music-user-token',
+              'storage:media-user-token',
+              'storage:music-user-token',
             ],
           ],
           clearSession: clearSession,
@@ -157,49 +214,56 @@ class WebViewAuthRequest {
 class WebViewAuthResult {
   final bool captured;
   final bool cancelled;
+  final bool isBlockedByPlatform;
+  final bool isNonChromiumDefault;
+  final String? detectedBrowserName;
+  final String? detectedBrowserPath;
   final String cookieHeader;
   final Map<String, String> cookies;
   final Map<String, String> headers;
   final Map<String, String> queryParams;
+  final Map<String, String> storage;
+  final Map<String, String> responseValues;
   final String capturedUrl;
   final String? error;
 
   const WebViewAuthResult({
     required this.captured,
     required this.cancelled,
+    this.isBlockedByPlatform = false,
+    this.isNonChromiumDefault = false,
+    this.detectedBrowserName,
+    this.detectedBrowserPath,
     this.cookieHeader = '',
     this.cookies = const {},
     this.headers = const {},
     this.queryParams = const {},
+    this.storage = const {},
+    this.responseValues = const {},
     this.capturedUrl = '',
     this.error,
   });
 
-  String? header(String name) {
-    final lower = name.toLowerCase();
-    for (final entry in headers.entries) {
-      if (entry.key.toLowerCase() == lower && entry.value.trim().isNotEmpty) {
-        return entry.value.trim();
-      }
-    }
-    return null;
-  }
+  String? header(String name) => _lookupCaseInsensitive(headers, name);
 
   String? cookie(String name) {
     final direct = cookies[name];
     if (direct != null && direct.trim().isNotEmpty) return direct.trim();
-    final lower = name.toLowerCase();
-    for (final entry in cookies.entries) {
-      if (entry.key.toLowerCase() == lower && entry.value.trim().isNotEmpty) {
-        return entry.value.trim();
-      }
-    }
-    return null;
+    return _lookupCaseInsensitive(cookies, name);
   }
 
-  String? queryParam(String name) {
+  String? queryParam(String name) => _lookupCaseInsensitive(queryParams, name);
+
+  String? storageValue(String name) => _lookupCaseInsensitive(storage, name);
+
+  String? responseValue(String name) =>
+      _lookupCaseInsensitive(responseValues, name);
+
+  static String? _lookupCaseInsensitive(Map<String, String> map, String name) {
+    final direct = map[name];
+    if (direct != null && direct.trim().isNotEmpty) return direct.trim();
     final lower = name.toLowerCase();
-    for (final entry in queryParams.entries) {
+    for (final entry in map.entries) {
       if (entry.key.toLowerCase() == lower && entry.value.trim().isNotEmpty) {
         return entry.value.trim();
       }
@@ -224,10 +288,16 @@ class WebViewAuthResult {
     return WebViewAuthResult(
       captured: raw['captured'] == true,
       cancelled: raw['cancelled'] == true,
+      isBlockedByPlatform: raw['isBlockedByPlatform'] == true,
+      isNonChromiumDefault: raw['isNonChromiumDefault'] == true,
+      detectedBrowserName: raw['detectedBrowserName']?.toString(),
+      detectedBrowserPath: raw['detectedBrowserPath']?.toString(),
       cookieHeader: raw['cookieHeader']?.toString() ?? '',
       cookies: readStringMap(raw['cookies']),
       headers: readStringMap(raw['headers']),
       queryParams: readStringMap(raw['queryParams']),
+      storage: readStringMap(raw['storage']),
+      responseValues: readStringMap(raw['responseValues']),
       capturedUrl: raw['capturedUrl']?.toString() ?? '',
       error: raw['error']?.toString(),
     );
@@ -262,7 +332,7 @@ Map<String, dynamic> buildAuthParamsFromWebViewResult(
         'cookie': cookieStr,
       };
     case 'deezer':
-      final arl = res.cookie('arl') ?? '';
+      final arl = res.cookie('arl') ?? res.storageValue('arl') ?? '';
       if (arl.isEmpty) {
         throw const StreamingException('未擷取到 Deezer arl Cookie');
       }
@@ -273,8 +343,19 @@ Map<String, dynamic> buildAuthParamsFromWebViewResult(
     case 'tidal':
       final authHeader = res.header('authorization') ?? '';
       final token = _stripBearerPrefix(authHeader);
-      final tidalToken = res.header('x-tidal-token') ?? '';
-      final effectiveToken = token.isNotEmpty ? token : tidalToken;
+      final tidalToken = _stripBearerPrefix(res.header('x-tidal-token') ?? '');
+      final storageToken = _stripBearerPrefix(
+        res.storageValue('access_token') ??
+            res.storageValue('oAuthAccessToken') ??
+            res.storageValue('token') ??
+            res.storageValue('authorization') ??
+            res.responseValue('access_token') ??
+            res.cookie('access_token') ??
+            '',
+      );
+      final effectiveToken = token.isNotEmpty
+          ? token
+          : (tidalToken.isNotEmpty ? tidalToken : storageToken);
       if (effectiveToken.isEmpty) {
         throw const StreamingException('未擷取到 Tidal Bearer 授權權杖');
       }
@@ -283,9 +364,20 @@ Map<String, dynamic> buildAuthParamsFromWebViewResult(
         'access_token': effectiveToken,
       };
     case 'qobuz':
-      final userToken =
-          res.header('x-user-auth-token') ?? res.queryParam('user_auth_token') ?? '';
-      final appId = res.header('x-app-id') ?? res.queryParam('app_id') ?? '';
+      final userToken = res.header('x-user-auth-token') ??
+          res.queryParam('user_auth_token') ??
+          res.cookie('user_auth_token') ??
+          res.responseValue('user_auth_token') ??
+          res.storageValue('user_auth_token') ??
+          res.storageValue('userAuthToken') ??
+          '';
+      final appId = res.header('x-app-id') ??
+          res.queryParam('app_id') ??
+          res.cookie('app_id') ??
+          res.responseValue('app_id') ??
+          res.storageValue('app_id') ??
+          res.storageValue('appId') ??
+          '';
       if (userToken.isEmpty || appId.isEmpty) {
         throw const StreamingException(
           '未擷取到完整的 Qobuz user_auth_token 與 app_id',
@@ -297,11 +389,22 @@ Map<String, dynamic> buildAuthParamsFromWebViewResult(
         'app_id': appId,
       };
     case 'apple_music':
-      final devToken = _stripBearerPrefix(res.header('authorization') ?? '');
+      final devToken = _stripBearerPrefix(
+        res.header('authorization') ??
+            res.storageValue('developer_token') ??
+            res.storageValue('developerToken') ??
+            res.storageValue('authorization') ??
+            res.responseValue('developer_token') ??
+            '',
+      );
       final userToken = res.header('media-user-token') ??
           res.header('music-user-token') ??
           res.cookie('media-user-token') ??
           res.cookie('music-user-token') ??
+          res.storageValue('media-user-token') ??
+          res.storageValue('music-user-token') ??
+          res.storageValue('musicUserToken') ??
+          res.responseValue('media-user-token') ??
           '';
       if (devToken.isEmpty || userToken.isEmpty) {
         throw const StreamingException(

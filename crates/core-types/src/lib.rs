@@ -1,5 +1,7 @@
 pub mod hifi;
+pub mod streaming;
 pub use hifi::*;
+pub use streaming::*;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

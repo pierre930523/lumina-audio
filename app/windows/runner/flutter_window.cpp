@@ -13,6 +13,7 @@
 namespace {
 
 const UINT WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
+const UINT WM_LUMINA_WAKEUP = RegisterWindowMessageW(L"LUMINA_AUDIO_WAKEUP");
 constexpr wchar_t kDefaultNowPlayingLabel[] =
     L"Lumina Audio \u2014 \u5F85\u6A5F\u4E2D";
 
@@ -183,6 +184,42 @@ std::optional<bool> FindMapBool(const flutter::EncodableMap& map,
   return std::nullopt;
 }
 
+std::optional<int64_t> FindMapInt64(const flutter::EncodableMap& map,
+                                    const char* key) {
+  auto it = map.find(flutter::EncodableValue(key));
+  if (it == map.end()) {
+    return std::nullopt;
+  }
+  if (const auto* i64 = std::get_if<int64_t>(&it->second)) {
+    return *i64;
+  }
+  if (const auto* i32 = std::get_if<int32_t>(&it->second)) {
+    return static_cast<int64_t>(*i32);
+  }
+  if (const auto* dbl = std::get_if<double>(&it->second)) {
+    return static_cast<int64_t>(*dbl);
+  }
+  return std::nullopt;
+}
+
+std::optional<double> FindMapDouble(const flutter::EncodableMap& map,
+                                    const char* key) {
+  auto it = map.find(flutter::EncodableValue(key));
+  if (it == map.end()) {
+    return std::nullopt;
+  }
+  if (const auto* dbl = std::get_if<double>(&it->second)) {
+    return *dbl;
+  }
+  if (const auto* i64 = std::get_if<int64_t>(&it->second)) {
+    return static_cast<double>(*i64);
+  }
+  if (const auto* i32 = std::get_if<int32_t>(&it->second)) {
+    return static_cast<double>(*i32);
+  }
+  return std::nullopt;
+}
+
 std::optional<std::string> ExtractStringArg(
     const flutter::EncodableValue* args,
     const char* primary_key,
@@ -347,6 +384,7 @@ bool FlutterWindow::OnCreate() {
           result->Success();
         } else if (method == "show") {
           ShowAndFocus();
+          RefreshFlutterSurface(true);
           result->Success();
         } else if (method == "focus") {
           if (IsIconic(hwnd)) {
@@ -354,6 +392,13 @@ bool FlutterWindow::OnCreate() {
           }
           SetForegroundWindow(hwnd);
           SetActiveWindow(hwnd);
+          if (flutter_controller_ && flutter_controller_->view()) {
+            HWND child_hwnd = flutter_controller_->view()->GetNativeWindow();
+            if (child_hwnd != nullptr) {
+              SetFocus(child_hwnd);
+            }
+          }
+          RefreshFlutterSurface(true);
           result->Success();
         } else if (method == "destroy") {
           DestroyTray();
@@ -649,6 +694,192 @@ bool FlutterWindow::OnCreate() {
         }
       });
 
+  external_playback_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "lumina/external_playback",
+          &flutter::StandardMethodCodec::GetInstance());
+
+  external_music_host_ = ExternalMusicHost::Create(
+      hwnd, [this](const ExternalPlaybackStateEvent& ev) {
+        if (!external_playback_channel_ || !flutter_controller_ ||
+            !flutter_controller_->engine()) {
+          return;
+        }
+        flutter::EncodableMap payload;
+        payload[flutter::EncodableValue("epoch")] =
+            flutter::EncodableValue(ev.epoch);
+        payload[flutter::EncodableValue("status")] =
+            flutter::EncodableValue(ev.status);
+        payload[flutter::EncodableValue("positionMs")] =
+            flutter::EncodableValue(ev.position_ms);
+        payload[flutter::EncodableValue("durationMs")] =
+            flutter::EncodableValue(ev.duration_ms);
+        payload[flutter::EncodableValue("error")] =
+            ev.error.empty() ? flutter::EncodableValue()
+                             : flutter::EncodableValue(ev.error);
+        external_playback_channel_->InvokeMethod(
+            "onState",
+            std::make_unique<flutter::EncodableValue>(std::move(payload)));
+      });
+
+  external_playback_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        const std::string& method = call.method_name();
+        const flutter::EncodableMap* arg_map =
+            call.arguments() != nullptr
+                ? std::get_if<flutter::EncodableMap>(call.arguments())
+                : nullptr;
+        auto extract_epoch = [arg_map]() -> int64_t {
+          if (arg_map == nullptr) {
+            return 0;
+          }
+          return FindMapInt64(*arg_map, "epoch").value_or(0);
+        };
+
+        if (method == "isAvailable") {
+          const bool available =
+              external_music_host_ ? external_music_host_->IsAvailable() : false;
+          result->Success(flutter::EncodableValue(available));
+        } else if (method == "configure") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          if (arg_map == nullptr) {
+            result->Error("INVALID_ARGS", "Expected map arguments for configure");
+            return;
+          }
+          ExternalPlaybackConfigureArgs cfg;
+          cfg.developer_token =
+              FindMapString(*arg_map, "developerToken").value_or("");
+          cfg.music_user_token =
+              FindMapString(*arg_map, "musicUserToken").value_or("");
+          cfg.storefront = FindMapString(*arg_map, "storefront").value_or("us");
+          std::string err;
+          if (!external_music_host_->Configure(cfg, &err)) {
+            result->Error("EXTERNAL_PLAYBACK_CONFIGURE_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else if (method == "play") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          if (arg_map == nullptr) {
+            result->Error("INVALID_ARGS", "Expected map arguments for play");
+            return;
+          }
+          ExternalPlaybackPlayArgs play_args;
+          play_args.track_uri =
+              FindMapString(*arg_map, "trackUri").value_or("");
+          play_args.preview_url =
+              FindMapString(*arg_map, "previewUrl").value_or("");
+          play_args.external_web_url =
+              FindMapString(*arg_map, "externalWebUrl").value_or("");
+          play_args.epoch = extract_epoch();
+          if (play_args.track_uri.empty() && play_args.preview_url.empty()) {
+            result->Error("INVALID_ARGS",
+                          "Expected non-empty trackUri or previewUrl for play");
+            return;
+          }
+          std::string ignored_err;
+          external_music_host_->Play(play_args, &ignored_err);
+          result->Success();
+        } else if (method == "pause") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          std::string err;
+          if (!external_music_host_->Pause(extract_epoch(), &err)) {
+            result->Error("EXTERNAL_PLAYBACK_PAUSE_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else if (method == "resume") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          std::string err;
+          if (!external_music_host_->Resume(extract_epoch(), &err)) {
+            result->Error("EXTERNAL_PLAYBACK_RESUME_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else if (method == "seek") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          std::optional<int64_t> pos_opt =
+              arg_map != nullptr ? FindMapInt64(*arg_map, "positionMs")
+                                 : std::nullopt;
+          if (!pos_opt.has_value()) {
+            result->Error("INVALID_ARGS", "Expected positionMs for seek");
+            return;
+          }
+          std::string err;
+          if (!external_music_host_->Seek(*pos_opt, extract_epoch(), &err)) {
+            result->Error("EXTERNAL_PLAYBACK_SEEK_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else if (method == "setVolume") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          std::optional<double> vol_opt;
+          if (arg_map != nullptr) {
+            vol_opt = FindMapDouble(*arg_map, "volume");
+          } else if (call.arguments() != nullptr) {
+            if (const auto* d = std::get_if<double>(call.arguments())) {
+              vol_opt = *d;
+            } else if (const auto* i64 =
+                           std::get_if<int64_t>(call.arguments())) {
+              vol_opt = static_cast<double>(*i64);
+            } else if (const auto* i32 =
+                           std::get_if<int32_t>(call.arguments())) {
+              vol_opt = static_cast<double>(*i32);
+            }
+          }
+          if (!vol_opt.has_value()) {
+            result->Error("INVALID_ARGS", "Expected volume for setVolume");
+            return;
+          }
+          std::string err;
+          if (!external_music_host_->SetVolume(*vol_opt, &err)) {
+            result->Error("EXTERNAL_PLAYBACK_VOLUME_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else if (method == "stop") {
+          if (!external_music_host_) {
+            result->Error("HOST_UNAVAILABLE",
+                          "ExternalMusicHost is not initialized");
+            return;
+          }
+          std::string err;
+          if (!external_music_host_->Stop(extract_epoch(), &err)) {
+            result->Error("EXTERNAL_PLAYBACK_STOP_FAILED", err);
+            return;
+          }
+          result->Success();
+        } else {
+          result->NotImplemented();
+        }
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -662,12 +893,25 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  HWND hwnd = GetHandle();
+  if (hwnd != nullptr && IsWindow(hwnd)) {
+    KillTimer(hwnd, kRestoreRedrawTimerId);
+  }
+  if (external_playback_channel_) {
+    external_playback_channel_->SetMethodCallHandler(nullptr);
+  }
+  if (external_music_host_) {
+    external_music_host_->Shutdown();
+    external_music_host_.reset();
+  }
+  external_playback_channel_.reset();
   if (webview_auth_window_) {
     webview_auth_window_->CloseCancelled();
     webview_auth_window_.reset();
   }
   DestroyTray();
   if (window_channel_) {
+    window_channel_->SetMethodCallHandler(nullptr);
     window_channel_ = nullptr;
   }
   if (flutter_controller_) {
@@ -677,10 +921,78 @@ void FlutterWindow::OnDestroy() {
   Win32Window::OnDestroy();
 }
 
+void FlutterWindow::RefreshFlutterSurface(bool schedule_deferred_recovery) {
+  HWND hwnd = GetHandle();
+  if (!hwnd || !IsWindow(hwnd) || IsIconic(hwnd) || !IsWindowVisible(hwnd) ||
+      !flutter_controller_) {
+    return;
+  }
+
+  SyncChildContentBounds(schedule_deferred_recovery);
+  if (flutter_controller_->view()) {
+    HWND child = flutter_controller_->view()->GetNativeWindow();
+    if (child &&
+        (GetForegroundWindow() == hwnd || GetActiveWindow() == hwnd)) {
+      SetFocus(child);
+    }
+  }
+  flutter_controller_->ForceRedraw();
+  RedrawWindow(hwnd, nullptr, nullptr,
+               RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
+  if (schedule_deferred_recovery) {
+    PostMessage(hwnd, kDeferredRedrawMessage, 0, 0);
+    SetTimer(hwnd, kRestoreRedrawTimerId, 80, nullptr);
+  }
+}
+
 void FlutterWindow::OnDisplayOrDpiChanged() {
-  if (flutter_controller_) {
-    SyncChildContentBounds();
-    flutter_controller_->ForceRedraw();
+  RefreshFlutterSurface(false);
+}
+
+void FlutterWindow::OnWindowMinimized() {
+  HWND hwnd = GetHandle();
+  if (hwnd != nullptr && IsWindow(hwnd)) {
+    KillTimer(hwnd, kRestoreRedrawTimerId);
+  }
+  if (window_channel_) {
+    window_channel_->InvokeMethod("onWindowMinimize", nullptr);
+  }
+}
+
+void FlutterWindow::OnWindowRestored(bool /*from_minimized*/,
+                                     bool is_maximized) {
+  RefreshFlutterSurface(true);
+  if (window_channel_) {
+    window_channel_->InvokeMethod("onWindowRestore", nullptr);
+    if (is_maximized) {
+      window_channel_->InvokeMethod("onWindowMaximize", nullptr);
+    }
+  }
+}
+
+void FlutterWindow::OnWindowMaximizeChanged(bool is_maximized) {
+  RefreshFlutterSurface(true);
+  if (window_channel_) {
+    window_channel_->InvokeMethod(
+        is_maximized ? "onWindowMaximize" : "onWindowUnmaximize", nullptr);
+  }
+}
+
+void FlutterWindow::OnWindowFocusChanged(bool focused) {
+  if (focused) {
+    RefreshFlutterSurface(false);
+  }
+  if (window_channel_) {
+    window_channel_->InvokeMethod(
+        focused ? "onWindowFocus" : "onWindowBlur", nullptr);
+  }
+}
+
+void FlutterWindow::OnWindowShown() {
+  RefreshFlutterSurface(true);
+  if (window_channel_) {
+    window_channel_->InvokeMethod("onWindowRestore", nullptr);
   }
 }
 
@@ -862,6 +1174,22 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         flutter_controller_->HandleTopLevelWindowProc(hwnd, message, wparam,
                                                       lparam);
     if (result) {
+      switch (message) {
+        case WM_SIZE:
+          HandleSizeMessage(hwnd, wparam);
+          break;
+        case WM_ACTIVATE:
+          HandleActivateMessage(hwnd, message, wparam, lparam, false);
+          break;
+        case WM_SHOWWINDOW:
+          HandleShowWindowMessage(hwnd, message, wparam, lparam, false);
+          break;
+        case WM_SETFOCUS:
+          HandleSetFocusMessage(hwnd);
+          break;
+        default:
+          break;
+      }
       return *result;
     }
   }
@@ -870,6 +1198,15 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (tray_active_) {
       tray_nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
       Shell_NotifyIconW(NIM_ADD, &tray_nid_);
+    }
+    return 0;
+  }
+
+  if (WM_LUMINA_WAKEUP != 0 && message == WM_LUMINA_WAKEUP) {
+    ShowAndFocus();
+    RefreshFlutterSurface(true);
+    if (window_channel_) {
+      window_channel_->InvokeMethod("onSingleInstanceWakeup", nullptr);
     }
     return 0;
   }
@@ -884,10 +1221,23 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return 0;
   }
 
+  if (message == kDeferredRedrawMessage) {
+    RefreshFlutterSurface(false);
+    return 0;
+  }
+
   switch (message) {
     case WM_FONTCHANGE:
       if (flutter_controller_ && flutter_controller_->engine()) {
         flutter_controller_->engine()->ReloadSystemFonts();
+      }
+      break;
+
+    case WM_TIMER:
+      if (wparam == kRestoreRedrawTimerId) {
+        KillTimer(hwnd, kRestoreRedrawTimerId);
+        RefreshFlutterSurface(false);
+        return 0;
       }
       break;
 

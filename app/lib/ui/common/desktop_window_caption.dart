@@ -39,6 +39,9 @@ class _DesktopWindowCaptionButtonsState
     WidgetsBinding.instance.addObserver(this);
     _controller = widget.controller ?? DesktopWindowController.instance;
     _controller.isFullScreenNotifier.addListener(_onFullScreenChanged);
+    _controller.isMaximizedNotifier.addListener(_onMaximizedChanged);
+    _isMaximized = _controller.isMaximizedNotifier.value;
+    _isFullScreen = _controller.isFullScreenNotifier.value;
     _checkWindowState();
   }
 
@@ -47,8 +50,12 @@ class _DesktopWindowCaptionButtonsState
     super.didUpdateWidget(oldWidget);
     if (widget.controller != oldWidget.controller) {
       _controller.isFullScreenNotifier.removeListener(_onFullScreenChanged);
+      _controller.isMaximizedNotifier.removeListener(_onMaximizedChanged);
       _controller = widget.controller ?? DesktopWindowController.instance;
       _controller.isFullScreenNotifier.addListener(_onFullScreenChanged);
+      _controller.isMaximizedNotifier.addListener(_onMaximizedChanged);
+      _isMaximized = _controller.isMaximizedNotifier.value;
+      _isFullScreen = _controller.isFullScreenNotifier.value;
       _checkWindowState();
     }
   }
@@ -56,6 +63,7 @@ class _DesktopWindowCaptionButtonsState
   @override
   void dispose() {
     _controller.isFullScreenNotifier.removeListener(_onFullScreenChanged);
+    _controller.isMaximizedNotifier.removeListener(_onMaximizedChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -66,9 +74,23 @@ class _DesktopWindowCaptionButtonsState
     _checkWindowState();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      _checkWindowState();
+    }
+  }
+
   void _onFullScreenChanged() {
     if (mounted && _controller.isFullScreenNotifier.value != _isFullScreen) {
       setState(() => _isFullScreen = _controller.isFullScreenNotifier.value);
+    }
+  }
+
+  void _onMaximizedChanged() {
+    if (mounted && _controller.isMaximizedNotifier.value != _isMaximized) {
+      setState(() => _isMaximized = _controller.isMaximizedNotifier.value);
     }
   }
 

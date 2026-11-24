@@ -4,7 +4,7 @@ description: "Lumina Audio — Audiophile Lossless Music Player for Windows"
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
-version: 0.2.2+4
+version: 0.2.4+6
 
 environment:
   sdk: ^3.14.0

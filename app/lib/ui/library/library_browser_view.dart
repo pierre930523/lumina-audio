@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/playback_state.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_settings_controller.dart';
+import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 class LibraryBrowserView extends StatefulWidget {
@@ -26,6 +27,7 @@ class LibraryBrowserView extends StatefulWidget {
 class _LibraryBrowserViewState extends State<LibraryBrowserView> {
   final TextEditingController _searchController = TextEditingController();
   late List<TrackInfo> _visibleTracks;
+  int _searchSeq = 0;
 
   @override
   void initState() {
@@ -48,11 +50,17 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
   }
 
   Future<void> _onSearchChanged(String query) async {
+    final seq = ++_searchSeq;
     final results = await widget.audioService.searchLibrary(query);
-    if (!mounted) return;
+    if (!mounted || seq != _searchSeq) return;
     setState(() {
       _visibleTracks = results;
     });
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _onSearchChanged('');
   }
 
   List<TrackInfo> _filteredTracks() {
@@ -77,6 +85,31 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
           Icons.search_rounded,
           color: LuminaTokens.textMuted,
           size: 18,
+        ),
+        suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+        suffixIcon: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _searchController,
+          builder: (context, value, _) {
+            if (value.text.isEmpty) {
+              return const SizedBox.shrink();
+            }
+            return IconButton(
+              key: const Key('btn_library_search_clear'),
+              tooltip: '清除搜尋',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              padding: const EdgeInsets.only(right: 4),
+              style: IconButton.styleFrom(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              icon: const Icon(
+                Icons.close_rounded,
+                color: LuminaTokens.textMuted,
+                size: 17,
+              ),
+              onPressed: _clearSearch,
+            );
+          },
         ),
         hintText: '搜尋藝術家、專輯或曲目...',
         hintStyle: const TextStyle(color: LuminaTokens.textMuted),
@@ -193,42 +226,45 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
                     itemBuilder: (context, index) {
                       final item = tracks[index];
                       final isSelected = widget.activeTrackId == item.id;
-                      return Material(
-                        type: MaterialType.transparency,
-                        child: ListTile(
-                          key: Key('queue_track_${item.id}'),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(
-                              LuminaTokens.radiusSm,
+                      return TrackHoverPrefetch(
+                        track: item,
+                        child: Material(
+                          type: MaterialType.transparency,
+                          child: ListTile(
+                            key: Key('queue_track_${item.id}'),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(
+                                LuminaTokens.radiusSm,
+                              ),
                             ),
-                          ),
-                          hoverColor: LuminaTokens.cardHoverBg.withValues(
-                            alpha: 0.6,
-                          ),
-                          leading: Icon(
-                            isSelected
-                                ? Icons.equalizer_rounded
-                                : Icons.music_note_rounded,
-                            color: isSelected
-                                ? LuminaTokens.accentPurpleText
-                                : LuminaTokens.textSecondary,
-                          ),
-                          title: Text(
-                            item.title,
-                            style: TextStyle(
+                            hoverColor: LuminaTokens.cardHoverBg.withValues(
+                              alpha: 0.6,
+                            ),
+                            leading: Icon(
+                              isSelected
+                                  ? Icons.equalizer_rounded
+                                  : Icons.music_note_rounded,
                               color: isSelected
                                   ? LuminaTokens.accentPurpleText
-                                  : LuminaTokens.textPrimary,
-                              fontWeight: FontWeight.w600,
+                                  : LuminaTokens.textSecondary,
                             ),
-                          ),
-                          subtitle: Text(
-                            '${item.artist} • ${item.album} • ${item.format.label}',
-                            style: const TextStyle(
-                              color: LuminaTokens.textMuted,
+                            title: Text(
+                              item.title,
+                              style: TextStyle(
+                                color: isSelected
+                                    ? LuminaTokens.accentPurpleText
+                                    : LuminaTokens.textPrimary,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
+                            subtitle: Text(
+                              '${item.artist} • ${item.album} • ${item.format.label}',
+                              style: const TextStyle(
+                                color: LuminaTokens.textMuted,
+                              ),
+                            ),
+                            onTap: () => widget.audioService.play(track: item),
                           ),
-                          onTap: () => widget.audioService.play(track: item),
                         ),
                       );
                     },

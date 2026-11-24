@@ -19,8 +19,8 @@ pub use http::{
     endpoint_url, HttpRequest, HttpResponse, HttpTransport, MockHttpTransport, ReqwestHttpTransport,
 };
 pub use traits::{
-    MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem, SyncProgress, SyncResult,
-    SyncResultSummary,
+    MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem, StreamResolver,
+    SyncProgress, SyncResult, SyncResultSummary,
 };
 
 // Local scanner

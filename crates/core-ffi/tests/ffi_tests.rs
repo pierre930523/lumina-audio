@@ -984,3 +984,1414 @@ fn test_ffi_sync_play_followed_by_async_request_id_one_and_zero_rejection() {
     assert_eq!(lumina_shutdown(), 0);
     let _ = std::fs::remove_dir_all(tmp_dir);
 }
+
+#[test]
+fn test_ffi_http_headers_and_403_surfacing_sync_and_async() {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    // Build a 384 KiB WAV (> 2 chunks of 128 KiB) for multi-Range verification.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_http_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav_path = tmp_dir.join("fixture.wav");
+    write_test_wav(&wav_path, 48_000, 2, 96_000);
+    let wav_bytes = Arc::new(std::fs::read(&wav_path).unwrap());
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server_stop = Arc::new(AtomicBool::new(false));
+    let server_stop_bg = Arc::clone(&server_stop);
+    let valid_range_hits = Arc::new(AtomicUsize::new(0));
+    let valid_range_hits_srv = Arc::clone(&valid_range_hits);
+
+    let server_handle = std::thread::spawn(move || {
+        while !server_stop_bg.load(Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let wav_bytes = Arc::clone(&wav_bytes);
+            let range_hits = Arc::clone(&valid_range_hits_srv);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 16384];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(end_pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = end_pos + 4;
+                            break;
+                        }
+                        if total_read == buf.len() {
+                            break;
+                        }
+                    }
+                    let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let mut parts = first_line.split_whitespace();
+                    let method = parts.next().unwrap_or("GET");
+                    let path = parts.next().unwrap_or("/");
+                    let mut hdrs = std::collections::HashMap::new();
+                    for line in req_str.lines().skip(1) {
+                        if let Some((k, v)) = line.split_once(':') {
+                            hdrs.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                        }
+                    }
+
+                    let headers_ok = hdrs.get("user-agent").map(String::as_str)
+                        == Some("YtmTestAgent/1.0")
+                        && hdrs.get("accept").map(String::as_str)
+                            == Some("text/html,application/xhtml+xml,*/*;q=0.8")
+                        && hdrs.get("accept-language").map(String::as_str)
+                            == Some("en-US,en;q=0.9");
+
+                    let total_len = wav_bytes.len();
+                    if path == "/open-403.wav" || !headers_ok {
+                        let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                        if stream.write_all(resp.as_bytes()).is_err() {
+                            return;
+                        }
+                    } else if path == "/ok.wav" || path == "/mid-403.wav" {
+                        if method == "HEAD" {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                            );
+                            if stream.write_all(resp.as_bytes()).is_err() {
+                                return;
+                            }
+                        } else if let Some(range_val) = hdrs.get("range")
+                            && let Some(spec) = range_val.strip_prefix("bytes=")
+                            && let Some((s_str, e_str)) = spec.split_once('-')
+                        {
+                            let start = s_str.parse::<usize>().unwrap_or(0);
+                            if path == "/mid-403.wav" && start >= 131_072 {
+                                let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                                if stream.write_all(resp.as_bytes()).is_err() {
+                                    return;
+                                }
+                            } else {
+                                let start = start.min(total_len - 1);
+                                let end = e_str
+                                    .parse::<usize>()
+                                    .unwrap_or(total_len - 1)
+                                    .min(total_len - 1);
+                                range_hits.fetch_add(1, Ordering::Relaxed);
+                                let slice = &wav_bytes[start..=end];
+                                let resp = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                                    slice.len()
+                                );
+                                if stream.write_all(resp.as_bytes()).is_err()
+                                    || stream.write_all(slice).is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    let _ = stream.flush();
+                }
+            });
+        }
+    });
+
+    let valid_headers = serde_json::json!({
+        "User-Agent": "YtmTestAgent/1.0",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    });
+
+    let read_state_json = || -> serde_json::Value {
+        let p = lumina_playback_get_state_json();
+        assert!(!p.is_null());
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // 1. Async play with valid headers succeeds (server rejects missing headers with 403).
+    let ok_payload = serde_json::json!({
+        "id": "ytm:ok-1",
+        "title": "Valid Header Stream",
+        "stream_url": format!("http://{addr}/ok.wav"),
+        "headers": valid_headers,
+        "hint_extension": "wav",
+        "source": "YouTube Music",
+    })
+    .to_string();
+    let c_ok = CString::new(ok_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_ok.as_ptr(), 1), 0);
+
+    let mut settled_ok = None;
+    for _ in 0..80 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 1 && st["state_code"] == 2 {
+            settled_ok = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        settled_ok.is_some(),
+        "Expected async stream with valid headers to reach Playing state"
+    );
+    assert!(valid_range_hits.load(Ordering::Relaxed) >= 1);
+    assert_eq!(playback::lumina_playback_stop(), 0);
+
+    // 2. Async play with open-time 403 surfaces state_code == 4 and "HTTP 403" in last_error.
+    let open_403_payload = serde_json::json!({
+        "id": "ytm:open-403",
+        "title": "Open 403",
+        "stream_url": format!("http://{addr}/open-403.wav"),
+        "headers": valid_headers,
+        "hint_extension": "wav",
+        "source": "YouTube Music",
+    })
+    .to_string();
+    let c_open_403 = CString::new(open_403_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_open_403.as_ptr(), 2), 0);
+
+    let mut settled_open_err = None;
+    for _ in 0..80 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 2 && st["state_code"] == 4 {
+            settled_open_err = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let open_err_state = settled_open_err.expect("open 403 must reach Error state (4)");
+    assert_eq!(open_err_state["state_name"], "Error");
+    let open_err_str = open_err_state["last_error"].as_str().unwrap_or("");
+    assert!(
+        open_err_str.contains("HTTP 403"),
+        "Expected 'HTTP 403' in async open last_error, got: {open_err_str}"
+    );
+    let err_msg_ptr = lumina_last_error_message();
+    assert!(!err_msg_ptr.is_null());
+    let err_msg = unsafe { CStr::from_ptr(err_msg_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(err_msg_ptr) };
+    assert!(err_msg.contains("HTTP 403"));
+    assert!(lumina_last_error_message().is_null());
+
+    // 3. Async play that opens OK on chunk 0 then hits HTTP 403 on mid-stream Range chunk 1.
+    let mid_403_payload = serde_json::json!({
+        "id": "ytm:mid-403",
+        "title": "Mid 403",
+        "stream_url": format!("http://{addr}/mid-403.wav"),
+        "headers": valid_headers,
+        "hint_extension": "wav",
+        "source": "YouTube Music",
+    })
+    .to_string();
+    let c_mid_403 = CString::new(mid_403_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_mid_403.as_ptr(), 3), 0);
+
+    let mut settled_mid_err = None;
+    for _ in 0..100 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 3 && st["state_code"] == 4 {
+            settled_mid_err = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let mid_err_state = settled_mid_err.expect("mid-stream Range 403 must reach Error state (4)");
+    assert_eq!(mid_err_state["state_name"], "Error");
+    let mid_err_str = mid_err_state["last_error"].as_str().unwrap_or("");
+    assert!(
+        mid_err_str.contains("HTTP 403"),
+        "Expected 'HTTP 403' in mid-stream last_error, got: {mid_err_str}"
+    );
+
+    // 4. Sync play with open-time 403 returns non-zero and preserves "HTTP 403" in last error & state JSON.
+    let rc_sync = playback::lumina_playback_play(c_open_403.as_ptr());
+    assert_eq!(rc_sync, error::LUMINA_ERR_AUDIO_BACKEND);
+    let sync_state = read_state_json();
+    assert_eq!(sync_state["state_code"], 4);
+    assert!(
+        sync_state["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("HTTP 403")
+    );
+    let sync_err_ptr = lumina_last_error_message();
+    assert!(!sync_err_ptr.is_null());
+    let sync_err = unsafe { CStr::from_ptr(sync_err_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(sync_err_ptr) };
+    assert!(sync_err.contains("HTTP 403"));
+    assert!(lumina_last_error_message().is_null());
+
+    server_stop.store(true, Ordering::SeqCst);
+    let _ = server_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[test]
+fn test_ffi_source_spec_epoch_and_external_backend_rejection() {
+    use core_types::{StreamKey, StreamSourceSpec};
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    // Build an in-memory WAV (~1.5s stereo 44.1 kHz) served over HTTP Range
+    let sample_rate = 44_100u32;
+    let channels = 2u16;
+    let num_frames = 66_150u32;
+    let mut wav_bytes = Vec::new();
+    let block_align = channels * 2;
+    let byte_rate = sample_rate * (block_align as u32);
+    let data_len = num_frames * (block_align as u32);
+    wav_bytes.extend_from_slice(b"RIFF");
+    wav_bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav_bytes.extend_from_slice(b"WAVEfmt ");
+    wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+    wav_bytes.extend_from_slice(&1u16.to_le_bytes());
+    wav_bytes.extend_from_slice(&channels.to_le_bytes());
+    wav_bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    wav_bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    wav_bytes.extend_from_slice(&block_align.to_le_bytes());
+    wav_bytes.extend_from_slice(&16u16.to_le_bytes());
+    wav_bytes.extend_from_slice(b"data");
+    wav_bytes.extend_from_slice(&data_len.to_le_bytes());
+    for n in 0..num_frames {
+        let t = n as f64 / sample_rate as f64;
+        let sample = ((2.0 * PI * 440.0 * t).sin() * 20000.0) as i16;
+        for _ in 0..channels {
+            wav_bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    let wav_bytes = Arc::new(wav_bytes);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server_stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = Arc::clone(&server_stop);
+    let server_handle = std::thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            let _ = stream.set_nonblocking(false);
+            let wav = Arc::clone(&wav_bytes);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = pos + 4;
+                            break;
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&buf[..total_read]);
+                    let first = req.lines().next().unwrap_or("");
+                    let mut parts = first.split_whitespace();
+                    let method = parts.next().unwrap_or("GET");
+                    let path = parts.next().unwrap_or("/");
+                    if path == "/stalled.wav" && method == "GET" {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        return;
+                    }
+                    let total_len = wav.len();
+                    if method == "HEAD" {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                        );
+                        let _ = stream.write_all(hdr.as_bytes());
+                    } else if let Some(range_line) = req
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        && let Some(spec) = range_line.split_once(':').map(|(_, v)| v.trim())
+                        && let Some((s, e)) = spec.strip_prefix("bytes=").and_then(|r| r.split_once('-'))
+                    {
+                        let start = s.parse::<usize>().unwrap_or(0).min(total_len - 1);
+                        let end = e
+                            .parse::<usize>()
+                            .unwrap_or(total_len - 1)
+                            .min(total_len - 1);
+                        let slice = &wav[start..=end];
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                            slice.len()
+                        );
+                        if stream.write_all(hdr.as_bytes()).is_err()
+                            || stream.write_all(slice).is_err()
+                        {
+                            return;
+                        }
+                    } else {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                        );
+                        if stream.write_all(hdr.as_bytes()).is_err()
+                            || stream.write_all(&wav).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let _ = stream.flush();
+                }
+            });
+        }
+    });
+
+    let read_state_json = || -> serde_json::Value {
+        let p = lumina_playback_get_state_json();
+        assert!(!p.is_null());
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // 1. ExternalBackend must be explicitly rejected by both play_async and sync play.
+    let ext_spec = StreamSourceSpec::ExternalBackend {
+        key: StreamKey::new("spotify", "sp-track-ffi", "very_high"),
+        provider_id: "spotify".to_string(),
+        track_uri: "spotify:track:sp-track-ffi".to_string(),
+        external_web_url: None,
+        notice: None,
+        preview_url: None,
+    };
+    let ext_payload = serde_json::json!({
+        "id": "sp-track-ffi",
+        "epoch": 1,
+        "source_spec": ext_spec,
+    })
+    .to_string();
+    let c_ext = CString::new(ext_payload).unwrap();
+    assert_ne!(lumina_playback_play_async(c_ext.as_ptr(), 1), 0);
+    let err_ptr = lumina_last_error_message();
+    assert!(!err_ptr.is_null());
+    let err_str = unsafe { CStr::from_ptr(err_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(err_ptr) };
+    assert!(err_str.contains("ExternalBackend"));
+
+    assert_ne!(playback::lumina_playback_play(c_ext.as_ptr()), 0);
+    let err_ptr2 = lumina_last_error_message();
+    assert!(!err_ptr2.is_null());
+    unsafe { lumina_string_free(err_ptr2) };
+
+    // 2. Async play with DirectRange StreamSourceSpec + explicit epoch superseded by higher epoch.
+    let stalled_spec = StreamSourceSpec::DirectRange {
+        key: StreamKey::new("qobuz", "qb-stalled-ffi", "27"),
+        url: format!("http://{addr}/stalled.wav"),
+        headers: BTreeMap::new(),
+        bitrate_bps: None,
+        mime_type: Some("audio/wav".to_string()),
+        hint_extension: Some("wav".to_string()),
+        content_length: None,
+        expire_at: None,
+        init_range_end: None,
+        index_range_start: None,
+        index_range_end: None,
+        loudness: None,
+        album_loudness: None,
+    };
+    let stalled_payload = serde_json::json!({
+        "id": "qb-stalled-ffi",
+        "epoch": 10,
+        "source": "Qobuz",
+        "duration_ms": 1500,
+        "source_spec": stalled_spec,
+    })
+    .to_string();
+    let c_stalled = CString::new(stalled_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_stalled.as_ptr(), 10), 0);
+    let loading_state = read_state_json();
+    assert_eq!(loading_state["state_code"], 5);
+    assert_eq!(loading_state["epoch"], 10);
+
+    let ok_spec = StreamSourceSpec::DirectRange {
+        key: StreamKey::new("qobuz", "qb-ok-ffi", "27"),
+        url: format!("http://{addr}/ok.wav"),
+        headers: BTreeMap::new(),
+        bitrate_bps: Some(1_411_200),
+        mime_type: Some("audio/wav".to_string()),
+        hint_extension: Some("wav".to_string()),
+        content_length: None,
+        expire_at: None,
+        init_range_end: None,
+        index_range_start: None,
+        index_range_end: None,
+        loudness: None,
+        album_loudness: None,
+    };
+    let ok_payload = serde_json::json!({
+        "id": "qb-ok-ffi",
+        "epoch": 25,
+        "source": "Qobuz",
+        "duration_ms": 1500,
+        "source_spec": ok_spec,
+    })
+    .to_string();
+    let c_ok = CString::new(ok_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_ok.as_ptr(), 25), 0);
+
+    let mut settled = None;
+    for _ in 0..100 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 25 && st["state_code"] == 2 {
+            settled = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let settled = settled.unwrap_or_else(|| {
+        panic!(
+            "DirectRange source_spec play_async should settle into Playing, got: {}",
+            read_state_json()
+        )
+    });
+    assert_eq!(settled["current_track_id"], "qb-ok-ffi");
+    assert!(settled["epoch"].as_u64().unwrap_or(0) >= 25);
+
+    // Seeking must advance epoch monotonically and surface in get_state_json
+    let epoch_before_seek = settled["epoch"].as_u64().unwrap();
+    assert_eq!(playback::lumina_playback_seek(500), 0);
+    let after_seek = read_state_json();
+    assert!(
+        after_seek["epoch"].as_u64().unwrap() > epoch_before_seek,
+        "Seek must increment exposed state JSON epoch"
+    );
+
+    // Sync play with DirectRange StreamSourceSpec + higher epoch also succeeds cleanly
+    let sync_spec = StreamSourceSpec::DirectRange {
+        key: StreamKey::new("qobuz", "qb-sync-ffi", "27"),
+        url: format!("http://{addr}/sync.wav"),
+        headers: BTreeMap::new(),
+        bitrate_bps: Some(1_411_200),
+        mime_type: Some("audio/wav".to_string()),
+        hint_extension: Some("wav".to_string()),
+        content_length: None,
+        expire_at: None,
+        init_range_end: None,
+        index_range_start: None,
+        index_range_end: None,
+        loudness: None,
+        album_loudness: None,
+    };
+    let sync_payload = serde_json::json!({
+        "id": "qb-sync-ffi",
+        "epoch": 40,
+        "source": "Qobuz",
+        "source_spec": sync_spec,
+    })
+    .to_string();
+    let c_sync = CString::new(sync_payload).unwrap();
+    assert_eq!(playback::lumina_playback_play(c_sync.as_ptr()), 0);
+    let after_sync = read_state_json();
+    assert_eq!(after_sync["state_code"], 2);
+    assert_eq!(after_sync["current_track_id"], "qb-sync-ffi");
+    assert!(after_sync["epoch"].as_u64().unwrap() >= 40);
+
+    // Out-of-order stale explicit epoch (5 < 40) must be silently dropped without disturbing qb-sync-ffi.
+    let stale_payload = serde_json::json!({
+        "id": "qb-stale-ffi",
+        "epoch": 5,
+        "source": "Qobuz",
+        "source_spec": sync_spec,
+    })
+    .to_string();
+    let c_stale = CString::new(stale_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_stale.as_ptr(), 5), 0);
+    let after_stale = read_state_json();
+    assert_eq!(after_stale["state_code"], 2);
+    assert_eq!(after_stale["current_track_id"], "qb-sync-ffi");
+    assert!(after_stale["epoch"].as_u64().unwrap() >= 40);
+
+    assert_eq!(playback::lumina_playback_stop(), 0);
+    let after_stop = read_state_json();
+    assert!(after_stop["epoch"].as_u64().unwrap() > 40);
+
+    server_stop.store(true, Ordering::SeqCst);
+    let _ = server_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+}
+
+#[test]
+fn test_phase2_l1_cache_and_sidecar_ffi() {
+    let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "lumina_ffi_l1_test_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let db_path = tmp_dir.join("l1_ffi.db");
+    let c_db_path = CString::new(db_path.to_str().unwrap()).unwrap();
+    assert_eq!(lumina_library_init(c_db_path.as_ptr()), 0);
+
+    let rec_fresh = serde_json::json!({
+        "provider_id": "youtube_music",
+        "track_id": "dQw4w9WgXcQ",
+        "quality_key": "default",
+        "stream_type": "direct_range",
+        "url_or_manifest": "https://rr1.googlevideo.com/videoplayback?itag=251",
+        "headers_json": r#"{"User-Agent":"Lumina/2.0"}"#,
+        "mime_type": r#"audio/webm; codecs="opus""#,
+        "bitrate_bps": 160000,
+        "content_length": 5200000,
+        "init_range_end": 740,
+        "index_range_start": 741,
+        "index_range_end": 1105,
+        "expire_at": 2_000_000_000i64,
+        "network_epoch": 1,
+        "updated_at": 1_700_000_000i64,
+        "extra_json": r#"{"hint_extension":"webm"}"#,
+    })
+    .to_string();
+    let c_fresh = CString::new(rec_fresh).unwrap();
+    assert_eq!(lumina_l1_cache_upsert(c_fresh.as_ptr()), 0);
+
+    let rec_expired = serde_json::json!({
+        "provider_id": "qobuz",
+        "track_id": "999",
+        "quality_key": "27",
+        "stream_type": "direct_range",
+        "url_or_manifest": "https://cdn.qobuz.com/expired.flac",
+        "headers_json": "{}",
+        "expire_at": 1_600_000_000i64,
+        "network_epoch": 1,
+        "updated_at": 1_599_000_000i64,
+    })
+    .to_string();
+    let c_expired = CString::new(rec_expired).unwrap();
+    assert_eq!(lumina_l1_cache_upsert(c_expired.as_ptr()), 0);
+
+    // Load unexpired flushes FIFO writes and filters expired rows
+    let ptr = lumina_l1_cache_load_unexpired(1_900_000_000);
+    assert!(!ptr.is_null());
+    let json_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(ptr) };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["provider_id"], "youtube_music");
+    assert_eq!(rows[0]["track_id"], "dQw4w9WgXcQ");
+    assert_eq!(rows[0]["init_range_end"], 740);
+    assert_eq!(rows[0]["index_range_start"], 741);
+    assert_eq!(rows[0]["index_range_end"], 1105);
+
+    // Delete removes the entry
+    let c_pid = CString::new("youtube_music").unwrap();
+    let c_tid = CString::new("dQw4w9WgXcQ").unwrap();
+    let c_qk = CString::new("default").unwrap();
+    assert_eq!(
+        lumina_l1_cache_delete(c_pid.as_ptr(), c_tid.as_ptr(), c_qk.as_ptr()),
+        0
+    );
+
+    let ptr_after = lumina_l1_cache_load_unexpired(1_900_000_000);
+    assert!(!ptr_after.is_null());
+    let after_str = unsafe { CStr::from_ptr(ptr_after).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(ptr_after) };
+    let rows_after: Vec<serde_json::Value> = serde_json::from_str(&after_str).unwrap();
+    assert!(rows_after.is_empty());
+
+    // Sidecar job validation & H2 warmup smoke check
+    assert_ne!(lumina_sidecar_assign_job(0), 0);
+    assert_eq!(lumina_streaming_warmup_h2(), 0);
+
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let read_state_json = || -> serde_json::Value {
+        let ptr = playback::lumina_playback_get_state_json();
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(ptr) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // Build a valid 48 kHz WAV in memory and serve both 200/206 and 401 endpoints
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "lumina_ffi_phase3_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav_tmp = tmp_dir.join("stream.wav");
+    write_test_wav(&wav_tmp, 48_000, 2, 48_000 * 3);
+    let wav_bytes = std::fs::read(&wav_tmp).unwrap();
+    let wav_len = wav_bytes.len() as u64;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop_srv = Arc::new(AtomicBool::new(false));
+    let stop_bg = Arc::clone(&stop_srv);
+    let srv_bytes = Arc::new(wav_bytes);
+    let srv_handle = thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+                    let body = Arc::clone(&srv_bytes);
+                    thread::spawn(move || {
+                        let mut buf = [0u8; 8192];
+                        loop {
+                            let mut total_read = 0;
+                            loop {
+                                let Ok(n) = s.read(&mut buf[total_read..]) else {
+                                    return;
+                                };
+                                if n == 0 {
+                                    return;
+                                }
+                                total_read += n;
+                                if let Some(pos) =
+                                    buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                                {
+                                    total_read = pos + 4;
+                                    break;
+                                }
+                                if total_read >= buf.len() {
+                                    return;
+                                }
+                            }
+                            let req = String::from_utf8_lossy(&buf[..total_read]);
+                            let first = req.lines().next().unwrap_or("");
+                            let mut parts = first.split_whitespace();
+                            let method = parts.next().unwrap_or("GET");
+                            let path = parts.next().unwrap_or("/");
+                            if path == "/401.wav" {
+                                if s.write_all(
+                                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+                                )
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                let _ = s.flush();
+                                continue;
+                            }
+                            let total = body.len();
+                            let range_hdr = req.lines().find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .starts_with("range:")
+                                    .then(|| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+                                    .flatten()
+                            });
+                            let (start, end, partial) = if let Some(rh) = range_hdr
+                                && let Some(spec) = rh.strip_prefix("bytes=")
+                            {
+                                let (a, b) = spec.split_once('-').unwrap_or(("0", ""));
+                                let st = a.parse::<usize>().unwrap_or(0);
+                                let en = if b.is_empty() {
+                                    total - 1
+                                } else {
+                                    b.parse::<usize>().unwrap_or(total - 1).min(total - 1)
+                                };
+                                (st, en, true)
+                            } else {
+                                (0, total - 1, false)
+                            };
+                            let slice = &body[start..=end];
+                            let hdr = if partial {
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\n\r\n",
+                                    slice.len()
+                                )
+                            } else {
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\n\r\n",
+                                    slice.len()
+                                )
+                            };
+                            if s.write_all(hdr.as_bytes()).is_err() {
+                                return;
+                            }
+                            if method != "HEAD" && s.write_all(slice).is_err() {
+                                return;
+                            }
+                            let _ = s.flush();
+                        }
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // 1. Play youtube_music DirectRange spec via lumina_playback_play_async
+    let ytm_payload = serde_json::json!({
+        "id": "ytm-p3-1",
+        "source": "YouTube Music",
+        "source_spec": {
+            "kind": "direct_range",
+            "key": {
+                "provider_id": "youtube_music",
+                "track_id": "ytm-p3-1",
+                "quality_key": "251"
+            },
+            "url": format!("http://127.0.0.1:{port}/ok.wav"),
+            "headers": {},
+            "content_length": wav_len,
+            "mime_type": "audio/wav",
+            "hint_extension": "wav",
+            "loudness": { "gain_db": -4.0, "peak": 0.9 }
+        }
+    })
+    .to_string();
+    let c_ytm = CString::new(ytm_payload).unwrap();
+    assert_eq!(playback::lumina_playback_play_async(c_ytm.as_ptr(), 101), 0);
+
+    for _ in 0..80 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 101 && st["state_code"] == 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let playing_st = read_state_json();
+    assert_eq!(playing_st["state_code"], 2, "Expected Playing: {playing_st}");
+    assert!(playing_st.get("last_error_code").is_some());
+    assert!(playing_st.get("last_error_provider").is_some());
+    assert!(playing_st["last_error_code"].is_null());
+    assert!(playing_st["last_error_provider"].is_null());
+
+    // 2. Cancel provider via FFI circuit breaker -> surfaces AUTH_REQUIRED + youtube_music
+    let c_ytm_pid = CString::new("youtube_music").unwrap();
+    assert_eq!(lumina_streaming_cancel_provider(c_ytm_pid.as_ptr()), 0);
+    let cancelled_st = read_state_json();
+    assert_eq!(cancelled_st["state_code"], 4, "Expected Error: {cancelled_st}");
+    assert_eq!(cancelled_st["last_error_code"], "AUTH_REQUIRED");
+    assert_eq!(cancelled_st["last_error_provider"], "youtube_music");
+
+    // 3. HTTP 401 during lumina_playback_play_async surfaces AUTH_REQUIRED + qobuz
+    let qb_401_payload = serde_json::json!({
+        "id": "qb-401-1",
+        "source": "Qobuz",
+        "source_spec": {
+            "kind": "direct_range",
+            "key": {
+                "provider_id": "qobuz",
+                "track_id": "qb-401-1",
+                "quality_key": "27"
+            },
+            "url": format!("http://127.0.0.1:{port}/401.wav"),
+            "headers": {},
+            "mime_type": "audio/wav",
+            "hint_extension": "wav"
+        }
+    })
+    .to_string();
+    let c_qb = CString::new(qb_401_payload).unwrap();
+    assert_eq!(playback::lumina_playback_play_async(c_qb.as_ptr(), 102), 0);
+
+    for _ in 0..80 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 102 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let err_401_st = read_state_json();
+    assert_eq!(err_401_st["state_code"], 4, "Expected Error: {err_401_st}");
+    assert_eq!(err_401_st["last_error_code"], "AUTH_REQUIRED");
+    assert_eq!(err_401_st["last_error_provider"], "qobuz");
+
+    // 4. Clean shutdown flushes pending L1 SQLite writes & runs WAL TRUNCATE checkpoint
+    let db_path = tmp_dir.join("shutdown_wal.db");
+    let c_db_path = CString::new(db_path.to_str().unwrap()).unwrap();
+    assert_eq!(lumina_library_init(c_db_path.as_ptr()), 0);
+    let rec_json = serde_json::json!({
+        "provider_id": "qobuz",
+        "track_id": "persist-shutdown-1",
+        "quality_key": "27",
+        "stream_type": "direct_range",
+        "url_or_manifest": "https://cdn.qobuz.com/persist.flac",
+        "headers_json": "{}",
+        "expire_at": 2_500_000_000i64,
+        "network_epoch": 1,
+        "updated_at": 1_800_000_000i64,
+    })
+    .to_string();
+    let c_rec = CString::new(rec_json).unwrap();
+    assert_eq!(lumina_l1_cache_upsert(c_rec.as_ptr()), 0);
+
+    // Immediately shut down WITHOUT calling lumina_l1_cache_load_unexpired first!
+    assert_eq!(lumina_shutdown(), 0);
+
+    // Reopen DB in a fresh engine lifecycle -> record must be durably persisted!
+    assert_eq!(lumina_init_headless(), 0);
+    assert_eq!(lumina_library_init(c_db_path.as_ptr()), 0);
+    let ptr = lumina_l1_cache_load_unexpired(2_000_000_000);
+    assert!(!ptr.is_null());
+    let loaded_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(ptr) };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&loaded_str).unwrap();
+    assert_eq!(rows.len(), 1, "Pending L1 write must be flushed on shutdown: {rows:?}");
+    assert_eq!(rows[0]["track_id"], "persist-shutdown-1");
+
+    assert_eq!(lumina_shutdown(), 0);
+    stop_srv.store(true, Ordering::SeqCst);
+    let _ = srv_handle.join();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
+    use core_types::{StreamKey, StreamSourceSpec};
+    use std::thread;
+    use std::time::Duration;
+
+    let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "lumina_ffi_phase4_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let l2_root = tmp_dir.join("l2_custom");
+    let c_l2_root = CString::new(l2_root.to_str().unwrap()).unwrap();
+
+    // 1. Before library DB init, L2 cache FFI functions must return LUMINA_ERR_NOT_INITIALIZED.
+    let mut total_bytes: u64 = 999;
+    assert_eq!(
+        lumina_l2_cache_init(c_l2_root.as_ptr(), 0, 0),
+        error::LUMINA_ERR_NOT_INITIALIZED
+    );
+    assert_eq!(
+        lumina_l2_cache_total_bytes(&mut total_bytes),
+        error::LUMINA_ERR_NOT_INITIALIZED
+    );
+    assert_eq!(
+        lumina_l2_cache_init(std::ptr::null(), 0, 0),
+        error::LUMINA_ERR_NULL_POINTER
+    );
+    assert_eq!(
+        lumina_l2_cache_total_bytes(std::ptr::null_mut()),
+        error::LUMINA_ERR_NULL_POINTER
+    );
+
+    assert_eq!(lumina_init_headless(), 0);
+    let db_path = tmp_dir.join("phase4.db");
+    let c_db_path = CString::new(db_path.to_str().unwrap()).unwrap();
+    assert_eq!(lumina_library_init(c_db_path.as_ptr()), 0);
+
+    // 2. Auto-initialized default L2CacheManager works immediately after lumina_library_init.
+    assert_eq!(lumina_l2_cache_total_bytes(&mut total_bytes), 0);
+    assert_eq!(total_bytes, 0);
+
+    // 3. Explicit lumina_l2_cache_init reconfigures root_dir & watermarks cleanly.
+    assert_eq!(
+        lumina_l2_cache_init(c_l2_root.as_ptr(), 2000, 1000),
+        0
+    );
+    let eng = engine::get_engine();
+    let mgr = eng
+        .l2_cache_manager
+        .read()
+        .unwrap()
+        .clone()
+        .expect("l2_cache_manager must be initialized");
+    let key1 = StreamKey::new("qobuz", "ffi_t1", "27");
+    let key2 = StreamKey::new("qobuz", "ffi_t2", "27");
+    eng.runtime
+        .block_on(mgr.store_direct_head(&key1, &vec![1u8; 900], Some(9000), 0))
+        .unwrap();
+    assert_eq!(lumina_l2_cache_total_bytes(&mut total_bytes), 0);
+    assert_eq!(total_bytes, 900);
+
+    // Lookup queues pending access; lumina_l2_cache_flush_access flushes in one transaction.
+    let hit = eng.runtime.block_on(mgr.lookup_direct_head(&key1)).unwrap().unwrap();
+    drop(hit);
+    assert_eq!(lumina_l2_cache_flush_access(), 0);
+    assert_eq!(lumina_l2_cache_run_orphan_sweep(), 0);
+    assert_eq!(lumina_l2_cache_evict_now(), 0);
+
+    // Push above high watermark (2000) and verify eviction reduces total_bytes <= 1000.
+    eng.runtime
+        .block_on(mgr.store_direct_head(&key2, &vec![2u8; 1400], Some(9000), 0))
+        .unwrap();
+    assert_eq!(lumina_l2_cache_evict_now(), 0);
+    assert_eq!(lumina_l2_cache_total_bytes(&mut total_bytes), 0);
+    assert!(total_bytes <= 1000, "Expected total_bytes <= 1000, got {total_bytes}");
+
+    // 4. Dual-Deck FFI: play Active track, prepare Standby track, and skip_to_standby().
+    let wav1 = tmp_dir.join("active_deck.wav");
+    let wav2 = tmp_dir.join("standby_deck.wav");
+    write_test_wav(&wav1, 48_000, 2, 48_000 * 4);
+    write_test_wav(&wav2, 48_000, 2, 48_000 * 4);
+
+    let read_state_json = || -> serde_json::Value {
+        let ptr = lumina_playback_get_state_json();
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(ptr) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // Apple Music ExternalBackend must be rejected by lumina_playback_prepare_standby_async!
+    let apple_spec = StreamSourceSpec::ExternalBackend {
+        key: StreamKey::new("apple_music", "am-999", "lossless"),
+        provider_id: "apple_music".to_string(),
+        track_uri: "apple:am-999".to_string(),
+        external_web_url: None,
+        preview_url: None,
+        notice: None,
+    };
+    let apple_payload = serde_json::json!({
+        "id": "am-999",
+        "epoch": 1,
+        "source_spec": apple_spec,
+    })
+    .to_string();
+    let c_apple = CString::new(apple_payload).unwrap();
+    assert_eq!(
+        lumina_playback_prepare_standby_async(c_apple.as_ptr(), 1),
+        error::LUMINA_ERR_AUDIO_BACKEND
+    );
+
+    // Before standby is prepared, skip_to_standby returns 0.
+    assert_eq!(lumina_playback_skip_to_standby(), 0);
+
+    // Start playing wav1 on Active deck.
+    let play1_json = serde_json::json!({
+        "id": "trk-deck-1",
+        "title": "Deck 1",
+        "epoch": 10,
+        "source_spec": StreamSourceSpec::LocalFile {
+            key: StreamKey::new("local", "trk-deck-1", "native"),
+            path: wav1.to_string_lossy().to_string(),
+            loudness: None,
+            album_loudness: None,
+        }
+    })
+    .to_string();
+    let c_play1 = CString::new(play1_json).unwrap();
+    assert_eq!(lumina_playback_play(c_play1.as_ptr()), 0);
+
+    let st_playing = read_state_json();
+    assert_eq!(st_playing["state_code"], 2);
+    assert_eq!(st_playing["active_deck"], "deck_a");
+    assert_eq!(st_playing["activeDeck"], "deck_a");
+    assert_eq!(st_playing["deck_a_state"], "PLAYING");
+    assert_eq!(st_playing["deck_b_state"], "IDLE");
+
+    // Prepare wav2 on Standby deck (Deck B).
+    let standby2_json = serde_json::json!({
+        "id": "trk-deck-2",
+        "title": "Deck 2",
+        "epoch": 10,
+        "source_spec": StreamSourceSpec::LocalFile {
+            key: StreamKey::new("local", "trk-deck-2", "native"),
+            path: wav2.to_string_lossy().to_string(),
+            loudness: None,
+            album_loudness: None,
+        }
+    })
+    .to_string();
+    let c_standby2 = CString::new(standby2_json).unwrap();
+    assert_eq!(lumina_playback_prepare_standby_async(c_standby2.as_ptr(), 10), 0);
+
+    let mut standby_ready = false;
+    for _ in 0..80 {
+        let st = read_state_json();
+        if st["deck_b_state"] == "STANDBY_READY" {
+            assert!(st["standby_buffered_ms"].as_u64().unwrap_or(0) >= 1500);
+            standby_ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        standby_ready,
+        "Expected Deck B to reach STANDBY_READY: {}",
+        read_state_json()
+    );
+
+    // Zero-latency manual skip to standby flips active_deck to deck_b and returns 1.
+    assert_eq!(lumina_playback_skip_to_standby(), 1);
+    let st_after_skip = read_state_json();
+    assert_eq!(st_after_skip["active_deck"], "deck_b");
+    assert_eq!(st_after_skip["deck_b_state"], "PLAYING");
+    assert!(st_after_skip["manual_zero_latency_switches"].as_u64().unwrap_or(0) >= 1);
+
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
+    use core_types::{StreamKey, StreamSourceSpec};
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    static ADOPTED_TEST_URL: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
+    extern "C" fn refresh_to_v2_cb(req_id: u64, req_json_ptr: *mut std::os::raw::c_char) {
+        let raw = unsafe { CStr::from_ptr(req_json_ptr).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(req_json_ptr) };
+        let req: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let (target_url, target_len) = ADOPTED_TEST_URL
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("ADOPTED_TEST_URL must be set");
+        let spec = StreamSourceSpec::DirectRange {
+            key: StreamKey::new(
+                req["provider_id"].as_str().unwrap_or("youtube_music"),
+                req["track_id"].as_str().unwrap_or("adopted"),
+                req["quality_key"].as_str().unwrap_or("default"),
+            ),
+            url: target_url,
+            headers: BTreeMap::new(),
+            content_length: Some(target_len),
+            bitrate_bps: Some(1_411_200),
+            mime_type: Some("audio/wav".to_string()),
+            hint_extension: Some("wav".to_string()),
+            expire_at: None,
+            init_range_end: None,
+            index_range_start: None,
+            index_range_end: None,
+            loudness: None,
+            album_loudness: None,
+        };
+        let reply = serde_json::json!({
+            "status": "refreshed",
+            "spec": spec,
+        })
+        .to_string();
+        let c_reply = CString::new(reply).unwrap();
+        assert_eq!(lumina_stream_complete_refresh(req_id, c_reply.as_ptr()), 0);
+    }
+
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "lumina_ffi_async_l2_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav1_path = tmp_dir.join("l2_source.wav");
+    let wav2_path = tmp_dir.join("v2_refreshed.wav");
+    write_test_wav(&wav1_path, 44_100, 2, 44_100 * 2); // ~352 KiB
+    write_test_wav(&wav2_path, 44_100, 2, 44_100 * 3); // ~529 KiB (different content_length)
+    let wav1_bytes = Arc::new(std::fs::read(&wav1_path).unwrap());
+    let wav2_bytes = Arc::new(std::fs::read(&wav2_path).unwrap());
+
+    let l2_ranges_seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let l2_ranges_srv = Arc::clone(&l2_ranges_seen);
+    let w1_srv = Arc::clone(&wav1_bytes);
+    let w2_srv = Arc::clone(&wav2_bytes);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_bg = Arc::clone(&stop_flag);
+    let srv_handle = std::thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            let _ = stream.set_nonblocking(false);
+            let w1 = Arc::clone(&w1_srv);
+            let w2 = Arc::clone(&w2_srv);
+            let ranges = Arc::clone(&l2_ranges_srv);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = pos + 4;
+                            break;
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&buf[..total_read]);
+                    let first = req.lines().next().unwrap_or("");
+                    let mut parts = first.split_whitespace();
+                    let _method = parts.next().unwrap_or("GET");
+                    let path = parts.next().unwrap_or("/");
+                    if path == "/expired-403.wav" {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                        continue;
+                    }
+                    let payload = if path == "/refreshed-v2.wav" { &w2 } else { &w1 };
+                    let total_len = payload.len();
+                    let range_hdr = req
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim().to_string());
+                    if path == "/l2-track.wav"
+                        && let Some(ref rh) = range_hdr
+                    {
+                        ranges.lock().unwrap().push(rh.clone());
+                    }
+                    if let Some(spec) = range_hdr
+                        && let Some((s, e)) =
+                            spec.strip_prefix("bytes=").and_then(|r| r.split_once('-'))
+                    {
+                        let start = s.parse::<usize>().unwrap_or(0).min(total_len - 1);
+                        let end = e
+                            .parse::<usize>()
+                            .unwrap_or(total_len - 1)
+                            .min(total_len - 1);
+                        let slice = &payload[start..=end];
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                            slice.len()
+                        );
+                        if stream.write_all(hdr.as_bytes()).is_err()
+                            || stream.write_all(slice).is_err()
+                        {
+                            return;
+                        }
+                    } else {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                        );
+                        if stream.write_all(hdr.as_bytes()).is_err()
+                            || stream.write_all(payload).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let _ = stream.flush();
+                }
+            });
+        }
+    });
+
+    assert_eq!(lumina_init_headless(), 0);
+    let db_path = tmp_dir.join("async_l2.db");
+    let c_db_path = CString::new(db_path.to_str().unwrap()).unwrap();
+    assert_eq!(lumina_library_init(c_db_path.as_ptr()), 0);
+    let l2_root = tmp_dir.join("l2_dir");
+    let c_l2_root = CString::new(l2_root.to_str().unwrap()).unwrap();
+    assert_eq!(lumina_l2_cache_init(c_l2_root.as_ptr(), 0, 0), 0);
+
+    let eng = engine::get_engine();
+    let mgr = eng
+        .l2_cache_manager
+        .read()
+        .unwrap()
+        .clone()
+        .expect("l2_cache_manager must be initialized");
+
+    // Pre-populate L2 head cache with first 131_072 bytes of wav1.
+    let cached_prefix_len = 131_072usize;
+    let l2_key = StreamKey::new("qobuz", "ffi-async-l2", "27");
+    eng.runtime
+        .block_on(mgr.store_direct_head(
+            &l2_key,
+            &wav1_bytes[..cached_prefix_len],
+            Some(wav1_bytes.len() as u64),
+            0,
+        ))
+        .unwrap();
+
+    let read_state_json = || -> serde_json::Value {
+        let p = lumina_playback_get_state_json();
+        assert!(!p.is_null());
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // 1. lumina_playback_play_async must hit HybridByteStream L2 head cache (overlap starts at 131072 - 64).
+    let l2_spec = StreamSourceSpec::DirectRange {
+        key: l2_key.clone(),
+        url: format!("http://{addr}/l2-track.wav"),
+        headers: BTreeMap::new(),
+        content_length: Some(wav1_bytes.len() as u64),
+        bitrate_bps: Some(1_411_200),
+        mime_type: Some("audio/wav".to_string()),
+        hint_extension: Some("wav".to_string()),
+        expire_at: None,
+        init_range_end: None,
+        index_range_start: None,
+        index_range_end: None,
+        loudness: None,
+        album_loudness: None,
+    };
+    let l2_payload = serde_json::json!({
+        "id": "ffi-async-l2",
+        "epoch": 50,
+        "source": "Qobuz",
+        "source_spec": l2_spec,
+    })
+    .to_string();
+    let c_l2_payload = CString::new(l2_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_l2_payload.as_ptr(), 1), 0);
+
+    let mut settled_l2 = false;
+    for _ in 0..100 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 1 && st["state_code"] == 2 {
+            settled_l2 = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(settled_l2, "L2 async play should settle into Playing: {}", read_state_json());
+
+    // Wait briefly for HybridByteStream background overlap verification request.
+    let expected_overlap_prefix = format!("bytes={}-", cached_prefix_len - 64);
+    let mut saw_overlap = false;
+    for _ in 0..50 {
+        let seen = l2_ranges_seen.lock().unwrap().clone();
+        if seen.iter().any(|r| r.starts_with(&expected_overlap_prefix)) {
+            saw_overlap = true;
+            assert!(
+                !seen.iter().any(|r| r.starts_with("bytes=0-")),
+                "L2 hit must serve [0, cached_prefix) locally instead of fetching bytes=0-*: {seen:?}"
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    assert!(
+        saw_overlap,
+        "Expected HybridByteStream overlap Range starting at {expected_overlap_prefix}, got {:?}",
+        l2_ranges_seen.lock().unwrap()
+    );
+
+    // 2. lumina_playback_play_async must commit the adopted StreamSourceSpec after initial 403 StreamFormatChanged.
+    let v2_url = format!("http://{addr}/refreshed-v2.wav");
+    *ADOPTED_TEST_URL.lock().unwrap() = Some((v2_url.clone(), wav2_bytes.len() as u64));
+    assert_eq!(lumina_stream_set_refresh_callback(Some(refresh_to_v2_cb)), 0);
+
+    let expired_spec = StreamSourceSpec::DirectRange {
+        key: StreamKey::new("youtube_music", "ffi-adopted-v2", "default"),
+        url: format!("http://{addr}/expired-403.wav"),
+        headers: BTreeMap::new(),
+        content_length: Some(wav1_bytes.len() as u64), // differs from wav2_bytes.len() -> StreamFormatChanged!
+        bitrate_bps: Some(1_411_200),
+        mime_type: Some("audio/wav".to_string()),
+        hint_extension: Some("wav".to_string()),
+        expire_at: None,
+        init_range_end: None,
+        index_range_start: None,
+        index_range_end: None,
+        loudness: None,
+        album_loudness: None,
+    };
+    let expired_payload = serde_json::json!({
+        "id": "ffi-adopted-v2",
+        "epoch": 60,
+        "source": "YouTube Music",
+        "source_spec": expired_spec,
+    })
+    .to_string();
+    let c_exp = CString::new(expired_payload).unwrap();
+    assert_eq!(lumina_playback_play_async(c_exp.as_ptr(), 2), 0);
+
+    let mut settled_v2 = false;
+    for _ in 0..150 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 2 && st["state_code"] == 2 {
+            settled_v2 = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        settled_v2,
+        "Refreshed StreamFormatChanged async play must settle into Playing: {}",
+        read_state_json()
+    );
+
+    let committed_spec = eng
+        .player
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .active_source_spec()
+        .expect("active_source_spec must be committed");
+    match committed_spec {
+        StreamSourceSpec::DirectRange { url, content_length, .. } => {
+            assert_eq!(url, v2_url, "must commit adopted refreshed URL, not stale pre-refresh URL");
+            assert_eq!(content_length, Some(wav2_bytes.len() as u64));
+        }
+        other => panic!("Expected DirectRange adopted spec, got {other:?}"),
+    }
+
+    assert_eq!(lumina_stream_set_refresh_callback(None), 0);
+    stop_flag.store(true, Ordering::SeqCst);
+    let _ = srv_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

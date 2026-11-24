@@ -29,7 +29,7 @@ fn read_http_request(stream: &mut TcpStream) -> String {
 
 use core_audio::{
     infer_extension_from_magic, parse_m3u_entries, parse_pls_entries, rank_sample_format,
-    select_best_config_index, AudioDecoder, AudioPlayer, BackendError, CoreAudioError, DecoderError,
+    select_best_config_index, AudioDecoder, AudioPlayer, BackendError, CoreAudioError,
     PlaybackLifecycleState, StreamSource, SymphoniaDecoder, SynthAudioDecoder,
 };
 use core_types::{OutputBackendKind, SignalQuality};
@@ -567,19 +567,880 @@ async fn test_playlist_parsing_and_http_resolution_plays_audio() {
 }
 
 #[test]
-fn test_opus_returns_explicit_unsupported_format() {
+fn test_opus_decodes_48khz_pcm() {
     let opus_ogg = build_minimal_ogg_opus_bytes();
-    let err = match SymphoniaDecoder::from_bytes(opus_ogg, Some("ogg")) {
-        Ok(_) => panic!("Expected Opus to return UnsupportedFormat error"),
+    let mut decoder = SymphoniaDecoder::from_bytes(opus_ogg, Some("ogg"))
+        .expect("Expected Ogg/Opus to decode via OpusSymphoniaDecoder");
+    assert_eq!(decoder.format().codec, core_types::AudioCodec::Opus);
+    assert_eq!(decoder.format().sample_rate_hz, 48_000);
+    assert_eq!(decoder.format().channels, 2);
+
+    let mut total_frames = 0usize;
+    while let Some(chunk) = decoder.next_chunk().expect("decode opus chunk") {
+        assert_eq!(chunk.sample_rate(), 48_000);
+        assert_eq!(chunk.channels(), 2);
+        total_frames += chunk.frames();
+    }
+    assert_eq!(
+        total_frames, 648,
+        "Expected 960 minus 312 pre-skip frames from minimal Opus packet"
+    );
+}
+
+fn parse_http_headers(req_str: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in req_str.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            out.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_http_headers_sent_on_probe_redirects_and_range_requests_and_ipv4() {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    // > 256 KiB WAV so reading offset 0 and seeking to 140_000 triggers separate 128 KiB Range chunks.
+    let wav_bytes = Arc::new(build_wav_bytes(48_000, 2, 70_000));
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let observed = Arc::new(StdMutex::new(Vec::<(String, String, HashMap<String, String>, bool)>::new()));
+    let observed_srv = Arc::clone(&observed);
+
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, peer)) = listener.accept().await else {
+                break;
+            };
+            let wav_bytes = Arc::clone(&wav_bytes);
+            let observed_conn = Arc::clone(&observed_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(end_pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = end_pos + 4;
+                            break;
+                        }
+                        if total_read == buf.len() {
+                            break;
+                        }
+                    }
+
+                    let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let mut parts = first_line.split_whitespace();
+                    let method = parts.next().unwrap_or("GET").to_string();
+                    let path = parts.next().unwrap_or("/").to_string();
+                    let hdrs = parse_http_headers(&req_str);
+
+                    if let Ok(mut log) = observed_conn.lock() {
+                        log.push((method.clone(), path.clone(), hdrs.clone(), peer.is_ipv4()));
+                    }
+
+                    if path == "/start.wav" {
+                        let resp = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://{addr}/cdn/audio.wav\r\nContent-Length: 0\r\n\r\n"
+                        );
+                        if stream.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    } else if path == "/cdn/audio.wav" {
+                        let total_len = wav_bytes.len();
+                        if method == "HEAD" {
+                            // Omit Accept-Ranges so probe exercises GET Range: bytes=0-0 too.
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        } else if let Some(range_val) = hdrs.get("range")
+                            && let Some(spec) = range_val.strip_prefix("bytes=")
+                            && let Some((s_str, e_str)) = spec.split_once('-')
+                        {
+                            let start = s_str.parse::<usize>().unwrap_or(0).min(total_len - 1);
+                            let end = if e_str.is_empty() {
+                                total_len - 1
+                            } else {
+                                e_str.parse::<usize>().unwrap_or(total_len - 1).min(total_len - 1)
+                            };
+                            let slice = &wav_bytes[start..=end];
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                                slice.len()
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err()
+                                || stream.write_all(slice).await.is_err()
+                            {
+                                return;
+                            }
+                        } else {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err()
+                                || stream.write_all(&wav_bytes).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    let _ = stream.flush().await;
+                }
+            });
+        }
+    });
+
+    let mut headers = HashMap::new();
+    headers.insert("User-Agent".to_string(), "LuminaTestAgent/2.0".to_string());
+    headers.insert(
+        "Accept".to_string(),
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string(),
+    );
+    headers.insert("Accept-Language".to_string(), "en-US,en;q=0.5".to_string());
+    headers.insert("Referer".to_string(), "https://music.youtube.com/".to_string());
+    headers.insert("Cookie".to_string(), "VISITOR_INFO1_LIVE=abc123".to_string());
+
+    let url = format!("http://{addr}/start.wav");
+    let mut media = core_audio::HttpRangeMediaSource::open(&url, &headers)
+        .expect("redirect + Range probe with caller headers should succeed");
+    assert_eq!(media.resolved_url(), format!("http://{addr}/cdn/audio.wav"));
+
+    let mut head_buf = [0u8; 16];
+    media.read_exact(&mut head_buf).unwrap();
+    assert_eq!(&head_buf[0..4], b"RIFF");
+
+    media.seek(SeekFrom::Start(140_000)).unwrap();
+    let mut second_chunk_buf = [0u8; 16];
+    media.read_exact(&mut second_chunk_buf).unwrap();
+
+    // Also verify IPv4-only DNS resolution on localhost (dual-stack Windows maps localhost to ::1 + 127.0.0.1).
+    let localhost_url = format!("http://localhost:{}/cdn/audio.wav", addr.port());
+    let mut localhost_media = core_audio::HttpRangeMediaSource::open(&localhost_url, &headers)
+        .expect("localhost must resolve and connect over IPv4");
+    let mut lh_buf = [0u8; 4];
+    localhost_media.read_exact(&mut lh_buf).unwrap();
+    assert_eq!(&lh_buf, b"RIFF");
+
+    let log = observed.lock().unwrap().clone();
+    assert!(
+        log.len() >= 5,
+        "Expected HEAD redirect + GET Range 0-0 + chunk 0 + chunk 1 + localhost requests, got {}",
+        log.len()
+    );
+    let mut saw_range_second_chunk = false;
+    for (method, path, hdrs, is_ipv4) in &log {
+        assert!(*is_ipv4, "Expected IPv4 socket for {method} {path}");
+        assert_eq!(
+            hdrs.get("user-agent").map(String::as_str),
+            Some("LuminaTestAgent/2.0"),
+            "Missing/mismatched User-Agent on {method} {path}"
+        );
+        assert_eq!(
+            hdrs.get("accept").map(String::as_str),
+            Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            "Missing/mismatched Accept on {method} {path}"
+        );
+        assert_eq!(
+            hdrs.get("accept-language").map(String::as_str),
+            Some("en-US,en;q=0.5"),
+            "Missing/mismatched Accept-Language on {method} {path}"
+        );
+        assert_eq!(
+            hdrs.get("referer").map(String::as_str),
+            Some("https://music.youtube.com/"),
+            "Referer overwritten/dropped on {method} {path}"
+        );
+        assert_eq!(
+            hdrs.get("cookie").map(String::as_str),
+            Some("VISITOR_INFO1_LIVE=abc123"),
+            "Cookie dropped on {method} {path}"
+        );
+        if hdrs
+            .get("range")
+            .is_some_and(|r| r.starts_with("bytes=131072-"))
+        {
+            saw_range_second_chunk = true;
+        }
+    }
+    assert!(
+        saw_range_second_chunk,
+        "Expected Range request for second 128KiB chunk"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_http_403_surfaces_explicit_http_403_in_media_source_and_player() {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    let wav_bytes = Arc::new(build_wav_bytes(48_000, 2, 96_000)); // ~384 KiB (> 2 chunks)
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let wav_bytes = Arc::clone(&wav_bytes);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(end_pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = end_pos + 4;
+                            break;
+                        }
+                        if total_read == buf.len() {
+                            break;
+                        }
+                    }
+                    let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let mut parts = first_line.split_whitespace();
+                    let method = parts.next().unwrap_or("GET");
+                    let path = parts.next().unwrap_or("/");
+                    let hdrs = parse_http_headers(&req_str);
+                    let total_len = wav_bytes.len();
+
+                    if path == "/always-403.m4a" {
+                        let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                        if stream.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    } else if path == "/head-ok-chunk0-403.wav" {
+                        if method == "HEAD" {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        } else {
+                            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    } else if path == "/head-403-get-ok.wav" {
+                        if method == "HEAD" {
+                            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        } else if let Some(range_val) = hdrs.get("range")
+                            && let Some(spec) = range_val.strip_prefix("bytes=")
+                            && let Some((s_str, e_str)) = spec.split_once('-')
+                        {
+                            let start = s_str.parse::<usize>().unwrap_or(0).min(total_len - 1);
+                            let end = e_str
+                                .parse::<usize>()
+                                .unwrap_or(total_len - 1)
+                                .min(total_len - 1);
+                            let slice = &wav_bytes[start..=end];
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                                slice.len()
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err()
+                                || stream.write_all(slice).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                    } else if path == "/mid-range-403.wav" {
+                        if method == "HEAD" {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\n\r\n"
+                            );
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        } else if let Some(range_val) = hdrs.get("range")
+                            && let Some(spec) = range_val.strip_prefix("bytes=")
+                            && let Some((s_str, e_str)) = spec.split_once('-')
+                        {
+                            let start = s_str.parse::<usize>().unwrap_or(0);
+                            if start >= 131_072 {
+                                let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                                if stream.write_all(resp.as_bytes()).await.is_err() {
+                                    return;
+                                }
+                            } else {
+                                let end = e_str
+                                    .parse::<usize>()
+                                    .unwrap_or(total_len - 1)
+                                    .min(total_len - 1);
+                                let slice = &wav_bytes[start..=end];
+                                let resp = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                                    slice.len()
+                                );
+                                if stream.write_all(resp.as_bytes()).await.is_err()
+                                    || stream.write_all(slice).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    let _ = stream.flush().await;
+                }
+            });
+        }
+    });
+
+    // 1. Open-time HTTP 403 in HttpRangeMediaSource and AudioPlayer
+    let url_403 = format!("http://{addr}/always-403.m4a");
+    let media_err = match core_audio::HttpRangeMediaSource::open(&url_403, &HashMap::new()) {
+        Ok(_) => panic!("Expected HTTP 403 from HttpRangeMediaSource::open"),
         Err(e) => e,
     };
-    match err {
-        DecoderError::UnsupportedFormat(msg) => {
+    assert!(
+        media_err.to_string().contains("HTTP 403"),
+        "Expected 'HTTP 403' in HttpRangeMediaSource error, got: {media_err}"
+    );
+
+    let player = AudioPlayer::new_headless();
+    let play_err = player
+        .play_stream(
+            StreamSource::http(url_403, HashMap::new(), Some("m4a".to_string())),
+            "YouTube Music",
+        )
+        .unwrap_err();
+    assert!(
+        play_err.to_string().contains("HTTP 403"),
+        "Expected 'HTTP 403' in AudioPlayer::play_stream error, got: {play_err}"
+    );
+
+    // 2. HEAD 200 OK followed by Range 403 on chunk 0 during decoder open
+    let head_ok_chunk0_403 = format!("http://{addr}/head-ok-chunk0-403.wav");
+    let open_err = player
+        .play_stream(
+            StreamSource::http(head_ok_chunk0_403, HashMap::new(), Some("wav".to_string())),
+            "YouTube Music",
+        )
+        .unwrap_err();
+    assert!(
+        open_err.to_string().contains("HTTP 403"),
+        "Expected 'HTTP 403' when chunk 0 Range fails with 403, got: {open_err}"
+    );
+
+    // 3. Signed GET-only server rejecting HEAD with 403 while permitting GET Range
+    let head_403_get_ok = format!("http://{addr}/head-403-get-ok.wav");
+    player
+        .play_stream(
+            StreamSource::http(head_403_get_ok, HashMap::new(), Some("wav".to_string())),
+            "Signed GET",
+        )
+        .expect("HEAD 403 should fall back to GET Range and succeed");
+    player.stop();
+
+    // 4. Mid-stream Range chunk 1 returns HTTP 403 during playback
+    let mid_403 = format!("http://{addr}/mid-range-403.wav");
+    player
+        .play_stream(
+            StreamSource::http(mid_403, HashMap::new(), Some("wav".to_string())),
+            "YouTube Music",
+        )
+        .expect("Initial chunk 0 should start playback before mid-stream 403");
+
+    let mut reached_403 = false;
+    for _ in 0..80 {
+        if player.state_code() == PlaybackLifecycleState::Error as i32
+            && let Some(err) = player.last_error()
+        {
             assert!(
-                msg.contains("Opus"),
-                "Expected Opus unsupported message, got: {msg}"
+                err.contains("HTTP 403"),
+                "Expected 'HTTP 403' in mid-stream last_error, got: {err}"
             );
+            reached_403 = true;
+            break;
         }
-        other => panic!("Expected DecoderError::UnsupportedFormat, got {other:?}"),
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert!(
+        reached_403,
+        "Expected mid-stream Range 403 to surface Error state with 'HTTP 403', state={}, err={:?}",
+        player.state_code(),
+        player.last_error()
+    );
+
+    player.shutdown();
+    server_handle.abort();
+}
+
+#[test]
+fn test_symphonia_decoder_preserves_http_403_from_media_source_probe_and_seek() {
+    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
+    use symphonia::core::io::MediaSource;
+
+    struct Failing403Source {
+        data: Vec<u8>,
+        pos: u64,
+        fail_after: usize,
+    }
+
+    impl Read for Failing403Source {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos as usize >= self.fail_after {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "HTTP 403 fetching https://rr1.googlevideo.com/videoplayback",
+                ));
+            }
+            let start = self.pos as usize;
+            let avail = &self.data[start..self.fail_after.min(self.data.len())];
+            let n = avail.len().min(buf.len());
+            buf[..n].copy_from_slice(&avail[..n]);
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Seek for Failing403Source {
+        fn seek(&mut self, style: SeekFrom) -> std::io::Result<u64> {
+            let next = match style {
+                SeekFrom::Start(n) => n as i64,
+                SeekFrom::Current(d) => self.pos as i64 + d,
+                SeekFrom::End(d) => self.data.len() as i64 + d,
+            };
+            if next < 0 {
+                return Err(Error::new(ErrorKind::InvalidInput, "seek before start"));
+            }
+            self.pos = next as u64;
+            Ok(self.pos)
+        }
+    }
+
+    impl MediaSource for Failing403Source {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.data.len() as u64)
+        }
+    }
+
+    // 1. Fail on very first read inside Symphonia Probe::next (offset 0) -> must preserve HTTP 403.
+    let wav = build_wav_bytes(48_000, 2, 48_000);
+    let err = match SymphoniaDecoder::from_media_source(
+        Box::new(Failing403Source {
+            data: wav.clone(),
+            pos: 0,
+            fail_after: 0,
+        }),
+        Some("m4a"),
+        None,
+    ) {
+        Ok(_) => panic!("Expected ProbeFailed with HTTP 403"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("HTTP 403"),
+        "Expected 'HTTP 403' preserved across Symphonia probe, got: {err}"
+    );
+
+    // 2. Open succeeds when initial header is readable, then seek + next_chunk past fail_after surfaces HTTP 403.
+    let mut dec = SymphoniaDecoder::from_media_source(
+        Box::new(Failing403Source {
+            data: wav,
+            pos: 0,
+            fail_after: 4096,
+        }),
+        Some("wav"),
+        None,
+    )
+    .expect("WAV header within first 4KB should open");
+    dec.seek(Duration::from_millis(500)).unwrap();
+    let read_err = dec.next_chunk().unwrap_err();
+    assert!(
+        read_err.to_string().contains("HTTP 403"),
+        "Expected 'HTTP 403' after seek past fail_after, got: {read_err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_head_sends_connection_close_and_recovers_from_dropped_pooled_socket() {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex as StdMutex,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    let wav_bytes = Arc::new(build_wav_bytes(48_000, 2, 70_000)); // > 256 KiB
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let head_conn_hdrs = Arc::new(StdMutex::new(Vec::<Option<String>>::new()));
+    let head_conn_hdrs_srv = Arc::clone(&head_conn_hdrs);
+    let dropped_once = Arc::new(AtomicBool::new(false));
+    let dropped_once_srv = Arc::clone(&dropped_once);
+    let chunk1_attempts = Arc::new(AtomicUsize::new(0));
+    let chunk1_attempts_srv = Arc::clone(&chunk1_attempts);
+
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let wav_bytes = Arc::clone(&wav_bytes);
+            let head_hdrs = Arc::clone(&head_conn_hdrs_srv);
+            let dropped = Arc::clone(&dropped_once_srv);
+            let c1_attempts = Arc::clone(&chunk1_attempts_srv);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let mut total_read = 0;
+                    loop {
+                        let Ok(n) = stream.read(&mut buf[total_read..]).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        total_read += n;
+                        if let Some(end_pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
+                            total_read = end_pos + 4;
+                            break;
+                        }
+                        if total_read == buf.len() {
+                            break;
+                        }
+                    }
+                    let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let method = first_line.split_whitespace().next().unwrap_or("GET");
+                    let hdrs = parse_http_headers(&req_str);
+                    let total_len = wav_bytes.len();
+
+                    if method == "HEAD" {
+                        if let Ok(mut g) = head_hdrs.lock() {
+                            g.push(hdrs.get("connection").cloned());
+                        }
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        let _ = stream.flush().await;
+                        let _ = stream.shutdown().await;
+                        return;
+                    } else if let Some(range_val) = hdrs.get("range")
+                        && let Some(spec) = range_val.strip_prefix("bytes=")
+                        && let Some((s_str, e_str)) = spec.split_once('-')
+                    {
+                        let start = s_str.parse::<usize>().unwrap_or(0);
+                        // Simulate googlevideo closing/resetting a pooled keep-alive socket before chunk 1.
+                        if start >= 131_072 {
+                            c1_attempts.fetch_add(1, Ordering::Relaxed);
+                            if !dropped.swap(true, Ordering::SeqCst) {
+                                drop(stream);
+                                return;
+                            }
+                        }
+                        let start = start.min(total_len - 1);
+                        let end = e_str
+                            .parse::<usize>()
+                            .unwrap_or(total_len - 1)
+                            .min(total_len - 1);
+                        let slice = &wav_bytes[start..=end];
+                        let resp = format!(
+                            "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Type: audio/wav\r\nContent-Range: bytes {start}-{end}/{total_len}\r\nContent-Length: {}\r\n\r\n",
+                            slice.len()
+                        );
+                        if stream.write_all(resp.as_bytes()).await.is_err()
+                            || stream.write_all(slice).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let _ = stream.flush().await;
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/gvs.wav");
+    let mut media = core_audio::HttpRangeMediaSource::open(&url, &HashMap::new())
+        .expect("HEAD with Connection: close should open cleanly");
+    let mut chunk0 = [0u8; 16];
+    media.read_exact(&mut chunk0).unwrap();
+    assert_eq!(&chunk0[0..4], b"RIFF");
+
+    // First chunk 1 request hits a dropped pooled socket and must recover automatically on retry.
+    media.seek(SeekFrom::Start(140_000)).unwrap();
+    let mut chunk1 = [0u8; 16];
+    media.read_exact(&mut chunk1).unwrap();
+    assert_eq!(&chunk1, &build_wav_bytes(48_000, 2, 70_000)[140_000..140_016]);
+
+    let recorded_head = head_conn_hdrs.lock().unwrap().clone();
+    assert!(!recorded_head.is_empty());
+    assert!(
+        recorded_head.iter().all(|v| v.as_deref() == Some("close")),
+        "Expected Connection: close on HEAD probe, got: {recorded_head:?}"
+    );
+    assert!(
+        chunk1_attempts.load(Ordering::Relaxed) >= 2,
+        "Expected stale socket retry on chunk 1"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sequential_http_stream_survives_body_delay_longer_than_open_timeout() {
+    use std::io::Read as _;
+    use std::sync::Arc;
+    use symphonia::core::io::MediaSource as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    let full_wav = Arc::new(build_wav_bytes(48_000, 2, 8_192));
+    let expected_wav = Arc::clone(&full_wav);
+    let split = full_wav.len() / 2;
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let full_wav = Arc::clone(&full_wav);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let mut total_read = 0;
+                loop {
+                    let Ok(n) = stream.read(&mut buf[total_read..]).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    total_read += n;
+                    if buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n")
+                        || total_read == buf.len()
+                    {
+                        break;
+                    }
+                }
+                let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                let method = req_str
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().next())
+                    .unwrap_or("GET");
+                let total_len = full_wav.len();
+
+                if method == "HEAD" {
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nAccept-Ranges: none\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                } else {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nAccept-Ranges: none\r\nContent-Type: audio/wav\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+                    );
+                    if stream.write_all(hdr.as_bytes()).await.is_err()
+                        || stream.write_all(&full_wav[..split]).await.is_err()
+                        || stream.flush().await.is_err()
+                    {
+                        return;
+                    }
+                    // Exceed the 400ms open timeout before sending the rest of the body.
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                    let _ = stream.write_all(&full_wav[split..]).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/slow-seq.wav");
+    let mut media = core_audio::HttpRangeMediaSource::open_with_cancel(
+        &url,
+        &HashMap::new(),
+        None,
+        Duration::from_millis(400),
+    )
+    .expect("Sequential open should succeed before 400ms header timeout");
+    assert!(
+        !media.is_seekable(),
+        "Expected Accept-Ranges: none + 200 OK to open in Sequential mode"
+    );
+
+    let mut received = Vec::new();
+    media
+        .read_to_end(&mut received)
+        .expect("Sequential body read after 700ms (> 400ms open timeout) must not time out");
+    assert_eq!(received.as_slice(), expected_wav.as_slice());
+
+    server_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sequential_http_backward_seek_stays_playing_not_error() {
+    use std::io::{ErrorKind, Read as _, Seek as _, SeekFrom};
+    use std::sync::Arc;
+    use symphonia::core::io::MediaSource as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    // 3s @ 192 kHz stereo PCM (~2.2 MiB) so headless playback advances well past the 256 KiB retained window.
+    let wav_bytes = Arc::new(build_wav_bytes(192_000, 2, 192_000 * 3));
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let wav_bytes = Arc::clone(&wav_bytes);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let mut total_read = 0;
+                loop {
+                    let Ok(n) = stream.read(&mut buf[total_read..]).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    total_read += n;
+                    if buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n")
+                        || total_read == buf.len()
+                    {
+                        break;
+                    }
+                }
+                let req_str = String::from_utf8_lossy(&buf[..total_read]);
+                let method = req_str
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().next())
+                    .unwrap_or("GET");
+
+                if method == "HEAD" {
+                    let resp = "HTTP/1.1 200 OK\r\nAccept-Ranges: none\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                } else {
+                    let hdr = "HTTP/1.1 200 OK\r\nAccept-Ranges: none\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n";
+                    if stream.write_all(hdr.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for chunk in wav_bytes.chunks(32 * 1024) {
+                        if stream.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                        let _ = stream.flush().await;
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    let _ = stream.shutdown().await;
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/live-seq.wav");
+    let player = AudioPlayer::new_headless();
+    player
+        .play_stream(
+            StreamSource::http(url.clone(), HashMap::new(), Some("wav".to_string())),
+            "Sequential Stream",
+        )
+        .expect("Sequential loopback WAV stream should start playing");
+
+    // Advance past 256 KiB (~365ms @ 192kHz stereo 16-bit = 280 KiB consumed + buffers).
+    for _ in 0..80 {
+        if player.nonzero_output_frames() >= 70_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert!(
+        player.nonzero_output_frames() >= 70_000,
+        "Expected playback to advance past 256 KiB before seeking"
+    );
+
+    // Issue backward seek_ms(0) on non-seekable Sequential stream.
+    player.seek_ms(0);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        player.state_code(),
+        PlaybackLifecycleState::Playing as i32,
+        "Expected AudioPlayer to stay Playing (2) after unsupported sequential seek, last_error={:?}",
+        player.last_error()
+    );
+    assert_ne!(
+        player.state_code(),
+        PlaybackLifecycleState::Error as i32,
+        "AudioPlayer must not enter Error state on non-seekable sequential seek"
+    );
+    assert!(
+        player.last_error().is_none(),
+        "Expected no last_error after non-seekable sequential seek, got {:?}",
+        player.last_error()
+    );
+
+    let frames_after_seek = player.nonzero_output_frames();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        player.nonzero_output_frames() > frames_after_seek,
+        "Expected audio decoding/output to continue after rejected seek"
+    );
+    player.stop();
+    player.shutdown();
+
+    // Verify SequentialState directly returns ErrorKind::Unsupported for backward seek past retained
+    // buffer and SeekFrom::End without Content-Length.
+    let mut media = core_audio::HttpRangeMediaSource::open(&url, &HashMap::new())
+        .expect("Sequential source open");
+    assert!(!media.is_seekable());
+    let mut prefix = vec![0u8; 300 * 1024];
+    media.read_exact(&mut prefix).expect("Read past 256 KiB history");
+    let back_err = media.seek(SeekFrom::Start(270 * 1024)).unwrap_err();
+    assert_eq!(back_err.kind(), ErrorKind::Unsupported);
+    let end_err = media.seek(SeekFrom::End(0)).unwrap_err();
+    assert_eq!(end_err.kind(), ErrorKind::Unsupported);
+
+    server_handle.abort();
 }

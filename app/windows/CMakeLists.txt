@@ -124,3 +124,76 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release/core_ffi.dll"
   CONFIGURATIONS Profile;Release
   OPTIONAL
   COMPONENT Runtime)
+
+# === MSVC Runtime DLL Bundling ===
+# Copy Microsoft Visual C++ 2015-2022 x64 runtime DLLs (msvcp140.dll, vcruntime140.dll,
+# vcruntime140_1.dll, etc.) into the bundle directory when VS Redistributables are installed.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "${INSTALL_BUNDLE_LIB_DIR}")
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT Runtime)
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_NO_WARNINGS TRUE)
+include(InstallRequiredSystemLibraries)
+if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+  list(LENGTH CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS _LUMINA_MSVC_RUNTIME_COUNT)
+  message(STATUS "Lumina Audio: Bundling ${_LUMINA_MSVC_RUNTIME_COUNT} MSVC system runtime DLL(s).")
+else()
+  message(WARNING
+    "Lumina Audio: MSVC system runtime DLLs were not found by InstallRequiredSystemLibraries. "
+    "Ensure Visual Studio C++ Redistributable libraries are installed for self-contained Release bundles "
+    "(target machines otherwise require Microsoft Visual C++ 2015-2022 Redistributable x64).")
+endif()
+
+# === Vendored Windows Runtime Binaries (yt-dlp, deno, ffmpeg) & Third-Party Licenses ===
+# Populated by `scripts/prepare_release_deps.ps1`. Uses OPTIONAL installs so Debug builds
+# never fail when binaries have not yet been downloaded, while emitting clear warnings.
+set(LUMINA_VENDOR_BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/bin")
+set(LUMINA_VENDOR_EXECUTABLES
+  "yt-dlp.exe"
+  "deno.exe"
+  "ffmpeg.exe"
+)
+set(LUMINA_VENDOR_MISSING "")
+foreach(_lumina_exe IN LISTS LUMINA_VENDOR_EXECUTABLES)
+  set(_lumina_exe_path "${LUMINA_VENDOR_BIN_DIR}/${_lumina_exe}")
+  if(NOT EXISTS "${_lumina_exe_path}")
+    list(APPEND LUMINA_VENDOR_MISSING "${_lumina_exe}")
+  endif()
+  install(FILES "${_lumina_exe_path}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/bin"
+    OPTIONAL
+    COMPONENT Runtime)
+endforeach()
+
+set(LUMINA_THIRD_PARTY_LICENSES "${LUMINA_VENDOR_BIN_DIR}/THIRD_PARTY_LICENSES.txt")
+if(NOT EXISTS "${LUMINA_THIRD_PARTY_LICENSES}")
+  list(APPEND LUMINA_VENDOR_MISSING "THIRD_PARTY_LICENSES.txt")
+endif()
+install(FILES "${LUMINA_THIRD_PARTY_LICENSES}"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  OPTIONAL
+  COMPONENT Runtime)
+
+if(LUMINA_VENDOR_MISSING)
+  string(JOIN ", " _lumina_missing_str ${LUMINA_VENDOR_MISSING})
+  message(WARNING
+    "Lumina Audio: Missing vendored runtime file(s) in ${LUMINA_VENDOR_BIN_DIR}: ${_lumina_missing_str}. "
+    "Debug builds can proceed, but Release bundles will be incomplete. "
+    "Run `powershell -ExecutionPolicy Bypass -File scripts/prepare_release_deps.ps1` from the repository root.")
+endif()
+
+# Release-time safety guard: warn clearly during Release install if any vendored deliverable is absent.
+install(CODE "
+  if(\"\${CMAKE_INSTALL_CONFIG_NAME}\" STREQUAL \"Release\")
+    set(_lumina_missing_release \"\")
+    foreach(_lumina_rel_file IN ITEMS \"bin/yt-dlp.exe\" \"bin/deno.exe\" \"bin/ffmpeg.exe\" \"THIRD_PARTY_LICENSES.txt\")
+      if(NOT EXISTS \"${INSTALL_BUNDLE_LIB_DIR}/\${_lumina_rel_file}\")
+        list(APPEND _lumina_missing_release \"\${_lumina_rel_file}\")
+      endif()
+    endforeach()
+    if(_lumina_missing_release)
+      string(JOIN \", \" _lumina_missing_release_str \${_lumina_missing_release})
+      message(WARNING
+        \"Lumina Audio: Release bundle is missing required vendored runtime file(s): \${_lumina_missing_release_str}. \"
+        \"Run `powershell -ExecutionPolicy Bypass -File scripts/prepare_release_deps.ps1` from the repository root and rebuild.\")
+    endif()
+  endif()
+" COMPONENT Runtime)

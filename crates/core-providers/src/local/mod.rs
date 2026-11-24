@@ -12,13 +12,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use core_types::{CanonicalAlbum, ProviderKind, TrackSource};
+use core_types::{
+    CanonicalAlbum, ProviderKind, StreamKey, StreamProviderCapabilities, StreamSourceSpec,
+    TrackSource,
+};
 use tokio::sync::{mpsc::Sender, RwLock};
 
 use crate::error::ProviderError;
 use crate::traits::{
-    MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem, SyncProgress, SyncResult,
-    SyncResultSummary,
+    validate_stream_key, MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem,
+    StreamResolver, SyncProgress, SyncResult, SyncResultSummary,
 };
 pub use self::artwork::{ArtworkManager, ArtworkTarget};
 pub use self::lyrics::{
@@ -241,5 +244,118 @@ impl MusicProvider for LocalProvider {
 
     async fn last_sync_album_metadata(&self) -> HashMap<String, AlbumSyncMetadata> {
         self.cached_album_metadata.read().await.clone()
+    }
+}
+
+#[async_trait]
+impl StreamResolver for LocalProvider {
+    fn provider_id(&self) -> &'static str {
+        "local"
+    }
+
+    fn capabilities(&self) -> StreamProviderCapabilities {
+        StreamProviderCapabilities::local()
+    }
+
+    async fn resolve_source(&self, key: &StreamKey) -> Result<StreamSourceSpec, ProviderError> {
+        validate_stream_key("local", key)?;
+
+        let resolved_path = {
+            let cached = self.cached_tracks.read().await;
+            cached
+                .iter()
+                .find(|t| t.id == key.track_id || t.external_track_id == key.track_id)
+                .map(|t| t.external_track_id.clone())
+                .unwrap_or_else(|| key.track_id.clone())
+        };
+
+        let path = Path::new(&resolved_path);
+        if !path.exists() || !path.is_file() {
+            return Err(ProviderError::track_not_found("local", &key.track_id));
+        }
+
+        Ok(StreamSourceSpec::LocalFile {
+            key: key.clone(),
+            path: resolved_path,
+            loudness: None,
+            album_loudness: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_local_stream_resolver_resolves_file_and_rejects_missing() {
+        let dir = tempdir().unwrap();
+        let wav_path = dir.path().join("01 - Test Track.wav");
+
+        // Write a minimal valid 44-byte RIFF/WAVE header so sync_library can scan it.
+        let mut f = std::fs::File::create(&wav_path).unwrap();
+        let data_size: u32 = 4;
+        let riff_size: u32 = 36 + data_size;
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&riff_size.to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap(); // fmt chunk size
+        f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+        f.write_all(&2u16.to_le_bytes()).unwrap(); // 2 channels
+        f.write_all(&44100u32.to_le_bytes()).unwrap(); // sample rate
+        f.write_all(&(44100u32 * 4).to_le_bytes()).unwrap(); // byte rate
+        f.write_all(&4u16.to_le_bytes()).unwrap(); // block align
+        f.write_all(&16u16.to_le_bytes()).unwrap(); // bits per sample
+        f.write_all(b"data").unwrap();
+        f.write_all(&data_size.to_le_bytes()).unwrap();
+        f.write_all(&[0u8; 4]).unwrap();
+        f.flush().unwrap();
+
+        let provider = LocalProvider::from_root(dir.path());
+        assert_eq!(StreamResolver::provider_id(&provider), "local");
+        assert_eq!(
+            StreamResolver::capabilities(&provider),
+            StreamProviderCapabilities::local()
+        );
+
+        let path_str = wav_path.to_string_lossy().to_string();
+        let direct_key = StreamKey::new("local", &path_str, "native");
+        let direct_spec = provider.resolve_source(&direct_key).await.unwrap();
+        assert_eq!(
+            direct_spec,
+            StreamSourceSpec::LocalFile {
+                key: direct_key,
+                path: path_str.clone(),
+                loudness: None,
+                album_loudness: None,
+            }
+        );
+
+        // Scan library and verify resolution via TrackSource.id
+        let sync = provider.sync_library().await.unwrap();
+        assert_eq!(sync.tracks.len(), 1);
+        let track_id = sync.tracks[0].id.clone();
+        let scanned_key = StreamKey::new("local", &track_id, "native");
+        let scanned_spec = provider.resolve_source(&scanned_key).await.unwrap();
+        match scanned_spec {
+            StreamSourceSpec::LocalFile { key, path, .. } => {
+                assert_eq!(key, scanned_key);
+                assert!(Path::new(&path).is_file());
+            }
+            other => panic!("expected LocalFile, got {other:?}"),
+        }
+
+        // Missing file -> TrackNotFound
+        let missing_err = provider
+            .resolve_source(&StreamKey::new(
+                "local",
+                dir.path().join("missing.flac").to_string_lossy().as_ref(),
+                "native",
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_err, ProviderError::TrackNotFound(_)));
     }
 }

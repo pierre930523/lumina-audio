@@ -1,15 +1,155 @@
 pub mod asio;
 #[cfg(target_os = "windows")]
 pub mod asio_win;
+#[cfg(target_os = "windows")]
+pub mod device_watcher_win;
 pub mod mock;
 pub mod wasapi;
 #[cfg(target_os = "windows")]
 pub mod wasapi_win;
 
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 pub use core_types::AudioDeviceDescription;
 use core_types::{AudioFormat, OutputBackendKind};
 use crate::error::BackendError;
+
+/// Platform-agnostic hardware endpoint and OS power lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceEvent {
+    DefaultRenderChanged(String),
+    DeviceRemoved(String),
+    DeviceAdded(String),
+    SystemSuspend,
+    SystemResume,
+}
+
+/// Deterministic coalescing debouncer for OS audio device and suspend/resume event storms.
+///
+/// - `DeviceRemoved` and `SystemSuspend` fire **immediately** (0ms) so active playback can protect
+///   hardware threads without delay.
+/// - `DefaultRenderChanged` coalesces over 250ms (default).
+/// - `DeviceAdded` (USB DAC replug) coalesces per endpoint over 500ms (default).
+/// - `SystemResume` (`PBT_APMRESUMEAUTOMATIC` + `PBT_APMRESUMESUSPEND`) coalesces over 800ms
+///   (default) so USB host controllers finish re-enumerating audio interfaces.
+#[derive(Debug, Clone)]
+pub struct DeviceEventDebouncer {
+    default_switch_delay: Duration,
+    replug_delay: Duration,
+    resume_delay: Duration,
+    pending_default: Option<(String, Instant)>,
+    pending_added: BTreeMap<String, Instant>,
+    pending_resume: Option<Instant>,
+}
+
+impl Default for DeviceEventDebouncer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceEventDebouncer {
+    pub const DEFAULT_SWITCH_DELAY: Duration = Duration::from_millis(250);
+    pub const DEFAULT_REPLUG_DELAY: Duration = Duration::from_millis(500);
+    pub const DEFAULT_RESUME_DELAY: Duration = Duration::from_millis(800);
+
+    pub fn new() -> Self {
+        Self::with_delays(
+            Self::DEFAULT_SWITCH_DELAY,
+            Self::DEFAULT_REPLUG_DELAY,
+            Self::DEFAULT_RESUME_DELAY,
+        )
+    }
+
+    pub fn with_delays(
+        default_switch_delay: Duration,
+        replug_delay: Duration,
+        resume_delay: Duration,
+    ) -> Self {
+        Self {
+            default_switch_delay,
+            replug_delay,
+            resume_delay,
+            pending_default: None,
+            pending_added: BTreeMap::new(),
+            pending_resume: None,
+        }
+    }
+
+    /// Ingests a raw OS event at timestamp `now`.
+    /// Returns `Some(event)` immediately for urgent events (`DeviceRemoved`, `SystemSuspend`),
+    /// or `None` when the event has been coalesced into the debounce window.
+    pub fn push(&mut self, event: DeviceEvent, now: Instant) -> Option<DeviceEvent> {
+        match event {
+            DeviceEvent::SystemSuspend => {
+                self.pending_resume = None;
+                Some(DeviceEvent::SystemSuspend)
+            }
+            DeviceEvent::DeviceRemoved(id) => {
+                self.pending_added.remove(&id);
+                if self
+                    .pending_default
+                    .as_ref()
+                    .is_some_and(|(pending_id, _)| pending_id == &id)
+                {
+                    self.pending_default = None;
+                }
+                Some(DeviceEvent::DeviceRemoved(id))
+            }
+            DeviceEvent::DefaultRenderChanged(id) => {
+                self.pending_default = Some((id, now + self.default_switch_delay));
+                None
+            }
+            DeviceEvent::DeviceAdded(id) => {
+                self.pending_added.insert(id, now + self.replug_delay);
+                None
+            }
+            DeviceEvent::SystemResume => {
+                self.pending_resume = Some(now + self.resume_delay);
+                None
+            }
+        }
+    }
+
+    /// Emits all debounced events whose deadlines have elapsed as of `now` in deterministic order
+    /// (`SystemResume` -> `DeviceAdded` -> `DefaultRenderChanged`).
+    pub fn poll_due(&mut self, now: Instant) -> Vec<DeviceEvent> {
+        let mut due = Vec::new();
+        if self.pending_resume.is_some_and(|dl| now >= dl) {
+            self.pending_resume = None;
+            due.push(DeviceEvent::SystemResume);
+        }
+
+        let due_added: Vec<String> = self
+            .pending_added
+            .iter()
+            .filter_map(|(id, &dl)| (now >= dl).then(|| id.clone()))
+            .collect();
+        for id in due_added {
+            self.pending_added.remove(&id);
+            due.push(DeviceEvent::DeviceAdded(id));
+        }
+
+        if self.pending_default.as_ref().is_some_and(|(_, dl)| now >= *dl)
+            && let Some((id, _)) = self.pending_default.take()
+        {
+            due.push(DeviceEvent::DefaultRenderChanged(id));
+        }
+        due
+    }
+
+    /// Returns the earliest pending debounce deadline, or `None` if idle.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let mut earliest = self.pending_resume;
+        if let Some((_, dl)) = &self.pending_default {
+            earliest = Some(earliest.map_or(*dl, |cur| cur.min(*dl)));
+        }
+        for &dl in self.pending_added.values() {
+            earliest = Some(earliest.map_or(dl, |cur| cur.min(dl)));
+        }
+        earliest
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendState {

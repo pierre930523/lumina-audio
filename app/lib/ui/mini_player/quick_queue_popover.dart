@@ -4,6 +4,8 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../models/playback_state.dart';
 import '../../services/audio_service.dart';
+import '../../services/streaming/streaming_playback_coordinator.dart';
+import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 class QuickQueuePopover extends StatelessWidget {
@@ -31,6 +33,14 @@ class QuickQueuePopover extends StatelessWidget {
         ? math.min(260.0, math.max(56.0, maxHeight! - 48.0))
         : 260.0;
     final listMinHeight = (maxHeight == null || maxHeight! >= 160.0) ? 88.0 : 0.0;
+
+    final onPrefetch =
+        TrackPrefetchScope.maybeOf(context) ??
+        (audioService is CoordinatingAudioService
+            ? (audioService as CoordinatingAudioService)
+                  .coordinator
+                  .requestHoverPrefetch
+            : null);
 
     return StreamBuilder<PlaybackState>(
       stream: audioService.stateStream,
@@ -162,69 +172,73 @@ class QuickQueuePopover extends StatelessWidget {
                               itemBuilder: (context, index) {
                                 final track = tracks[index];
                                 final isCurrent = track.id == activeId;
-                                return InkWell(
-                                  key: Key('quick_queue_item_${track.id}'),
-                                  onTap: () => audioService.play(track: track),
-                                  mouseCursor: SystemMouseCursors.click,
-                                  hoverColor: LuminaTokens.cardHoverBg.withValues(
-                                    alpha: 0.72,
-                                  ),
-                                  focusColor: LuminaTokens.focusRing.withValues(
-                                    alpha: 0.22,
-                                  ),
-                                  child: Container(
-                                    color: isCurrent
-                                        ? LuminaTokens.accentBlueStrong
-                                            .withValues(alpha: 0.14)
-                                        : Colors.transparent,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 14,
-                                      vertical: 9,
+                                return TrackHoverPrefetch(
+                                  track: track,
+                                  onPrefetch: onPrefetch,
+                                  child: InkWell(
+                                    key: Key('quick_queue_item_${track.id}'),
+                                    onTap: () => audioService.play(track: track),
+                                    mouseCursor: SystemMouseCursors.click,
+                                    hoverColor: LuminaTokens.cardHoverBg.withValues(
+                                      alpha: 0.72,
                                     ),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          isCurrent
-                                              ? Icons.equalizer_rounded
-                                              : Icons.music_note_outlined,
-                                          size: 16,
-                                          color: isCurrent
-                                              ? LuminaTokens.accentBlue
-                                              : LuminaTokens.textMuted,
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                track.title,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: TextStyle(
-                                                  color: isCurrent
-                                                      ? LuminaTokens.accentBlue
-                                                      : LuminaTokens.textPrimary,
-                                                  fontSize: 13,
-                                                  fontWeight: isCurrent
-                                                      ? FontWeight.w600
-                                                      : FontWeight.w400,
-                                                ),
-                                              ),
-                                              Text(
-                                                '${track.artist} • ${track.format.label}',
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: const TextStyle(
-                                                  color: LuminaTokens.textMuted,
-                                                  fontSize: 11,
-                                                ),
-                                              ),
-                                            ],
+                                    focusColor: LuminaTokens.focusRing.withValues(
+                                      alpha: 0.22,
+                                    ),
+                                    child: Container(
+                                      color: isCurrent
+                                          ? LuminaTokens.accentBlueStrong
+                                              .withValues(alpha: 0.14)
+                                          : Colors.transparent,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 14,
+                                        vertical: 9,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            isCurrent
+                                                ? Icons.equalizer_rounded
+                                                : Icons.music_note_outlined,
+                                            size: 16,
+                                            color: isCurrent
+                                                ? LuminaTokens.accentBlue
+                                                : LuminaTokens.textMuted,
                                           ),
-                                        ),
-                                      ],
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  track.title,
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: TextStyle(
+                                                    color: isCurrent
+                                                        ? LuminaTokens.accentBlue
+                                                        : LuminaTokens.textPrimary,
+                                                    fontSize: 13,
+                                                    fontWeight: isCurrent
+                                                        ? FontWeight.w600
+                                                        : FontWeight.w400,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  '${track.artist} • ${track.format.label}',
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    color: LuminaTokens.textMuted,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 );

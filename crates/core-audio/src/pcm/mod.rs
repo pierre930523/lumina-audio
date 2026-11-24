@@ -1,11 +1,13 @@
 pub mod decoder;
+pub mod opus;
 pub mod synth;
 
 pub use decoder::SymphoniaDecoder;
+pub use opus::{register_opus_codec, OpusSymphoniaDecoder};
 pub use synth::SynthAudioDecoder;
 
 use crate::error::DecoderError;
-use core_types::{AudioFormat, SampleFormatKind, UnifiedAudioFormat};
+use core_types::{AudioFormat, NormalizedLoudness, SampleFormatKind, UnifiedAudioFormat};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -18,6 +20,38 @@ pub struct DecodedTrackMetadata {
     pub track_number: Option<u32>,
     pub replaygain_track_db: Option<f64>,
     pub replaygain_album_db: Option<f64>,
+    pub replaygain_track_peak: Option<f32>,
+    pub replaygain_album_peak: Option<f32>,
+    pub r128_track_gain: Option<i16>,
+    pub r128_album_gain: Option<i16>,
+}
+
+impl DecodedTrackMetadata {
+    /// Converts container ReplayGain 2.0 or EBU R128 track gain tags into a unified
+    /// `-14.0 LUFS` [`NormalizedLoudness`] adjustment.
+    pub fn track_normalized_loudness(&self) -> Option<NormalizedLoudness> {
+        if let Some(gain) = self.replaygain_track_db {
+            return Some(NormalizedLoudness::from_replay_gain(
+                gain as f32,
+                self.replaygain_track_peak,
+            ));
+        }
+        self.r128_track_gain
+            .map(NormalizedLoudness::from_r128_q78)
+    }
+
+    /// Converts container ReplayGain 2.0 or EBU R128 album gain tags into a unified
+    /// `-14.0 LUFS` [`NormalizedLoudness`] adjustment.
+    pub fn album_normalized_loudness(&self) -> Option<NormalizedLoudness> {
+        if let Some(gain) = self.replaygain_album_db {
+            return Some(NormalizedLoudness::from_replay_gain(
+                gain as f32,
+                self.replaygain_album_peak,
+            ));
+        }
+        self.r128_album_gain
+            .map(NormalizedLoudness::from_r128_q78)
+    }
 }
 
 /// Lossless sample-format-preserving audio chunk produced by decoders and verified across stages.
@@ -214,4 +248,8 @@ pub trait AudioDecoder: Send {
     fn total_frames(&self) -> Option<u64>;
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, DecoderError>;
     fn seek(&mut self, time: Duration) -> Result<(), DecoderError>;
+    /// Reclaims cached streaming/decoder buffers after extended idle pause. Returns bytes freed.
+    fn reclaim_idle_memory(&mut self) -> usize {
+        0
+    }
 }

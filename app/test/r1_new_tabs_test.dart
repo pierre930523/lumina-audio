@@ -55,14 +55,19 @@ void main() {
     expect(svc.currentState.status, PlaybackStatus.playing);
     expect(svc.currentState.track?.title, '原子習慣');
 
-    // Podcast：播放範例
+    // Podcast：YouTube Music Podcast 頁面（無假資料，含分段頁籤與搜尋列）
     await tester.tap(find.byKey(const Key('nav_tab_podcasts')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('podcasts_list_view')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('podcast_tile_pod-001')));
-    await tester.pumpAndSettle();
-    expect(svc.currentState.status, PlaybackStatus.playing);
-    expect(svc.currentState.track?.album, '法客電台');
+    expect(find.byKey(const Key('podcast_tab_my_shows')), findsOneWidget);
+    expect(find.byKey(const Key('podcast_tab_explore')), findsOneWidget);
+    expect(
+      find.byKey(const Key('podcast_tab_latest_episodes')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('podcast_search_input')), findsOneWidget);
+    expect(find.text('法客電台'), findsNothing);
+    expect(find.text('The Vergecast'), findsNothing);
 
     // 廣播電台：新增自訂電台與播放
     await tester.tap(find.byKey(const Key('nav_tab_radio')));

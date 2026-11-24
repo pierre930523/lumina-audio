@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:material_ui/material_ui.dart';
@@ -9,6 +10,8 @@ class TrackProgressBar extends StatefulWidget {
   final ValueChanged<Duration> onSeek;
   final bool expand;
   final bool showWaveform;
+  final Duration seekThrottleInterval;
+  final bool enableLiveDragSeek;
   final ValueChanged<Duration>? onChangeStart;
   final ValueChanged<Duration>? onChanged;
   final ValueChanged<Duration>? onChangeEnd;
@@ -20,6 +23,8 @@ class TrackProgressBar extends StatefulWidget {
     required this.onSeek,
     this.expand = false,
     this.showWaveform = true,
+    this.seekThrottleInterval = const Duration(milliseconds: 100),
+    this.enableLiveDragSeek = true,
     this.onChangeStart,
     this.onChanged,
     this.onChangeEnd,
@@ -40,9 +45,30 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
   bool _isDragging = false;
   Duration? _dragPosition;
   bool _showRemaining = false;
+  Timer? _seekThrottleTimer;
+  Duration? _pendingDragSeek;
+  Duration? _lastDispatchedDragSeek;
+
+  void _cancelSeekThrottleTimer() {
+    _seekThrottleTimer?.cancel();
+    _seekThrottleTimer = null;
+  }
+
+  void _flushThrottledDragSeek() {
+    _seekThrottleTimer = null;
+    if (!mounted || !_isDragging) return;
+    final target = _pendingDragSeek;
+    _pendingDragSeek = null;
+    if (target == null || target == _lastDispatchedDragSeek) return;
+    _lastDispatchedDragSeek = target;
+    widget.onSeek(target);
+  }
 
   void _handleDragStart(double value) {
     final pos = Duration(milliseconds: value.round());
+    _cancelSeekThrottleTimer();
+    _pendingDragSeek = null;
+    _lastDispatchedDragSeek = null;
     setState(() {
       _isDragging = true;
       _dragPosition = pos;
@@ -56,16 +82,51 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
       _dragPosition = pos;
     });
     widget.onChanged?.call(pos);
+
+    if (widget.enableLiveDragSeek) {
+      _pendingDragSeek = pos;
+      if (_seekThrottleTimer == null) {
+        if (widget.seekThrottleInterval <= Duration.zero) {
+          _flushThrottledDragSeek();
+        } else {
+          _seekThrottleTimer = Timer(
+            widget.seekThrottleInterval,
+            _flushThrottledDragSeek,
+          );
+        }
+      }
+    }
   }
 
   void _handleDragEnd(double value) {
     final pos = Duration(milliseconds: value.round());
+    _cancelSeekThrottleTimer();
+    _pendingDragSeek = null;
+    final lastDispatched = _lastDispatchedDragSeek;
+    _lastDispatchedDragSeek = null;
     setState(() {
       _isDragging = false;
       _dragPosition = null;
     });
     widget.onChangeEnd?.call(pos);
-    widget.onSeek(pos);
+    if (lastDispatched != pos) {
+      widget.onSeek(pos);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant TrackProgressBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enableLiveDragSeek && _seekThrottleTimer != null) {
+      _cancelSeekThrottleTimer();
+      _pendingDragSeek = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _cancelSeekThrottleTimer();
+    super.dispose();
   }
 
   void _toggleRemaining() {

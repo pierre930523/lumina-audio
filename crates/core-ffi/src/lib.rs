@@ -2,19 +2,27 @@
 
 pub mod engine;
 pub mod error;
+pub mod l1_cache;
+pub mod l2_cache;
 pub mod library;
 pub mod lyrics;
 pub mod playback;
 pub mod profiles;
 pub mod providers;
 pub mod server;
+pub mod sidecar;
 pub mod signal_path;
+pub mod streaming_bridge;
 pub mod visualizer;
 pub mod zones;
 
+pub use l1_cache::*;
+pub use l2_cache::*;
 pub use library::*;
 pub use lyrics::*;
 pub use playback::*;
+pub use sidecar::*;
+pub use streaming_bridge::*;
 pub use visualizer::*;
 
 use engine::get_engine;
@@ -107,13 +115,23 @@ pub unsafe extern "C" fn lumina_string_free(ptr: *mut c_char) {
 /// The returned pointer must be freed with `lumina_string_free`.
 #[unsafe(no_mangle)]
 pub extern "C" fn lumina_last_error_message() -> *mut c_char {
+    let engine = get_engine();
     if let Some(err) = take_last_error() {
+        if let Ok(mut err_lock) = engine.async_last_error.write()
+            && err_lock.as_deref() == Some(err.as_str())
+        {
+            *err_lock = None;
+        }
         return string_to_c_char(&err);
     }
-    let engine = get_engine();
     if let Ok(guard) = engine.player.read()
         && let Some(ref player) = *guard
         && let Some(err) = player.take_last_error()
+    {
+        return string_to_c_char(&err);
+    }
+    if let Ok(mut err_lock) = engine.async_last_error.write()
+        && let Some(err) = err_lock.take()
     {
         return string_to_c_char(&err);
     }

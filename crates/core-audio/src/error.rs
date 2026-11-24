@@ -50,6 +50,12 @@ pub enum DecoderError {
 
     #[error("Unsupported format or container: {0}")]
     UnsupportedFormat(String),
+
+    #[error("Stream authentication required for provider '{provider_id}' (HTTP {status})")]
+    StreamAuthRequired { provider_id: String, status: u16 },
+
+    #[error("Stream format changed during refresh")]
+    StreamFormatChanged(Box<core_types::streaming::StreamSourceSpec>),
 }
 
 #[derive(Debug, Error)]

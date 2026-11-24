@@ -4,13 +4,15 @@ import 'package:crypto/crypto.dart';
 
 import '../../../models/audio_format.dart';
 import '../../../models/playback_state.dart';
+import '../../../models/stream_source_spec.dart';
 import '../../../models/streaming_models.dart';
 import '../../../models/studio_models.dart';
+import '../stream_resolver.dart';
 import '../streaming_provider.dart';
 
 /// Real Qobuz API v0.2 provider supporting MD5 credential login, token
 /// verification, Hi-Res catalog sync, and MD5 `request_sig` stream signing.
-class QobuzProvider extends BaseStreamingProvider {
+class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
   static const List<int> _preferredFormatIds = <int>[27, 7, 6, 5];
 
   final String baseUrl;
@@ -32,6 +34,12 @@ class QobuzProvider extends BaseStreamingProvider {
 
   @override
   String get kind => 'qobuz';
+
+  @override
+  String get providerId => kind;
+
+  @override
+  ProviderCapabilities get capabilities => ProviderCapabilities.qobuz;
 
   bool get hasAppSecret =>
       _appSecret != null && _appSecret!.trim().isNotEmpty;
@@ -317,7 +325,7 @@ class QobuzProvider extends BaseStreamingProvider {
   }
 
   @override
-  Future<void> refreshSessionIfNeeded() async {
+  Future<void> refreshSessionIfNeeded({bool force = false}) async {
     // Qobuz user_auth_token does not use OAuth refresh tokens.
   }
 
@@ -369,15 +377,38 @@ class QobuzProvider extends BaseStreamingProvider {
     return nextCatalog;
   }
 
+  static const List<String> _featuredRecommendationTypes = <String>[
+    'new-releases-full',
+    'ideal-discography',
+    'press-awards',
+    'most-streamed',
+    'best-sellers',
+    'new-releases',
+    'qobuzissims',
+  ];
+
   @override
   Future<StreamingRecommendations> fetchRecommendations({
     CancellationToken? cancel,
+    bool forceRefresh = false,
+    int batchIndex = 0,
+    Set<String> excludeAlbumIds = const <String>{},
+    Set<String> excludeTrackIds = const <String>{},
   }) async {
     ensureAuthenticated();
 
     final mergedAlbums = <StreamingAlbum>[];
     final seenAlbumIds = <String>{};
     var tracks = <TrackInfo>[];
+    final headers = BaseStreamingProvider.withNoCacheHeaders(
+      _authHeaders(),
+      forceRefresh: forceRefresh,
+    );
+
+    final featuredType = _featuredRecommendationTypes[
+        batchIndex % _featuredRecommendationTypes.length];
+    final featuredOffset =
+        (batchIndex ~/ _featuredRecommendationTypes.length) * 16;
 
     try {
       final featuredJson = await http.requestJson(
@@ -385,12 +416,13 @@ class QobuzProvider extends BaseStreamingProvider {
         uri: BaseStreamingProvider.buildUri(
           baseUrl,
           '/album/getFeatured',
-          const <String, String>{
-            'type': 'new-releases-full',
+          <String, String>{
+            'type': featuredType,
             'limit': '16',
+            if (featuredOffset > 0) 'offset': '$featuredOffset',
           },
         ),
-        headers: _authHeaders(),
+        headers: headers,
         cancel: cancel,
       );
       final featuredAlbumsObj = featuredJson['albums'] as Map?;
@@ -416,15 +448,19 @@ class QobuzProvider extends BaseStreamingProvider {
       }
     }
 
+    final favOffset = batchIndex > 0 ? (batchIndex * 10) % 40 : 0;
     try {
       final favJson = await http.requestJson(
         method: 'GET',
         uri: BaseStreamingProvider.buildUri(
           baseUrl,
           '/favorite/getUserFavorites',
-          const <String, String>{'limit': '20'},
+          <String, String>{
+            'limit': '20',
+            if (favOffset > 0) 'offset': '$favOffset',
+          },
         ),
-        headers: _authHeaders(),
+        headers: headers,
         cancel: cancel,
       );
       final favAlbumsObj = favJson['albums'] as Map?;
@@ -454,10 +490,97 @@ class QobuzProvider extends BaseStreamingProvider {
       }
     }
 
+    final needsAlbumSeedTracks = mergedAlbums.isNotEmpty &&
+        (tracks.isEmpty ||
+            ((forceRefresh || batchIndex > 0) &&
+                tracks.every((t) => excludeTrackIds.contains(t.id))));
+    if (needsAlbumSeedTracks) {
+      final seedAlbum = mergedAlbums.firstWhere(
+        (a) => !excludeAlbumIds.contains(a.id),
+        orElse: () => mergedAlbums.first,
+      );
+      try {
+        final albJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/album/get',
+            <String, String>{'album_id': seedAlbum.id},
+          ),
+          headers: headers,
+          cancel: cancel,
+        );
+        final albumTitle = albJson['title']?.toString() ?? seedAlbum.title;
+        final albArtistObj = albJson['artist'] as Map?;
+        final albumArtist =
+            albArtistObj?['name']?.toString() ?? seedAlbum.artist;
+        final albumCover =
+            _extractCoverUrl(albJson['image']) ?? seedAlbum.coverUrl;
+        final albTracksObj = albJson['tracks'] as Map?;
+        final seedTracks = _parseTracks(
+          albTracksObj?['items'],
+          fallbackAlbumTitle: albumTitle,
+          fallbackArtistName: albumArtist,
+          fallbackCoverUrl: albumCover,
+        );
+        if (seedTracks.isNotEmpty) {
+          final seenTrackIds = tracks.map((t) => t.id).toSet();
+          for (final t in seedTracks) {
+            if (seenTrackIds.add(t.id)) {
+              tracks = <TrackInfo>[...tracks, t];
+            }
+          }
+        }
+      } on StreamingException catch (e) {
+        if (e.isTokenExpired ||
+            e.isCancelled ||
+            e.statusCode == 401 ||
+            e.statusCode == 403 ||
+            e.statusCode == null) {
+          rethrow;
+        }
+      }
+    }
+
+    if (tracks.isNotEmpty && mergedAlbums.isNotEmpty) {
+      final coverByAlbumTitle = <String, String>{};
+      for (final a in mergedAlbums) {
+        final key = a.title.trim().toLowerCase();
+        if (key.isNotEmpty && a.coverUrl != null && a.coverUrl!.isNotEmpty) {
+          coverByAlbumTitle.putIfAbsent(key, () => a.coverUrl!);
+        }
+      }
+      if (coverByAlbumTitle.isNotEmpty) {
+        tracks = tracks
+            .map((t) {
+              if ((t.coverUrl != null && t.coverUrl!.isNotEmpty) ||
+                  (t.albumArtUrl != null && t.albumArtUrl!.isNotEmpty)) {
+                return t;
+              }
+              final inherited = coverByAlbumTitle[t.album.trim().toLowerCase()];
+              if (inherited == null) return t;
+              return t.copyWith(coverUrl: inherited, albumArtUrl: inherited);
+            })
+            .toList(growable: false);
+      }
+    }
+
     return StreamingRecommendations(
       providerKind: kind,
-      albums: mergedAlbums,
-      tracks: tracks,
+      albums: BaseStreamingProvider.selectFreshBatch<StreamingAlbum>(
+        mergedAlbums,
+        idOf: (a) => a.id,
+        excludeIds: excludeAlbumIds,
+        batchIndex: batchIndex,
+        maxCount: 16,
+      ),
+      tracks: BaseStreamingProvider.selectFreshBatch<TrackInfo>(
+        tracks,
+        idOf: (t) => t.id,
+        excludeIds: excludeTrackIds,
+        batchIndex: batchIndex,
+        maxCount: 16,
+      ),
       fetchedAt: clock(),
     );
   }
@@ -505,6 +628,9 @@ class QobuzProvider extends BaseStreamingProvider {
     final tracksContainer = json['tracks'] as Map?;
     final parsedTracks = _parseTracks(
       tracksContainer?['items'] ?? json['tracks'],
+      fallbackAlbumTitle: title,
+      fallbackArtistName: artistName,
+      fallbackCoverUrl: coverUrl,
     );
     final versionTracks = <AlbumVersionTrackInfo>[];
     for (var i = 0; i < parsedTracks.length; i++) {
@@ -568,7 +694,11 @@ class QobuzProvider extends BaseStreamingProvider {
   }
 
   @override
-  Future<StreamingCatalog> search(String query) async {
+  Future<StreamingCatalog> search(
+    String query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
     ensureAuthenticated();
     final trimmed = query.trim();
     if (trimmed.isEmpty) return StreamingCatalog(syncedAt: clock());
@@ -581,7 +711,9 @@ class QobuzProvider extends BaseStreamingProvider {
         <String, String>{'query': trimmed, 'limit': '25'},
       ),
       headers: _authHeaders(),
+      cancel: cancel,
     );
+    cancel?.throwIfCancelled();
 
     final tracksObj = json['tracks'] as Map?;
     final albumsObj = json['albums'] as Map?;
@@ -595,9 +727,30 @@ class QobuzProvider extends BaseStreamingProvider {
     );
   }
 
-  @override
-  Future<ResolvedStreamResult> resolveStream(
-    TrackInfo track, {
+  static List<int> _formatIdsForQualityKey(String qualityKey) {
+    final normalized = qualityKey.trim().toLowerCase();
+    return switch (normalized) {
+      '27' || 'hi_res_192' || '24_192' => const <int>[27, 7, 6, 5],
+      '7' || 'hi_res_96' || '24_96' => const <int>[7, 6, 5],
+      '6' || 'lossless' || 'flac' => const <int>[6, 5],
+      '5' || 'mp3_320' || 'mp3' => const <int>[5],
+      _ => _preferredFormatIds,
+    };
+  }
+
+  Future<
+    ({
+      String url,
+      Map<String, String> headers,
+      String mimeType,
+      String hintExtension,
+      AudioFormat format,
+      int? bitrateBps,
+      int? expireAt,
+    })
+  > _resolveSignedFileUrl({
+    required String rawTrackId,
+    required List<int> formatIds,
     CancellationToken? cancel,
     Duration? timeout,
   }) async {
@@ -611,13 +764,13 @@ class QobuzProvider extends BaseStreamingProvider {
       );
     }
 
-    final trackId = BaseStreamingProvider.stripTrackPrefix(track.id, 'qobuz');
+    final trackId = BaseStreamingProvider.stripTrackPrefix(rawTrackId, 'qobuz');
     if (trackId.isEmpty) {
       throw const StreamingException('曲目缺少有效的 Qobuz track_id');
     }
 
     StreamingException? lastFailure;
-    for (final fmtId in _preferredFormatIds) {
+    for (final fmtId in formatIds) {
       cancel?.throwIfCancelled();
       final ts = (clock().millisecondsSinceEpoch ~/ 1000).toString();
       final sig = computeRequestSignature(
@@ -672,9 +825,19 @@ class QobuzProvider extends BaseStreamingProvider {
       }
 
       if (res.json['status'] == 'error') {
-        lastFailure = StreamingException(
-          res.json['message']?.toString() ?? 'Qobuz 無法取得串流網址',
-        );
+        final msg = res.json['message']?.toString() ?? 'Qobuz 無法取得串流網址';
+        final code = (res.json['code'] as num?)?.toInt();
+        final lower = msg.toLowerCase();
+        if (code == 401 ||
+            lower.contains('authentication is required') ||
+            lower.contains('invalid user_auth_token')) {
+          throw StreamingException(
+            msg,
+            statusCode: 401,
+            isTokenExpired: true,
+          );
+        }
+        lastFailure = StreamingException(msg, statusCode: code);
         continue;
       }
 
@@ -709,14 +872,26 @@ class QobuzProvider extends BaseStreamingProvider {
 
       final bitDepth =
           (res.json['bit_depth'] as num?)?.toInt() ?? defaultSpec.bitDepth;
-      final mime = res.json['mime_type']?.toString().toLowerCase() ?? '';
+      final rawMime = res.json['mime_type']?.toString().trim() ?? '';
+      final mime = rawMime.toLowerCase();
       final codec = mime.contains('mpeg') || effectiveFormatId == 5
           ? AudioCodec.mp3
           : AudioCodec.flac;
 
-      return ResolvedStreamResult(
+      final uriExp = Uri.tryParse(streamUrl)?.queryParameters;
+      final expireAt =
+          int.tryParse(uriExp?['exp'] ?? uriExp?['expire'] ?? uriExp?['expires'] ?? '');
+      final rawBitrate = (res.json['bitrate'] as num?)?.toInt();
+      final bitrateBps = rawBitrate != null && rawBitrate > 0
+          ? (rawBitrate < 10000 ? rawBitrate * 1000 : rawBitrate)
+          : (codec == AudioCodec.mp3 ? 320000 : null);
+
+      return (
         url: streamUrl,
         headers: _authHeaders(),
+        mimeType: rawMime.isNotEmpty
+            ? rawMime
+            : (codec == AudioCodec.mp3 ? 'audio/mpeg' : 'audio/flac'),
         hintExtension: codec == AudioCodec.mp3 ? 'mp3' : 'flac',
         format: AudioFormat(
           codec: codec,
@@ -724,11 +899,56 @@ class QobuzProvider extends BaseStreamingProvider {
           bitDepth: bitDepth,
           channels: 2,
         ),
+        bitrateBps: bitrateBps,
+        expireAt: expireAt,
       );
     }
 
     throw lastFailure ??
         const StreamingException('Qobuz 無法解析任何可用音質的串流網址');
+  }
+
+  @override
+  Future<StreamSourceSpec> resolve(
+    StreamKey key, {
+    CancellationToken? cancelToken,
+  }) async {
+    final resolved = await _resolveSignedFileUrl(
+      rawTrackId: key.trackId,
+      formatIds: _formatIdsForQualityKey(key.qualityKey),
+      cancel: cancelToken,
+    );
+    return DirectRangeSpec(
+      key: key,
+      url: resolved.url,
+      headers: resolved.headers,
+      bitrateBps: resolved.bitrateBps,
+      mimeType: resolved.mimeType,
+      hintExtension: resolved.hintExtension,
+      expireAt: resolved.expireAt,
+      audioFormat: resolved.format,
+    );
+  }
+
+  @override
+  Future<ResolvedStreamResult> resolveStream(
+    TrackInfo track, {
+    CancellationToken? cancel,
+    Duration? timeout,
+    int? playRequestId,
+  }) async {
+    final resolved = await _resolveSignedFileUrl(
+      rawTrackId: track.id,
+      formatIds: _preferredFormatIds,
+      cancel: cancel,
+      timeout: timeout,
+    );
+    return ResolvedStreamResult(
+      url: resolved.url,
+      headers: resolved.headers,
+      hintExtension: resolved.hintExtension,
+      format: resolved.format,
+    );
   }
 
   static ({int sampleRateHz, int bitDepth}) _formatDefaults(int formatId) =>
@@ -739,8 +959,15 @@ class QobuzProvider extends BaseStreamingProvider {
         _ => (sampleRateHz: 44100, bitDepth: 16),
       };
 
-  List<TrackInfo> _parseTracks(dynamic rawItems) {
+  List<TrackInfo> _parseTracks(
+    dynamic rawItems, {
+    String? fallbackAlbumTitle,
+    String? fallbackArtistName,
+    String? fallbackCoverUrl,
+  }) {
     if (rawItems is! List) return const [];
+    final normalizedFallbackCover =
+        BaseStreamingProvider.normalizeCoverUrl(fallbackCoverUrl);
     final list = <TrackInfo>[];
     for (final item in rawItems) {
       if (item is! Map) continue;
@@ -751,10 +978,27 @@ class QobuzProvider extends BaseStreamingProvider {
       final performer = map['performer'] as Map?;
       final albumObj = map['album'] as Map?;
       final albumArtist = albumObj?['artist'] as Map?;
-      final artistName = performer?['name']?.toString() ??
-          albumArtist?['name']?.toString() ??
-          '未知藝術家';
-      final coverUrl = _extractCoverUrl(albumObj?['image']);
+      final performerName = performer?['name']?.toString().trim();
+      final albArtistName = albumArtist?['name']?.toString().trim();
+      final fbArtistName = fallbackArtistName?.trim();
+      final artistName =
+          (performerName != null && performerName.isNotEmpty)
+              ? performerName
+              : ((albArtistName != null && albArtistName.isNotEmpty)
+                    ? albArtistName
+                    : ((fbArtistName != null && fbArtistName.isNotEmpty)
+                          ? fbArtistName
+                          : '未知藝術家'));
+      final rawAlbTitle = albumObj?['title']?.toString().trim();
+      final fbAlbTitle = fallbackAlbumTitle?.trim();
+      final albumTitle = (rawAlbTitle != null && rawAlbTitle.isNotEmpty)
+          ? rawAlbTitle
+          : ((fbAlbTitle != null && fbAlbTitle.isNotEmpty)
+                ? fbAlbTitle
+                : 'Qobuz');
+      final coverUrl = _extractCoverUrl(albumObj?['image']) ??
+          _extractCoverUrl(map['image']) ??
+          normalizedFallbackCover;
 
       final rawSr = map['maximum_sampling_rate'];
       final srHz = rawSr is num
@@ -767,7 +1011,7 @@ class QobuzProvider extends BaseStreamingProvider {
           id: 'qobuz:$id',
           title: map['title']?.toString() ?? '未命名曲目',
           artist: artistName,
-          album: albumObj?['title']?.toString() ?? 'Qobuz',
+          album: albumTitle,
           duration: Duration(seconds: (map['duration'] as num?)?.toInt() ?? 0),
           albumArtUrl: coverUrl,
           coverUrl: coverUrl,
@@ -836,8 +1080,9 @@ class QobuzProvider extends BaseStreamingProvider {
       final id = map['id']?.toString() ?? '';
       if (id.isEmpty) continue;
       final images = map['images300'] ?? map['images150'] ?? map['images'];
-      final coverUrl =
-          (images is List && images.isNotEmpty) ? images.first?.toString() : null;
+      final coverUrl = BaseStreamingProvider.normalizeCoverUrl(
+        (images is List && images.isNotEmpty) ? images.first?.toString() : null,
+      );
       list.add(
         StreamingPlaylist(
           id: id,
@@ -853,10 +1098,23 @@ class QobuzProvider extends BaseStreamingProvider {
   }
 
   static String? _extractCoverUrl(dynamic imageObj) {
+    if (imageObj is String) {
+      return BaseStreamingProvider.normalizeCoverUrl(imageObj);
+    }
     if (imageObj is! Map) return null;
-    for (final key in const ['large', 'extralarge', 'medium', 'small']) {
-      final url = imageObj[key]?.toString().trim();
-      if (url != null && url.isNotEmpty) return url;
+    for (final key in const [
+      'large',
+      'extralarge',
+      'small',
+      'thumbnail',
+      'medium',
+      'mega',
+      'back',
+    ]) {
+      final url = BaseStreamingProvider.normalizeCoverUrl(
+        imageObj[key]?.toString(),
+      );
+      if (url != null) return url;
     }
     return null;
   }

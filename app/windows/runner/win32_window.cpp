@@ -170,6 +170,9 @@ bool Win32Window::Create(const std::wstring& title,
     return false;
   }
 
+  ::SetPropW(window, L"LUMINA_AUDIO_MAIN_WINDOW",
+             reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(1)));
+
   last_monitor_ = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
   last_dpi_ = FlutterDesktopGetDpiForMonitor(last_monitor_);
   if (last_dpi_ == 0) {
@@ -181,8 +184,7 @@ bool Win32Window::Create(const std::wstring& title,
 
   UpdateTheme(window);
 
-  MARGINS margins = {0, 0, 1, 0};
-  DwmExtendFrameIntoClientArea(window, &margins);
+  ApplyDwmFrameMargins();
   SetWindowPos(window, nullptr, 0, 0, 0, 0,
                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
@@ -203,15 +205,36 @@ void Win32Window::ShowAndFocus() {
   if (!window_handle_) {
     return;
   }
-  if (IsIconic(window_handle_)) {
-    ShowWindow(window_handle_, SW_RESTORE);
-  } else {
-    ShowWindow(window_handle_, SW_SHOW);
+  if (!::IsWindowVisible(window_handle_)) {
+    ::ShowWindow(window_handle_, SW_SHOW);
   }
-  SetForegroundWindow(window_handle_);
-  SetActiveWindow(window_handle_);
+  if (::IsIconic(window_handle_)) {
+    ::ShowWindow(window_handle_, SW_RESTORE);
+  } else {
+    ::ShowWindow(window_handle_, SW_SHOW);
+  }
+  ::BringWindowToTop(window_handle_);
+  if (!::SetForegroundWindow(window_handle_)) {
+    const HWND foreground_hwnd = ::GetForegroundWindow();
+    const DWORD current_thread_id = ::GetCurrentThreadId();
+    const DWORD foreground_thread_id =
+        foreground_hwnd != nullptr
+            ? ::GetWindowThreadProcessId(foreground_hwnd, nullptr)
+            : 0;
+    if (foreground_thread_id != 0 &&
+        foreground_thread_id != current_thread_id) {
+      if (::AttachThreadInput(foreground_thread_id, current_thread_id, TRUE)) {
+        ::SetForegroundWindow(window_handle_);
+        ::BringWindowToTop(window_handle_);
+        ::AttachThreadInput(foreground_thread_id, current_thread_id, FALSE);
+      }
+    }
+  }
+  ::SetActiveWindow(window_handle_);
+  ApplyDwmFrameMargins();
+  SyncChildContentBounds(true);
   if (child_content_ != nullptr) {
-    SetFocus(child_content_);
+    ::SetFocus(child_content_);
   }
 }
 
@@ -242,13 +265,20 @@ Win32Window::MessageHandler(HWND hwnd,
                             LPARAM const lparam) noexcept {
   switch (message) {
     case WM_NCCALCSIZE: {
+      if (IsIconic(hwnd)) {
+        return DefWindowProc(hwnd, message, wparam, lparam);
+      }
       if (wparam == TRUE) {
         if (is_fullscreen_) {
           return 0;
         }
         auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
-        if (IsZoomed(hwnd)) {
-          HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (params != nullptr && IsZoomed(hwnd)) {
+          HMONITOR monitor =
+              MonitorFromRect(&params->rgrc[0], MONITOR_DEFAULTTONEAREST);
+          if (monitor == nullptr) {
+            monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+          }
           MONITORINFO monitor_info{};
           monitor_info.cbSize = sizeof(monitor_info);
           if (GetMonitorInfo(monitor, &monitor_info)) {
@@ -257,7 +287,7 @@ Win32Window::MessageHandler(HWND hwnd,
         }
         return 0;
       }
-      return 0;
+      break;
     }
 
     case WM_CLOSE:
@@ -267,6 +297,7 @@ Win32Window::MessageHandler(HWND hwnd,
       break;
 
     case WM_DESTROY:
+      ::RemovePropW(hwnd, L"LUMINA_AUDIO_MAIN_WINDOW");
       window_handle_ = nullptr;
       Destroy();
       if (quit_on_close_) {
@@ -339,23 +370,9 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
     }
 
-    case WM_SIZE: {
-      SyncChildContentBounds();
-      if (wparam != SIZE_MINIMIZED) {
-        RECT rect = GetClientArea();
-        const LONG width = rect.right - rect.left;
-        const LONG height = rect.bottom - rect.top;
-        if (width != last_client_width_ || height != last_client_height_) {
-          last_client_width_ = width;
-          last_client_height_ = height;
-          OnDisplayOrDpiChanged();
-        }
-      } else {
-        last_client_width_ = 0;
-        last_client_height_ = 0;
-      }
+    case WM_SIZE:
+      HandleSizeMessage(hwnd, wparam);
       return 0;
-    }
 
     case WM_WINDOWPOSCHANGED: {
       HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -449,10 +466,14 @@ Win32Window::MessageHandler(HWND hwnd,
     }
 
     case WM_ACTIVATE:
-      if (child_content_ != nullptr) {
-        SetFocus(child_content_);
-      }
+      return HandleActivateMessage(hwnd, message, wparam, lparam, true);
+
+    case WM_SETFOCUS:
+      HandleSetFocusMessage(hwnd);
       return 0;
+
+    case WM_SHOWWINDOW:
+      return HandleShowWindowMessage(hwnd, message, wparam, lparam, true);
 
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
@@ -466,6 +487,7 @@ void Win32Window::Destroy() {
   OnDestroy();
 
   if (window_handle_) {
+    ::RemovePropW(window_handle_, L"LUMINA_AUDIO_MAIN_WINDOW");
     DestroyWindow(window_handle_);
     window_handle_ = nullptr;
   }
@@ -474,6 +496,8 @@ void Win32Window::Destroy() {
   last_dpi_ = 96;
   last_client_width_ = -1;
   last_client_height_ = -1;
+  was_minimized_ = false;
+  was_maximized_ = false;
   if (g_active_window_count == 0) {
     WindowClassRegistrar::GetInstance()->UnregisterWindowClass();
   }
@@ -492,15 +516,130 @@ void Win32Window::SetChildContent(HWND content) {
   SetFocus(child_content_);
 }
 
-void Win32Window::SyncChildContentBounds() {
-  if (window_handle_ == nullptr || child_content_ == nullptr) {
+void Win32Window::ApplyDwmFrameMargins() {
+  if (is_fullscreen_ || window_handle_ == nullptr) {
+    return;
+  }
+  MARGINS margins = {0, 0, 1, 0};
+  DwmExtendFrameIntoClientArea(window_handle_, &margins);
+}
+
+void Win32Window::SyncChildContentBounds(bool force_frame_sync) {
+  if (window_handle_ == nullptr || child_content_ == nullptr ||
+      IsIconic(window_handle_)) {
     return;
   }
   RECT frame = GetClientArea();
-  const int width = std::max(0, static_cast<int>(frame.right - frame.left));
-  const int height = std::max(0, static_cast<int>(frame.bottom - frame.top));
+  const int width = static_cast<int>(frame.right - frame.left);
+  const int height = static_cast<int>(frame.bottom - frame.top);
+  if (width <= 0 || height <= 0) {
+    return;
+  }
   MoveWindow(child_content_, static_cast<int>(frame.left),
              static_cast<int>(frame.top), width, height, TRUE);
+  if (force_frame_sync) {
+    SetWindowPos(child_content_, HWND_TOP, static_cast<int>(frame.left),
+                 static_cast<int>(frame.top), width, height,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+  }
+}
+
+void Win32Window::HandleSizeMessage(HWND hwnd, WPARAM wparam) {
+  if (wparam == SIZE_MINIMIZED) {
+    was_minimized_ = true;
+    last_client_width_ = 0;
+    last_client_height_ = 0;
+    const HWND focused = GetFocus();
+    if (focused != nullptr &&
+        (focused == hwnd || focused == child_content_ ||
+         IsChild(hwnd, focused))) {
+      SetFocus(nullptr);
+    }
+    OnWindowMinimized();
+    return;
+  }
+
+  const bool from_minimized = was_minimized_;
+  const bool is_maximized = (wparam == SIZE_MAXIMIZED) || IsZoomed(hwnd);
+  const bool prev_maximized = was_maximized_;
+  was_minimized_ = false;
+  was_maximized_ = is_maximized;
+
+  RECT rect = GetClientArea();
+  const LONG width = rect.right - rect.left;
+  const LONG height = rect.bottom - rect.top;
+  if (width > 0 && height > 0) {
+    if (from_minimized) {
+      ApplyDwmFrameMargins();
+      SyncChildContentBounds(true);
+    } else {
+      SyncChildContentBounds(false);
+    }
+    if (from_minimized || width != last_client_width_ ||
+        height != last_client_height_) {
+      last_client_width_ = width;
+      last_client_height_ = height;
+      if (from_minimized) {
+        if (child_content_ != nullptr &&
+            (GetForegroundWindow() == hwnd || GetActiveWindow() == hwnd)) {
+          SetFocus(child_content_);
+        }
+        OnWindowRestored(true, is_maximized);
+      } else {
+        OnDisplayOrDpiChanged();
+      }
+    }
+    if (!from_minimized && is_maximized != prev_maximized && !is_fullscreen_) {
+      OnWindowMaximizeChanged(is_maximized);
+    }
+  }
+}
+
+LRESULT Win32Window::HandleActivateMessage(HWND hwnd,
+                                           UINT message,
+                                           WPARAM wparam,
+                                           LPARAM lparam,
+                                           bool call_def_window_proc) {
+  const bool active = (LOWORD(wparam) != WA_INACTIVE);
+  const bool minimized = (HIWORD(wparam) != 0) || IsIconic(hwnd);
+  LRESULT res =
+      call_def_window_proc ? DefWindowProc(hwnd, message, wparam, lparam) : 0;
+  if (active && !minimized) {
+    SyncChildContentBounds(false);
+    if (child_content_ != nullptr) {
+      SetFocus(child_content_);
+    }
+    OnWindowFocusChanged(true);
+  } else if (!active) {
+    OnWindowFocusChanged(false);
+  }
+  return res;
+}
+
+LRESULT Win32Window::HandleShowWindowMessage(HWND hwnd,
+                                             UINT message,
+                                             WPARAM wparam,
+                                             LPARAM lparam,
+                                             bool call_def_window_proc) {
+  LRESULT res =
+      call_def_window_proc ? DefWindowProc(hwnd, message, wparam, lparam) : 0;
+  if (wparam == TRUE && !IsIconic(hwnd)) {
+    ApplyDwmFrameMargins();
+    SyncChildContentBounds(true);
+    if (child_content_ != nullptr &&
+        (GetForegroundWindow() == hwnd || GetActiveWindow() == hwnd)) {
+      SetFocus(child_content_);
+    }
+    OnWindowShown();
+  }
+  return res;
+}
+
+void Win32Window::HandleSetFocusMessage(HWND hwnd) {
+  if (!IsIconic(hwnd) && child_content_ != nullptr &&
+      GetFocus() != child_content_) {
+    SetFocus(child_content_);
+  }
 }
 
 RECT Win32Window::GetClientArea() {
@@ -543,6 +682,27 @@ void Win32Window::OnDestroy() {
 }
 
 void Win32Window::OnDisplayOrDpiChanged() {
+  // No-op; provided for subclasses.
+}
+
+void Win32Window::OnWindowMinimized() {
+  // No-op; provided for subclasses.
+}
+
+void Win32Window::OnWindowRestored(bool /*from_minimized*/,
+                                   bool /*is_maximized*/) {
+  // No-op; provided for subclasses.
+}
+
+void Win32Window::OnWindowMaximizeChanged(bool /*is_maximized*/) {
+  // No-op; provided for subclasses.
+}
+
+void Win32Window::OnWindowFocusChanged(bool /*focused*/) {
+  // No-op; provided for subclasses.
+}
+
+void Win32Window::OnWindowShown() {
   // No-op; provided for subclasses.
 }
 
@@ -619,7 +779,8 @@ void Win32Window::SetFullScreen(bool fullscreen) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
                      SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
 
-    SyncChildContentBounds();
+    ApplyDwmFrameMargins();
+    SyncChildContentBounds(true);
     OnDisplayOrDpiChanged();
   }
 }

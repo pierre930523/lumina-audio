@@ -121,6 +121,9 @@ void main() {
       final qobuzReq = WebViewAuthRequest.presetFor('qobuz');
       expect(qobuzReq.initialUrl, 'https://play.qobuz.com/login');
       expect(qobuzReq.headerUrlSubstrings, contains('qobuz.com/api.json'));
+      expect(qobuzReq.responseBodyUrlSubstrings, contains('/user/login'));
+      expect(qobuzReq.inspectWebStorage, isTrue);
+      expect(qobuzReq.cookieDomainSubstrings, contains('.qobuz.com'));
       expect(
         buildAuthParamsFromWebViewResult(
           'qobuz',
@@ -135,6 +138,68 @@ void main() {
           'mode': 'token',
           'user_auth_token': 'qb_tok',
           'app_id': '285473059',
+        },
+      );
+      expect(
+        buildAuthParamsFromWebViewResult(
+          'qobuz',
+          const WebViewAuthResult(
+            captured: true,
+            cancelled: false,
+            responseValues: {
+              'user_auth_token': 'qb_resp_tok',
+              'app_id': '285473059',
+            },
+          ),
+        ),
+        {
+          'mode': 'token',
+          'user_auth_token': 'qb_resp_tok',
+          'app_id': '285473059',
+        },
+      );
+      expect(
+        buildAuthParamsFromWebViewResult(
+          'tidal',
+          const WebViewAuthResult(
+            captured: true,
+            cancelled: false,
+            storage: {'access_token': 'tidal_storage_tok'},
+          ),
+        ),
+        {'mode': 'access_token', 'access_token': 'tidal_storage_tok'},
+      );
+      expect(
+        buildAuthParamsFromWebViewResult(
+          'tidal',
+          const WebViewAuthResult(
+            captured: true,
+            cancelled: false,
+            headers: {'x-tidal-token': 'tidal_header_tok'},
+          ),
+        ),
+        {'mode': 'access_token', 'access_token': 'tidal_header_tok'},
+      );
+      final qobuzMap = qobuzReq.toMap();
+      expect(qobuzMap['cookieDomainSubstrings'], contains('.qobuz.com'));
+      expect(qobuzMap['responseBodyUrlSubstrings'], contains('/user/login'));
+      expect(qobuzMap['inspectWebStorage'], isTrue);
+      expect(
+        buildAuthParamsFromWebViewResult(
+          'apple_music',
+          const WebViewAuthResult(
+            captured: true,
+            cancelled: false,
+            storage: {
+              'developerToken': 'am_dev_tok',
+              'media-user-token': 'am_user_tok',
+            },
+          ),
+        ),
+        {
+          'mode': 'musickit_tokens',
+          'developer_token': 'am_dev_tok',
+          'music_user_token': 'am_user_tok',
         },
       );
 
@@ -596,6 +661,10 @@ void main() {
               credentialStore: credStore,
               apiBaseUrl: baseUrl,
             ),
+            'youtube_music': YouTubeMusicProvider(
+              credentialStore: credStore,
+              baseUrl: baseUrl,
+            ),
             'tidal': TidalProvider(
               credentialStore: credStore,
               authBaseUrl: baseUrl,
@@ -677,7 +746,7 @@ void main() {
         await tester.tap(find.byKey(const Key('btn_dialog_cancel_login')));
         await tester.pumpAndSettle();
 
-        // 4. Plan B UI fallback when WebView2 is unavailable -> expands manual section honestly.
+        // 4. Plan B UI fallback when local browser is unavailable -> expands manual section honestly.
         fakeWebView.available = false;
         await tester.tap(find.byKey(const Key('btn_signin_tidal')));
         await tester.pumpAndSettle();
@@ -692,7 +761,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const Key('login_dialog_error')),
-            matching: find.textContaining('WebView2'),
+            matching: find.textContaining('本地瀏覽器'),
           ),
           findsOneWidget,
         );

@@ -65,7 +65,10 @@ class _CancellableAuthProvider extends BaseStreamingProvider {
       const [];
 
   @override
-  Future<StreamingCatalog> search(String query) async =>
+  Future<StreamingCatalog> search(
+    String query, {
+    CancellationToken? cancel,
+  }) async =>
       StreamingCatalog.empty();
 
   @override
@@ -73,6 +76,7 @@ class _CancellableAuthProvider extends BaseStreamingProvider {
     TrackInfo track, {
     CancellationToken? cancel,
     Duration? timeout,
+    int? playRequestId,
   }) =>
       throw UnimplementedError();
 }

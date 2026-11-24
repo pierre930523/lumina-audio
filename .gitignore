@@ -46,3 +46,11 @@ versions/
 *.exe
 *.dll
 *.pdb
+
+# Vendored Windows runtime binaries (populated by scripts/prepare_release_deps.ps1)
+app/windows/vendor/bin/*.exe
+app/windows/vendor/bin/*.zip
+app/windows/vendor/bin/THIRD_PARTY_LICENSES.txt
+windows/vendor/bin/*.exe
+!app/windows/vendor/bin/.gitkeep
+!app/windows/vendor/bin/README.md

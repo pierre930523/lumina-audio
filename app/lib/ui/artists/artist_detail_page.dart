@@ -10,6 +10,7 @@ import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 /// Standalone Artist Detail Page using a single virtualized [CustomScrollView]
@@ -523,23 +524,26 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                             activeTrackId != null && activeTrackId == track.id;
 
                         return RepaintBoundary(
-                          child: _ArtistTrackRow(
-                            key: Key('artist_track_$index'),
-                            index: index,
+                          child: TrackHoverPrefetch(
                             track: track,
-                            resolvedAlbum: resolvedAlbum,
-                            isPlaying: isPlaying,
-                            audioService: widget.audioService,
-                            libraryCache: widget.libraryCache,
-                            onPlay: () =>
-                                widget.audioService.play(track: track),
-                            onOpenAlbumDetail:
-                                (widget.onOpenAlbumDetail != null &&
-                                    resolvedAlbum != null)
-                                ? () => widget.onOpenAlbumDetail!(
-                                    resolvedAlbum.id,
-                                  )
-                                : null,
+                            child: _ArtistTrackRow(
+                              key: Key('artist_track_$index'),
+                              index: index,
+                              track: track,
+                              resolvedAlbum: resolvedAlbum,
+                              isPlaying: isPlaying,
+                              audioService: widget.audioService,
+                              libraryCache: widget.libraryCache,
+                              onPlay: () =>
+                                  widget.audioService.play(track: track),
+                              onOpenAlbumDetail:
+                                  (widget.onOpenAlbumDetail != null &&
+                                      resolvedAlbum != null)
+                                  ? () => widget.onOpenAlbumDetail!(
+                                      resolvedAlbum.id,
+                                    )
+                                  : null,
+                            ),
                           ),
                         );
                       },

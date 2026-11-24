@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
@@ -8,6 +9,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../models/nav_entry.dart';
 import '../models/playback_state.dart';
+import '../models/podcast_models.dart';
 import '../models/streaming_models.dart';
 import '../models/streaming_provider_meta.dart';
 import '../models/studio_models.dart';
@@ -16,16 +18,21 @@ import '../services/artwork_palette_service.dart';
 import '../services/audio_service.dart';
 import '../services/desktop_window_controller.dart';
 import '../services/escape_dismiss_registry.dart';
+import '../services/ffi_audio_service.dart';
 import '../services/library_index_cache.dart';
 import '../services/library_settings_controller.dart';
 import '../services/now_playing_view_controller.dart';
 import '../services/playback_persistence_service.dart';
+import '../services/podcast_store.dart';
 import '../services/smart_playlist_service.dart';
+import '../services/streaming/l1_stream_cache.dart';
 import '../services/streaming/oauth_helper.dart';
+import '../services/streaming/pot_sidecar_manager.dart';
 import '../services/streaming/secure_credential_store.dart';
 import '../services/streaming/streaming_manager.dart';
 import '../services/streaming/streaming_playback_coordinator.dart';
 import '../services/ui_scale_controller.dart';
+import '../services/unified_search_controller.dart';
 import '../shaders/shader_loader.dart';
 import 'albums/album_detail_page.dart';
 import 'albums/albums_and_credits_view.dart';
@@ -33,6 +40,7 @@ import 'artists/artist_detail_page.dart';
 import 'artists/artists_view.dart';
 import 'audiobooks/audiobooks_view.dart';
 import 'common/desktop_window_caption.dart';
+import 'common/track_hover_prefetch.dart';
 import 'common/window_drag_bar.dart';
 import 'dsp/dsp_control_panel.dart';
 import 'home/home_dashboard_view.dart';
@@ -40,13 +48,16 @@ import 'library/library_browser_view.dart';
 import 'mini_player/floating_capsule.dart';
 import 'now_playing/now_playing_overlay.dart';
 import 'playlists/smart_playlists_view.dart';
+import 'podcasts/podcast_detail_page.dart';
 import 'podcasts/podcasts_view.dart';
 import 'profiles/profile_switcher_bar.dart';
 import 'radio/radio_view.dart';
+import 'search/unified_search_results_view.dart';
 import 'settings/appearance_scale_panel.dart';
 import 'settings/general_settings_panel.dart';
 import 'settings/library_settings_panel.dart';
 import 'settings/providers_and_remote_panel.dart';
+import 'settings/streaming_login_dialog.dart';
 import 'streaming/streaming_service_view.dart';
 import 'theme/lumina_tokens.dart';
 import 'theme/responsive_layout.dart';
@@ -78,6 +89,7 @@ class HomeScreen extends StatefulWidget {
   final DesktopWindowController? windowController;
   final StreamingManager? streamingManager;
   final PlaybackPersistenceService? playbackPersistenceService;
+  final PodcastStore? podcastStore;
 
   const HomeScreen({
     super.key,
@@ -90,6 +102,7 @@ class HomeScreen extends StatefulWidget {
     this.windowController,
     this.streamingManager,
     this.playbackPersistenceService,
+    this.podcastStore,
   });
 
   @override
@@ -97,7 +110,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late final DesktopWindowController _windowController =
       widget.windowController ?? DesktopWindowController.instance;
   static const _canvasBg = LuminaTokens.canvasBg;
@@ -239,6 +252,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool _sidebarCollapsed = false;
   bool _isNowPlayingExpanded = false;
   bool _hasEverExpandedNowPlaying = false;
+  final TextEditingController _topSearchController = TextEditingController();
+  final FocusNode _topSearchFocusNode = FocusNode();
+  bool _topSearchExpanded = false;
   late final NowPlayingViewController _nowPlayingController;
   late final bool _ownsNowPlayingController;
   late final ArtworkPaletteService _paletteService;
@@ -253,6 +269,8 @@ class _HomeScreenState extends State<HomeScreen>
   String? _selectedCreditArtistId;
   String? _selectedSmartPlaylistId;
   String? _selectedStreamingKind;
+  String? _selectedPodcastShowId;
+  PodcastShow? _selectedPodcastShow;
   List<ProviderStatusInfo> _loggedInStreamingProviders = const [];
   LoadedShaders _shaders = LoadedShaders.empty;
   ui.FragmentShader? _glassShader;
@@ -263,9 +281,13 @@ class _HomeScreenState extends State<HomeScreen>
   late final AlbumLayoutSettingsController _albumLayoutController;
   late final PlaybackPersistenceService _playbackPersistenceService;
   late final bool _ownsPlaybackPersistenceService;
+  late final PodcastStore _podcastStore;
+  late final PodcastPlaybackTracker _podcastPlaybackTracker;
   late final StreamingManager _streamingManager;
   late final bool _ownsStreamingManager;
   late final StreamingPlaybackCoordinator _streamingCoordinator;
+  late final CoordinatingAudioService _effectiveAudioService;
+  late final UnifiedSearchController _searchController;
   StreamSubscription<PlaybackState>? _playbackStateSub;
 
   bool _isStartupRestoring = true;
@@ -282,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _stickyTitleFadeController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
@@ -336,14 +359,34 @@ class _HomeScreenState extends State<HomeScreen>
     _syncStateFromEntry(_navController.current);
     _initShaders();
 
+    final isTestEnv = Platform.environment.containsKey('FLUTTER_TEST');
+    final ffiAudio = !isTestEnv && widget.audioService is FfiAudioService
+        ? widget.audioService as FfiAudioService
+        : null;
     _ownsStreamingManager = widget.streamingManager == null;
     _streamingManager = widget.streamingManager ??
         StreamingManager(
-          credentialStore: Platform.environment.containsKey('FLUTTER_TEST')
-              ? MemorySecureCredentialStore()
+          credentialStore: isTestEnv ? MemorySecureCredentialStore() : null,
+          l1CachePersistence: ffiAudio != null
+              ? FfiL1StreamCachePersistence(
+                  libraryProvider: () => ffiAudio.nativeLibrary,
+                  waitDbReady: () => ffiAudio.dbReady,
+                )
               : null,
+          waitDbReady: ffiAudio != null ? () => ffiAudio.dbReady : null,
+          sidecarLifecycleBinder: ffiAudio != null
+              ? FfiSidecarLifecycleBinder(
+                  libraryProvider: () => ffiAudio.nativeLibrary,
+                )
+              : null,
+          onHttp2Warmup: ffiAudio?.triggerStreamingHttp2Warmup,
         );
     _streamingManager.addListener(_onStreamingManagerChanged);
+    if (widget.audioService is FfiAudioService) {
+      (widget.audioService as FfiAudioService).attachStreamingManager(
+        _streamingManager,
+      );
+    }
     _syncStreamingProvidersFromManager(notify: false);
     _streamingCoordinator = StreamingPlaybackCoordinator(
       audioService: widget.audioService,
@@ -351,47 +394,75 @@ class _HomeScreenState extends State<HomeScreen>
       onNotice: _showStreamingNoticeSnackBar,
       onError: _showStreamingErrorSnackBar,
     );
+    _effectiveAudioService = CoordinatingAudioService(
+      inner: widget.audioService,
+      coordinator: _streamingCoordinator,
+      disposeInner: false,
+    );
+    _searchController = UnifiedSearchController(
+      audioService: _effectiveAudioService,
+      libraryCache: _libraryCache,
+      streamingManager: _streamingManager,
+      librarySettings: _librarySettingsController,
+    );
 
     _ownsPlaybackPersistenceService = widget.playbackPersistenceService == null;
     _playbackPersistenceService =
         widget.playbackPersistenceService ?? PlaybackPersistenceService();
+    _podcastStore = widget.podcastStore ?? PodcastStore.instance;
+    _podcastStore.ensureLoadedSync();
+    _podcastPlaybackTracker = PodcastPlaybackTracker(
+      audioService: _effectiveAudioService,
+      store: _podcastStore,
+    );
 
     _windowController.setPreventClose(true);
     _windowController.onWindowClose = _handleWindowClose;
     _windowController.onTrayClick = _handleRestoreFromTray;
     _windowController.onTrayMenuAction = _handleTrayMenuAction;
-    final initialTray = _trayInfoFor(widget.audioService.currentState);
-    _lastTrayTrackKey = _trayTrackKeyFor(widget.audioService.currentState);
+    _windowController.onSingleInstanceWakeup = _handleRestoreFromTray;
+    _windowController.onWindowMinimize = _handleWindowMinimize;
+    _windowController.onWindowRestore = _handleWindowRestoredOrFocused;
+    _windowController.onWindowMaximize = _handleWindowRestoredOrFocused;
+    _windowController.onWindowUnmaximize = _handleWindowRestoredOrFocused;
+    _windowController.onWindowFocus = _handleWindowRestoredOrFocused;
+    final initialTray = _trayInfoFor(_effectiveAudioService.currentState);
+    _lastTrayTrackKey = _trayTrackKeyFor(_effectiveAudioService.currentState);
     _lastTrayPlaying = initialTray.isPlaying;
-    _lastTrayIdle = _isTrayIdleState(widget.audioService.currentState);
+    _lastTrayIdle = _isTrayIdleState(_effectiveAudioService.currentState);
     _windowController.initTray(
       tooltip: initialTray.tooltip,
       nowPlayingLabel: initialTray.nowPlayingLabel,
       isPlaying: initialTray.isPlaying,
     );
 
-    _playbackStateSub = widget.audioService.stateStream.listen(_onPlaybackState);
+    _playbackStateSub = _effectiveAudioService.stateStream.listen(_onPlaybackState);
+    _topSearchFocusNode.addListener(_onTopSearchFocusChanged);
     EscapeDismissRegistry.instance.registerGlobalHost();
     HardwareKeyboard.instance.addHandler(_handleHardwareKey);
     _initializeStartupSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _isExiting) return;
+      unawaited(_streamingManager.warmup());
+    });
   }
 
   Future<void> _initializeStartupSession() async {
     try {
       await _scaleController.load(
-        audioService: _ownsScaleController ? widget.audioService : null,
+        audioService: _ownsScaleController ? _effectiveAudioService : null,
       );
       if (!mounted || _isExiting) return;
 
       await _playbackPersistenceService.restoreSession(
-        widget.audioService,
+        _effectiveAudioService,
         rememberPosition: _scaleController.rememberPlaybackPosition,
       );
     } catch (_) {
       // Keep startup resilient if preferences or session file fail to read.
     } finally {
       _isStartupRestoring = false;
-      final cur = widget.audioService.currentState;
+      final cur = _effectiveAudioService.currentState;
       _lastPersistedStatus = cur.status;
       _lastPersistedTrackId = cur.track?.id;
       _syncTrayFromState(cur);
@@ -412,12 +483,22 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _syncStreamingProvidersFromManager({bool notify = true}) {
-    final streaming = _streamingManager.connectedProviders
+    final streaming = _streamingManager.providers
+        .where(
+          (p) =>
+              p.authState == StreamingAuthState.connected ||
+              p.authState == StreamingAuthState.authRequired ||
+              _streamingManager.isAuthRequired(p.kind) ||
+              p.supportsGuestMode,
+        )
         .map(
           (p) => ProviderStatusInfo(
             kind: p.kind,
-            isConfigured: true,
-            isOnline: true,
+            isConfigured:
+                p.authState == StreamingAuthState.connected ||
+                p.authState == StreamingAuthState.authRequired ||
+                _streamingManager.isAuthRequired(p.kind),
+            isOnline: p.authState == StreamingAuthState.connected,
           ),
         )
         .toList(growable: false);
@@ -505,13 +586,13 @@ class _HomeScreenState extends State<HomeScreen>
     if (isPlaying) {
       final snapshot = _playbackPersistenceService.buildSnapshot(
         state: state,
-        queue: widget.audioService.queue,
+        queue: _effectiveAudioService.queue,
       );
       _playbackPersistenceService.saveThrottled(snapshot);
     } else if (statusChanged || trackChanged) {
       final snapshot = _playbackPersistenceService.buildSnapshot(
         state: state,
-        queue: widget.audioService.queue,
+        queue: _effectiveAudioService.queue,
       );
       unawaited(_playbackPersistenceService.saveImmediate(snapshot));
     }
@@ -521,8 +602,8 @@ class _HomeScreenState extends State<HomeScreen>
     if (_isExiting) return;
     if (_scaleController.minimizeToTrayOnClose) {
       final snap = _playbackPersistenceService.buildSnapshot(
-        state: widget.audioService.currentState,
-        queue: widget.audioService.queue,
+        state: _effectiveAudioService.currentState,
+        queue: _effectiveAudioService.queue,
       );
       unawaited(_playbackPersistenceService.saveImmediate(snap));
       if (mounted) {
@@ -532,17 +613,50 @@ class _HomeScreenState extends State<HomeScreen>
       } else {
         _isHiddenToTray = true;
       }
-      widget.audioService.setWindowMinimized(true);
+      _effectiveAudioService.setWindowMinimized(true);
       unawaited(_windowController.hide());
       return;
     }
     unawaited(_performCleanExit());
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      _handleWindowRestoredOrFocused();
+    }
+  }
+
+  void _handleWindowMinimize() {
+    if (_isExiting) return;
+    // Never disable root TickerMode on taskbar minimize; only minimize audio/visualizer work.
+    _effectiveAudioService.setWindowMinimized(true);
+  }
+
+  void _handleWindowRestoredOrFocused() {
+    if (_isExiting) return;
+    final stateChanged =
+        _isHiddenToTray ||
+        _windowController.isHiddenToTrayNotifier.value ||
+        _windowController.isMinimizedNotifier.value;
+
+    _isHiddenToTray = false;
+    _windowController.isHiddenToTrayNotifier.value = false;
+    _windowController.isMinimizedNotifier.value = false;
+    _effectiveAudioService.setWindowMinimized(false);
+
+    if (!mounted) return;
+    if (stateChanged) {
+      setState(() {});
+    }
+    WidgetsBinding.instance.scheduleForcedFrame();
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   void _handleRestoreFromTray() {
     if (_isExiting) return;
-    _isHiddenToTray = false;
-    widget.audioService.setWindowMinimized(false);
+    _handleWindowRestoredOrFocused();
     unawaited(() async {
       await _windowController.show();
       await _windowController.focus();
@@ -557,11 +671,11 @@ class _HomeScreenState extends State<HomeScreen>
       case 'show':
         _handleRestoreFromTray();
       case 'toggle_play_pause':
-        unawaited(widget.audioService.togglePlayPause());
+        unawaited(_effectiveAudioService.togglePlayPause());
       case 'previous':
-        unawaited(widget.audioService.previous());
+        unawaited(_effectiveAudioService.previous());
       case 'next':
-        unawaited(widget.audioService.next());
+        unawaited(_effectiveAudioService.next());
       case 'quit':
         unawaited(_performCleanExit());
     }
@@ -571,10 +685,10 @@ class _HomeScreenState extends State<HomeScreen>
     if (_isExiting) return;
     _isExiting = true;
     try {
-      final baseState = widget.audioService.currentState;
+      final baseState = _effectiveAudioService.currentState;
       var effectiveState = baseState;
       try {
-        final liveMap = await widget.audioService.getPlaybackState();
+        final liveMap = await _effectiveAudioService.getPlaybackState();
         if (liveMap != null) {
           final livePosMs = (liveMap['position_ms'] as num?)?.toInt();
           final liveVol = (liveMap['volume'] as num?)?.toDouble();
@@ -592,17 +706,25 @@ class _HomeScreenState extends State<HomeScreen>
           );
         }
       } catch (_) {
-        effectiveState = widget.audioService.currentState;
+        effectiveState = _effectiveAudioService.currentState;
       }
 
       final snapshot = _playbackPersistenceService.buildSnapshot(
         state: effectiveState,
-        queue: widget.audioService.queue,
+        queue: _effectiveAudioService.queue,
       );
       await _playbackPersistenceService.saveAndFlushForExit(snapshot);
 
       await _playbackStateSub?.cancel();
       _playbackStateSub = null;
+      _streamingCoordinator.dispose();
+      _effectiveAudioService.dispose();
+      await _streamingCoordinator.ytDlpService.stopAll();
+      if (widget.audioService is FfiAudioService) {
+        (widget.audioService as FfiAudioService).detachStreamingManager();
+      }
+      _streamingManager.removeListener(_onStreamingManagerChanged);
+      await _streamingManager.disposeAsync();
       widget.audioService.dispose();
       await _windowController.destroyTray();
       await _windowController.destroy();
@@ -675,7 +797,38 @@ class _HomeScreenState extends State<HomeScreen>
     bool isDrmRestricted,
   ) {
     if (!mounted) return;
+    final provider = _streamingManager.resolveProviderForTrack(track);
+    final isAuthRequired =
+        (provider != null &&
+            (_streamingManager.isAuthRequired(provider.kind) ||
+                provider.authState == StreamingAuthState.authRequired)) ||
+        RegExp(
+          r'\bAUTH_REQUIRED\b|HTTP\s*401\b|\b401\s+Unauthorized\b|重新登入|授權已失效',
+          caseSensitive: false,
+        ).hasMatch(message);
     final webUrl = isDrmRestricted ? _fallbackWebUrlForTrack(track) : null;
+    final SnackBarAction? action;
+    if (isAuthRequired && provider != null) {
+      action = SnackBarAction(
+        key: Key('snackbar_action_relogin_${provider.kind}'),
+        label: '重新登入',
+        textColor: LuminaTokens.accentBlue,
+        onPressed: () {
+          if (!mounted) return;
+          unawaited(
+            StreamingLoginDialog.show(context, provider, _streamingManager),
+          );
+        },
+      );
+    } else if (webUrl != null) {
+      action = SnackBarAction(
+        label: '於瀏覽器開啟',
+        textColor: LuminaTokens.accentBlue,
+        onPressed: () => _openExternalUrl(webUrl),
+      );
+    } else {
+      action = null;
+    }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -685,13 +838,7 @@ class _HomeScreenState extends State<HomeScreen>
             message,
             style: const TextStyle(color: Color(0xFFFECACA)),
           ),
-          action: webUrl != null
-              ? SnackBarAction(
-                  label: '於瀏覽器開啟',
-                  textColor: LuminaTokens.accentBlue,
-                  onPressed: () => _openExternalUrl(webUrl),
-                )
-              : null,
+          action: action,
         ),
       );
   }
@@ -736,7 +883,9 @@ class _HomeScreenState extends State<HomeScreen>
   void _handleScrollOffsetChanged(String entryId, double offset) {
     _navController.saveScrollOffset(entryId, offset);
     final isDetailTab =
-        _activeTab == HomeTab.albumDetail || _activeTab == HomeTab.artistDetail;
+        _activeTab == HomeTab.albumDetail ||
+        _activeTab == HomeTab.artistDetail ||
+        _activeTab == HomeTab.podcastDetail;
     if (isDetailTab) {
       final pastHero = offset > 200;
       if (pastHero != _isDetailScrolledPastHero) {
@@ -783,6 +932,13 @@ class _HomeScreenState extends State<HomeScreen>
       }
       return '';
     }
+    if (_activeTab == HomeTab.podcastDetail) {
+      final showTitle =
+          (entry.podcastShow?.title ?? _selectedPodcastShow?.title ?? '')
+              .trim();
+      if (showTitle.isNotEmpty) return showTitle;
+      return '';
+    }
     return '';
   }
 
@@ -799,12 +955,20 @@ class _HomeScreenState extends State<HomeScreen>
     if (entry.streamingKind != null) {
       _selectedStreamingKind = entry.streamingKind;
     }
+    if (entry.podcastShowId != null) {
+      _selectedPodcastShowId = entry.podcastShowId;
+    }
+    if (entry.podcastShow != null) {
+      _selectedPodcastShow = entry.podcastShow;
+    }
     if (entry.tab.isSettings) {
       _lastSettingsTab = entry.tab;
     }
 
     final isDetailTab =
-        entry.tab == HomeTab.albumDetail || entry.tab == HomeTab.artistDetail;
+        entry.tab == HomeTab.albumDetail ||
+        entry.tab == HomeTab.artistDetail ||
+        entry.tab == HomeTab.podcastDetail;
     if (isDetailTab) {
       final savedOffset = _navController.getScrollOffset(entry.effectiveId);
       _isDetailScrolledPastHero = savedOffset > 200;
@@ -835,6 +999,10 @@ class _HomeScreenState extends State<HomeScreen>
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
     EscapeDismissRegistry.instance.unregisterGlobalHost();
+    _topSearchFocusNode.removeListener(_onTopSearchFocusChanged);
+    _topSearchFocusNode.dispose();
+    _topSearchController.dispose();
+    _searchController.dispose();
     if (_windowController.onWindowClose == _handleWindowClose) {
       _windowController.onWindowClose = null;
     }
@@ -844,7 +1012,30 @@ class _HomeScreenState extends State<HomeScreen>
     if (_windowController.onTrayMenuAction == _handleTrayMenuAction) {
       _windowController.onTrayMenuAction = null;
     }
+    if (_windowController.onSingleInstanceWakeup == _handleRestoreFromTray) {
+      _windowController.onSingleInstanceWakeup = null;
+    }
+    if (_windowController.onWindowMinimize == _handleWindowMinimize) {
+      _windowController.onWindowMinimize = null;
+    }
+    if (_windowController.onWindowRestore == _handleWindowRestoredOrFocused) {
+      _windowController.onWindowRestore = null;
+    }
+    if (_windowController.onWindowMaximize == _handleWindowRestoredOrFocused) {
+      _windowController.onWindowMaximize = null;
+    }
+    if (_windowController.onWindowUnmaximize == _handleWindowRestoredOrFocused) {
+      _windowController.onWindowUnmaximize = null;
+    }
+    if (_windowController.onWindowFocus == _handleWindowRestoredOrFocused) {
+      _windowController.onWindowFocus = null;
+    }
+    WidgetsBinding.instance.removeObserver(this);
     _streamingCoordinator.dispose();
+    _effectiveAudioService.dispose();
+    if (widget.audioService is FfiAudioService) {
+      (widget.audioService as FfiAudioService).detachStreamingManager();
+    }
     _streamingManager.removeListener(_onStreamingManagerChanged);
     if (_ownsStreamingManager) {
       _streamingManager.dispose();
@@ -870,6 +1061,7 @@ class _HomeScreenState extends State<HomeScreen>
     _playlistService.dispose();
     _librarySettingsController.dispose();
     _albumLayoutController.dispose();
+    _podcastPlaybackTracker.dispose();
     _playbackStateSub?.cancel();
     _playbackStateSub = null;
     if (!_isExiting) {
@@ -977,6 +1169,16 @@ class _HomeScreenState extends State<HomeScreen>
     _pushEntry(NavEntry.smartPlaylist(playlistId));
   }
 
+  void _openPodcastDetail(String showId, {PodcastShow? show}) {
+    final cleanId = showId.trim();
+    if (cleanId.isEmpty) return;
+    _selectedPodcastShowId = cleanId;
+    if (show != null) {
+      _selectedPodcastShow = show;
+    }
+    _pushEntry(NavEntry.podcastDetail(cleanId, show: show));
+  }
+
   Future<void> _promptCreateSmartPlaylist() async {
     final created = await SmartPlaylistsView.showCreateDialog(
       context: context,
@@ -1016,9 +1218,132 @@ class _HomeScreenState extends State<HomeScreen>
     final focus = FocusManager.instance.primaryFocus;
     if (focus == null) return false;
     final context = focus.context;
-    if (context == null) return false;
+    if (context == null || !context.mounted) return false;
     if (context.widget is EditableText) return true;
     return context.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  void _onTopSearchFocusChanged() {
+    if (!mounted) return;
+    if (!_topSearchFocusNode.hasFocus &&
+        _topSearchExpanded &&
+        _topSearchController.text.trim().isEmpty) {
+      setState(() {
+        _topSearchExpanded = false;
+      });
+    } else if (_topSearchExpanded) {
+      setState(() {});
+    }
+  }
+
+  void _expandTopSearch() {
+    if (_isNowPlayingExpanded) {
+      _setNowPlayingExpanded(false);
+    }
+    if (!_topSearchExpanded) {
+      setState(() {
+        _topSearchExpanded = true;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_topSearchExpanded) return;
+      _topSearchFocusNode.requestFocus();
+    });
+  }
+
+  void _onTopSearchChanged(String value) {
+    final trimmed = value.trim();
+    _searchController.updateQuery(value);
+    if (trimmed.isNotEmpty && _activeTab != HomeTab.search) {
+      _pushEntry(NavEntry.tab(HomeTab.search));
+    }
+  }
+
+  void _onTopSearchSubmitted(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      _searchController.clear();
+      return;
+    }
+    _searchController.updateQuery(value, immediate: true);
+    if (_activeTab != HomeTab.search) {
+      _pushEntry(NavEntry.tab(HomeTab.search));
+    }
+  }
+
+  void _handleTopSearchClearPressed() {
+    if (_topSearchController.text.isNotEmpty) {
+      _topSearchController.clear();
+      _searchController.clear();
+      if (_activeTab == HomeTab.search && _navController.canGoBack) {
+        _goBack();
+      }
+      _topSearchFocusNode.requestFocus();
+      setState(() {});
+    } else {
+      _searchController.clear();
+      if (_activeTab == HomeTab.search && _navController.canGoBack) {
+        _goBack();
+      }
+      _topSearchFocusNode.unfocus();
+      setState(() {
+        _topSearchExpanded = false;
+      });
+    }
+  }
+
+  KeyEventResult _handleGlobalKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final keyboard = HardwareKeyboard.instance;
+    final ctrl = keyboard.isControlPressed;
+    final meta = keyboard.isMetaPressed;
+    final alt = keyboard.isAltPressed;
+    final shift = keyboard.isShiftPressed;
+
+    if ((ctrl || meta) && !alt && event.logicalKey == LogicalKeyboardKey.keyF) {
+      _expandTopSearch();
+      return KeyEventResult.handled;
+    }
+
+    // Critical guard: pass all editing keys (Backspace, Delete, Space, M,
+    // arrows, Ctrl+A/C/V/X/Z, IME composition) to EditableText untouched.
+    if (_isTextEditingFocused()) {
+      return KeyEventResult.ignored;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.space && !ctrl && !alt && !meta) {
+      _effectiveAudioService.togglePlayPause();
+      return KeyEventResult.handled;
+    }
+
+    if (alt && !ctrl && !meta && event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      _goBack();
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.backspace &&
+        !ctrl &&
+        !alt &&
+        !meta &&
+        !shift) {
+      _goBack();
+      return KeyEventResult.handled;
+    }
+
+    if (alt && !ctrl && !meta && event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      _goForward();
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyM && !ctrl && !alt && !meta) {
+      _effectiveAudioService.toggleMute();
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
   }
 
   bool _handleHardwareKey(KeyEvent event) {
@@ -1038,14 +1363,19 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   bool _handleEscape() {
-    // 1. Active text input focus -> unfocus only.
+    // 1. Active text input focus -> unfocus only (collapse empty top search).
     if (_isTextEditingFocused()) {
       FocusManager.instance.primaryFocus?.unfocus();
+      if (_topSearchExpanded && _topSearchController.text.trim().isEmpty) {
+        setState(() {
+          _topSearchExpanded = false;
+        });
+      }
       return true;
     }
 
     // 2. Floating layers (non-Navigator popovers -> root Navigator dialogs ->
-    //    Now Playing lyrics settings toolbar).
+    //    Now Playing lyrics settings toolbar -> expanded top search box).
     if (EscapeDismissRegistry.instance.dismissTopmost()) {
       return true;
     }
@@ -1056,6 +1386,16 @@ class _HomeScreenState extends State<HomeScreen>
     }
     if (_isNowPlayingExpanded && _nowPlayingController.lyricsSettingsExpanded) {
       _nowPlayingController.setLyricsSettingsExpanded(false);
+      return true;
+    }
+    final isDetailRoute =
+        _activeTab == HomeTab.albumDetail ||
+        _activeTab == HomeTab.artistDetail ||
+        _activeTab == HomeTab.podcastDetail;
+    if (_topSearchExpanded && !_isNowPlayingExpanded && !isDetailRoute) {
+      setState(() {
+        _topSearchExpanded = false;
+      });
       return true;
     }
 
@@ -1082,36 +1422,15 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: _handlePointerDown,
-      child: CallbackShortcuts(
-        bindings: <ShortcutActivator, VoidCallback>{
-          const SingleActivator(LogicalKeyboardKey.space): () {
-            if (_isTextEditingFocused()) return;
-            widget.audioService.togglePlayPause();
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true):
-              _goBack,
-          const SingleActivator(LogicalKeyboardKey.backspace): () {
-            if (_isTextEditingFocused()) return;
-            _goBack();
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
-              _goForward,
-          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
-            _selectTab(HomeTab.library);
-          },
-          const SingleActivator(LogicalKeyboardKey.keyF, meta: true): () {
-            _selectTab(HomeTab.library);
-          },
-          const SingleActivator(LogicalKeyboardKey.keyM): () {
-            if (_isTextEditingFocused()) return;
-            widget.audioService.toggleMute();
-          },
-        },
-        child: Focus(
-          autofocus: true,
+    return TrackPrefetchScope(
+      onPrefetchTrack: _streamingCoordinator.requestHoverPrefetch,
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _handlePointerDown,
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: _handleGlobalKeyEvent,
+        child: FocusScope(
           child: Scaffold(
             backgroundColor: _canvasBg,
             body: TickerMode(
@@ -1226,9 +1545,10 @@ class _HomeScreenState extends State<HomeScreen>
                                 opacity: _nowPlayingCurvedAnim,
                                 child: NowPlayingOverlay(
                                   key: const ValueKey('now_playing_stage'),
-                                  audioService: widget.audioService,
+                                  audioService: _effectiveAudioService,
                                   libraryCache: _libraryCache,
                                   controller: _nowPlayingController,
+                                  windowController: _windowController,
                                   paletteService: _paletteService,
                                   meshFluidProgram: _shaders.meshFluidProgram,
                                   isVisible:
@@ -1253,7 +1573,7 @@ class _HomeScreenState extends State<HomeScreen>
                         child: RepaintBoundary(
                           key: const Key('mini_player_repaint_boundary'),
                           child: FloatingCapsuleMiniPlayer(
-                            audioService: widget.audioService,
+                            audioService: _effectiveAudioService,
                             libraryCache: _libraryCache,
                             uiScaleController: _scaleController,
                             showLyrics: _isNowPlayingExpanded,
@@ -1275,6 +1595,7 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -1432,6 +1753,17 @@ class _HomeScreenState extends State<HomeScreen>
     final isSelected =
         _activeTab == HomeTab.streamingProvider &&
         _selectedStreamingKind == meta.kind;
+    final provider = _streamingManager.providerFor(meta.kind);
+    final isAuthRequired =
+        _streamingManager.isAuthRequired(meta.kind) ||
+        provider?.authState == StreamingAuthState.authRequired;
+    final isConnected =
+        !isAuthRequired && provider?.authState == StreamingAuthState.connected;
+    final statusDotColor = isAuthRequired
+        ? LuminaTokens.statusError
+        : (isConnected
+              ? LuminaTokens.statusSuccess
+              : LuminaTokens.accentBlue.withValues(alpha: 0.75));
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
       child: Material(
@@ -1466,12 +1798,18 @@ class _HomeScreenState extends State<HomeScreen>
                     ),
                   ),
                 ),
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: const BoxDecoration(
-                    color: LuminaTokens.statusSuccess,
-                    shape: BoxShape.circle,
+                Tooltip(
+                  message: isAuthRequired
+                      ? '授權已失效，請重新登入'
+                      : (isConnected ? '已連線' : '探索模式'),
+                  child: Container(
+                    key: Key('nav_streaming_status_dot_${meta.kind}'),
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: statusDotColor,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                 ),
               ],
@@ -1483,7 +1821,8 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _buildSidebarTile(_NavItemSpec item) {
-    final isSelected = _activeTab == item.tab;
+    final isSelected = _activeTab == item.tab ||
+        (item.tab == HomeTab.podcasts && _activeTab == HomeTab.podcastDetail);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
       child: Material(
@@ -1775,19 +2114,11 @@ class _HomeScreenState extends State<HomeScreen>
             ),
             const SizedBox(width: 4),
           ],
-          IconButton(
-            tooltip: '搜尋曲庫',
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            padding: EdgeInsets.zero,
-            icon: Icon(
-              Icons.search_rounded,
-              size: 19,
-              color: _activeTab == HomeTab.library
-                  ? _accentBlue
-                  : LuminaTokens.textSecondary,
-            ),
-            onPressed: () => _selectTab(HomeTab.library),
+          _buildCollapsibleTopSearch(
+            contentAvailWidth,
+            isDesktop: isDesktop,
+            isCompactTopBar: isCompactTopBar,
+            isCompactProfile: isCompactProfile,
           ),
           const SizedBox(width: 2),
           Container(
@@ -1819,7 +2150,7 @@ class _HomeScreenState extends State<HomeScreen>
           if (contentAvailWidth >= 380) ...[
             SizedBox(width: isCompactTopBar ? 2 : 6),
             ProfileSwitcherBar(
-              audioService: widget.audioService,
+              audioService: _effectiveAudioService,
               compact: isCompactProfile,
             ),
           ],
@@ -1828,10 +2159,164 @@ class _HomeScreenState extends State<HomeScreen>
             DesktopWindowCaptionButtons(
               height: 48.0,
               controller: _windowController,
-              audioService: widget.audioService,
+              audioService: _effectiveAudioService,
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildCollapsibleTopSearch(
+    double contentAvailWidth, {
+    required bool isDesktop,
+    required bool isCompactTopBar,
+    required bool isCompactProfile,
+  }) {
+    final showDesktopQuickActions = isDesktop && contentAvailWidth >= 760;
+    final showProfile = contentAvailWidth >= 380;
+    final reservedWidth =
+        (isDesktop ? 48.0 : 0.0) + // sidebar toggle + spacing
+        80.0 + // back + forward buttons
+        (isDesktop ? 56.0 : 28.0) + // minimum drag bar / title breathing room
+        (showDesktopQuickActions ? 126.0 : 0.0) + // scale menu + bookmark
+        44.0 + // settings button + spacing
+        (showProfile
+            ? ((isCompactTopBar ? 2.0 : 6.0) + (isCompactProfile ? 34.0 : 138.0))
+            : 0.0) +
+        (isDesktop ? 184.0 : 0.0); // desktop window caption buttons + spacing
+
+    final maxSafeWidth = math.max(34.0, contentAvailWidth - reservedWidth);
+    final targetExpandedWidth = (contentAvailWidth * 0.32).clamp(150.0, 250.0);
+    final expandedWidth = math.min(targetExpandedWidth, maxSafeWidth);
+    final boxWidth = _topSearchExpanded ? expandedWidth : 34.0;
+    final layoutWidth = math.max(96.0, expandedWidth);
+    final hasFocus = _topSearchFocusNode.hasFocus;
+
+    return TapRegion(
+      groupId: EditableText,
+      onTapOutside: (_) {
+        if (!_topSearchExpanded) return;
+        _topSearchFocusNode.unfocus();
+        if (_topSearchController.text.trim().isEmpty) {
+          setState(() {
+            _topSearchExpanded = false;
+          });
+        }
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        width: boxWidth,
+        height: 32.0,
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: _topSearchExpanded
+              ? LuminaTokens.cardElevatedBg
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+          border: _topSearchExpanded
+              ? Border.all(
+                  color: hasFocus
+                      ? LuminaTokens.focusRing
+                      : LuminaTokens.borderControl,
+                  width: hasFocus ? 1.4 : 1.0,
+                )
+              : null,
+        ),
+        child: _topSearchExpanded
+            ? OverflowBox(
+                alignment: Alignment.centerLeft,
+                minWidth: layoutWidth,
+                maxWidth: layoutWidth,
+                child: Row(
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _topSearchFocusNode.requestFocus(),
+                      child: const Padding(
+                        padding: EdgeInsets.only(left: 10, right: 6),
+                        child: Icon(
+                          Icons.search_rounded,
+                          size: 16,
+                          color: LuminaTokens.textSecondary,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: TextField(
+                        key: const Key('top_search_input'),
+                        controller: _topSearchController,
+                        focusNode: _topSearchFocusNode,
+                        onChanged: _onTopSearchChanged,
+                        onSubmitted: _onTopSearchSubmitted,
+                        maxLines: 1,
+                        textAlignVertical: TextAlignVertical.center,
+                        style: const TextStyle(
+                          color: LuminaTokens.textPrimary,
+                          fontSize: 13,
+                          height: 1.2,
+                        ),
+                        cursorColor: LuminaTokens.accentBlue,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          isCollapsed: true,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          hintText: '搜尋曲庫與串流...',
+                          hintStyle: TextStyle(
+                            color: LuminaTokens.textMuted,
+                            fontSize: 12.5,
+                          ),
+                          contentPadding: EdgeInsets.symmetric(vertical: 4),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      key: const Key('btn_top_search_clear'),
+                      tooltip: '清除或收合搜尋',
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
+                      padding: EdgeInsets.zero,
+                      style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        size: 15,
+                        color: LuminaTokens.textSecondary,
+                      ),
+                      onPressed: _handleTopSearchClearPressed,
+                    ),
+                    const SizedBox(width: 2),
+                  ],
+                ),
+              )
+            : Center(
+                child: IconButton(
+                  key: const Key('btn_top_search_toggle'),
+                  tooltip: '搜尋曲庫與串流 (Ctrl+F)',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
+                  padding: EdgeInsets.zero,
+                  style: IconButton.styleFrom(
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  icon: const Icon(
+                    Icons.search_rounded,
+                    size: 19,
+                    color: LuminaTokens.textSecondary,
+                  ),
+                  onPressed: _expandTopSearch,
+                ),
+              ),
       ),
     );
   }
@@ -1842,7 +2327,9 @@ class _HomeScreenState extends State<HomeScreen>
   }) {
     final showDefaultTitle = !isDesktop || _sidebarCollapsed;
     final isDetailTab =
-        _activeTab == HomeTab.albumDetail || _activeTab == HomeTab.artistDetail;
+        _activeTab == HomeTab.albumDetail ||
+        _activeTab == HomeTab.artistDetail ||
+        _activeTab == HomeTab.podcastDetail;
     final stickyTitle = isDetailTab ? _resolveStickyTitle() : '';
 
     return Expanded(
@@ -1987,28 +2474,28 @@ class _HomeScreenState extends State<HomeScreen>
 
     final detailBody = switch (_activeTab) {
       HomeTab.general => GeneralSettingsPanel(
-        audioService: widget.audioService,
+        audioService: _effectiveAudioService,
         scaleController: _scaleController,
       ),
       HomeTab.appearance => AppearanceAndScalePanel(
         scaleController: _scaleController,
       ),
       HomeTab.librarySettings => LibrarySettingsPanel(
-        audioService: widget.audioService,
+        audioService: _effectiveAudioService,
         settingsController: _librarySettingsController,
         onLibraryChanged: () {
-          _libraryCache.refresh(widget.audioService);
+          _libraryCache.refresh(_effectiveAudioService);
           setState(() {});
         },
       ),
-      HomeTab.dsp => DspControlPanel(audioService: widget.audioService),
-      HomeTab.zones => OutputZonePanel(audioService: widget.audioService),
+      HomeTab.dsp => DspControlPanel(audioService: _effectiveAudioService),
+      HomeTab.zones => OutputZonePanel(audioService: _effectiveAudioService),
       HomeTab.settings => ProvidersAndRemotePanel(
-        audioService: widget.audioService,
+        audioService: _effectiveAudioService,
         streamingManager: _streamingManager,
         onProvidersChanged: _refreshProviders,
       ),
-      HomeTab.about => AboutSettingsPanel(audioService: widget.audioService),
+      HomeTab.about => AboutSettingsPanel(audioService: _effectiveAudioService),
       _ => const SizedBox.shrink(),
     };
 
@@ -2211,9 +2698,8 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (_activeTab == HomeTab.home) {
       return HomeDashboardView(
-        audioService: widget.audioService,
+        audioService: _effectiveAudioService,
         libraryCache: _libraryCache,
-        streamingManager: _streamingManager,
         initialScrollOffset: savedOffset,
         onScrollOffsetChanged: onOffsetChanged,
         onOpenAlbums: () => _selectTab(HomeTab.albums),
@@ -2225,8 +2711,6 @@ class _HomeScreenState extends State<HomeScreen>
         onOpenLibrarySettings: () => _selectTab(HomeTab.librarySettings),
         onOpenProviderSettings: () => _selectTab(HomeTab.settings),
         onOpenAlbumDetail: _openAlbumDetail,
-        onOpenStreamingAlbum: _openStreamingAlbum,
-        onPlayStreamingTrack: _playStreamingTrack,
       );
     }
 
@@ -2246,12 +2730,12 @@ class _HomeScreenState extends State<HomeScreen>
       padding: pad,
       child: switch (_activeTab) {
         HomeTab.library => StreamBuilder<PlaybackState>(
-          stream: widget.audioService.stateStream,
-          initialData: widget.audioService.currentState,
+          stream: _effectiveAudioService.stateStream,
+          initialData: _effectiveAudioService.currentState,
           builder: (context, snapshot) {
-            final state = snapshot.data ?? widget.audioService.currentState;
+            final state = snapshot.data ?? _effectiveAudioService.currentState;
             return LibraryBrowserView(
-              audioService: widget.audioService,
+              audioService: _effectiveAudioService,
               activeTrackId: state.track?.id,
               librarySettings: _librarySettingsController,
               onOpenLibrarySettings: () => _selectTab(HomeTab.librarySettings),
@@ -2260,7 +2744,7 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         HomeTab.albums => AlbumsAndCreditsView(
           key: ValueKey('albums_mode_$entryId'),
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           libraryCache: _libraryCache,
           layoutController: _albumLayoutController,
           startInCreditsMode: false,
@@ -2272,7 +2756,7 @@ class _HomeScreenState extends State<HomeScreen>
         HomeTab.albumDetail => AlbumDetailPage(
           key: ValueKey('album_detail_$entryId'),
           albumId: entry.albumId ?? _selectedAlbumId ?? '',
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           streamingManager: _streamingManager,
           onPlayStreamingTrack: _playStreamingTrack,
           libraryCache: _libraryCache,
@@ -2286,7 +2770,7 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         HomeTab.credits => AlbumsAndCreditsView(
           key: ValueKey('credits_mode_${entry.creditArtistId ?? entryId}'),
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           libraryCache: _libraryCache,
           layoutController: _albumLayoutController,
           startInCreditsMode: true,
@@ -2297,7 +2781,7 @@ class _HomeScreenState extends State<HomeScreen>
           onOpenArtist: _openArtist,
         ),
         HomeTab.artists => ArtistsView(
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           libraryCache: _libraryCache,
           onOpenArtist: _openArtist,
           onOpenCredits: () => _openArtistCredits(null),
@@ -2307,7 +2791,7 @@ class _HomeScreenState extends State<HomeScreen>
           key: ValueKey('artist_detail_$entryId'),
           artistName: entry.artistName ?? entry.artistKey ?? '',
           artistKey: entry.artistKey,
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           libraryCache: _libraryCache,
           onBack: _goBack,
           showInlineBackButton: false,
@@ -2317,11 +2801,50 @@ class _HomeScreenState extends State<HomeScreen>
           onScrollOffsetChanged: onOffsetChanged,
           onTitleChanged: _onDetailTitleChanged,
         ),
-        HomeTab.audiobooks => AudiobooksView(audioService: widget.audioService),
-        HomeTab.podcasts => PodcastsView(audioService: widget.audioService),
-        HomeTab.radio => RadioView(audioService: widget.audioService),
+        HomeTab.audiobooks => AudiobooksView(audioService: _effectiveAudioService),
+        HomeTab.podcasts => PodcastsView(
+          key: ValueKey('podcasts_view_$entryId'),
+          audioService: _effectiveAudioService,
+          streamingManager: _streamingManager,
+          onPlayStreamingTrack: _playStreamingTrack,
+          onOpenPodcastShow: _openPodcastDetail,
+          onOpenLogin: () => _selectTab(HomeTab.settings),
+          podcastStore: _podcastStore,
+        ),
+        HomeTab.podcastDetail => PodcastDetailPage(
+          key: ValueKey('podcast_detail_$entryId'),
+          showId: entry.podcastShowId ?? _selectedPodcastShowId ?? '',
+          initialShow: entry.podcastShow ?? _selectedPodcastShow,
+          audioService: _effectiveAudioService,
+          streamingManager: _streamingManager,
+          onPlayStreamingTrack: _playStreamingTrack,
+          onBack: _goBack,
+          podcastStore: _podcastStore,
+          initialScrollOffset: savedOffset,
+          onScrollOffsetChanged: onOffsetChanged,
+          onTitleChanged: _onDetailTitleChanged,
+        ),
+        HomeTab.radio => RadioView(audioService: _effectiveAudioService),
+        HomeTab.search => StreamBuilder<PlaybackState>(
+          stream: _effectiveAudioService.stateStream,
+          initialData: _effectiveAudioService.currentState,
+          builder: (context, snapshot) {
+            final state = snapshot.data ?? _effectiveAudioService.currentState;
+            return UnifiedSearchResultsView(
+              controller: _searchController,
+              audioService: _effectiveAudioService,
+              libraryCache: _libraryCache,
+              streamingManager: _streamingManager,
+              activeTrackId: state.track?.id,
+              onOpenLocalAlbum: _openAlbumDetail,
+              onOpenStreamingAlbum: _openStreamingAlbum,
+              onOpenArtist: _openArtist,
+              onPlayStreamingTrack: _playStreamingTrack,
+            );
+          },
+        ),
         HomeTab.smartPlaylists => SmartPlaylistsView(
-          audioService: widget.audioService,
+          audioService: _effectiveAudioService,
           playlistService: _playlistService,
           selectedPlaylistId: entry.smartPlaylistId ?? _selectedSmartPlaylistId,
           onSelectPlaylist: (id) {
@@ -2332,23 +2855,24 @@ class _HomeScreenState extends State<HomeScreen>
           },
         ),
         HomeTab.streamingProvider => StreamBuilder<PlaybackState>(
-          stream: widget.audioService.stateStream,
-          initialData: widget.audioService.currentState,
+          stream: _effectiveAudioService.stateStream,
+          initialData: _effectiveAudioService.currentState,
           builder: (context, snapshot) {
             final meta = StreamingProviderMeta.byKind(
               entry.streamingKind ?? _selectedStreamingKind ?? '',
             );
             if (meta == null) return const SizedBox.shrink();
-            final state = snapshot.data ?? widget.audioService.currentState;
+            final state = snapshot.data ?? _effectiveAudioService.currentState;
             return StreamingServiceView(
               key: ValueKey('streaming_view_${meta.kind}'),
-              audioService: widget.audioService,
+              audioService: _effectiveAudioService,
               provider: meta,
               streamingManager: _streamingManager,
               onPlayStreamingTrack: _playStreamingTrack,
               onPlayStreamingTrackWithContext: (track, queue) =>
                   _playStreamingTrack(track, queueContext: queue),
               onOpenStreamingAlbum: _openStreamingAlbum,
+              onSwitchStreamingProvider: _openStreamingProvider,
               activeTrackId: state.track?.id,
               onOpenProviderSettings: () => _selectTab(HomeTab.settings),
               onLibraryUpdated: () {

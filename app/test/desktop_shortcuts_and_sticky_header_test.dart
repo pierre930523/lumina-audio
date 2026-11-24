@@ -98,7 +98,7 @@ void main() {
       expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
     });
 
-    testWidgets('Global shortcuts: Ctrl+F opens library search tab', (
+    testWidgets('Global shortcuts: Ctrl+F expands & focuses top search box while nav_tab_library opens LibraryBrowserView', (
       WidgetTester tester,
     ) async {
       tester.view.physicalSize = const Size(1280, 800);
@@ -111,16 +111,30 @@ void main() {
       await tester.pumpWidget(LuminaApp(audioService: service));
       await tester.pumpAndSettle();
 
-      // Ensure we start on home
+      // Ensure we start on home with top search collapsed
       expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+      expect(find.byKey(const Key('btn_top_search_toggle')), findsOneWidget);
+      expect(find.byKey(const Key('top_search_input')), findsNothing);
 
-      // Press Ctrl + F
+      // Press Ctrl + F -> expands & focuses top_search_input
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pumpAndSettle();
 
-      // Verify navigated to library browser view
+      expect(find.byKey(const Key('top_search_input')), findsOneWidget);
+      expect(find.byKey(const Key('btn_top_search_toggle')), findsNothing);
+      final focusCtx = FocusManager.instance.primaryFocus?.context;
+      expect(focusCtx, isNotNull);
+      expect(
+        focusCtx!.widget is EditableText ||
+            focusCtx.findAncestorWidgetOfExactType<EditableText>() != null,
+        isTrue,
+      );
+
+      // Sidebar nav_tab_library still navigates to LibraryBrowserView
+      await tester.tap(find.byKey(const Key('nav_tab_library')));
+      await tester.pumpAndSettle();
       expect(find.byType(LibraryBrowserView), findsOneWidget);
       expect(find.byKey(const Key('library_search_input')), findsOneWidget);
     });

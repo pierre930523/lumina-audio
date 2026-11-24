@@ -344,5 +344,38 @@ void main() {
         equals(['show', 'toggle_play_pause', 'previous', 'next', 'quit']),
       );
     });
+
+    test('dispatches incoming native callback onSingleInstanceWakeup', () async {
+      final controller = DesktopWindowController(
+        isSupportedOverride: true,
+        installMethodHandler: false,
+      );
+
+      var wakeupCount = 0;
+      void onWakeup() => wakeupCount++;
+      controller.onSingleInstanceWakeup = onWakeup;
+      expect(controller.onSingleInstanceWakeup, equals(onWakeup));
+
+      await controller.handleIncomingCall(
+        const MethodCall('onSingleInstanceWakeup'),
+      );
+      expect(wakeupCount, equals(1));
+
+      // Real platform message envelope dispatch via MethodChannel handler
+      // installed by setting onSingleInstanceWakeup.
+      final data = const StandardMethodCodec().encodeMethodCall(
+        const MethodCall('onSingleInstanceWakeup'),
+      );
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage('lumina/window', data, (ByteData? _) {});
+      expect(wakeupCount, equals(2));
+
+      controller.onSingleInstanceWakeup = null;
+      expect(controller.onSingleInstanceWakeup, isNull);
+      await controller.handleIncomingCall(
+        const MethodCall('onSingleInstanceWakeup'),
+      );
+      expect(wakeupCount, equals(2));
+    });
   });
 }

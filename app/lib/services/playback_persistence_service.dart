@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/audio_format.dart';
 import '../models/playback_state.dart';
+import '../models/streaming_models.dart';
 import 'audio_service.dart';
 
 /// Persists playback state across app restarts (track, progress, volume, queue).
@@ -135,6 +136,8 @@ class PlaybackPersistenceService {
     final durMs = (map['duration_ms'] as num?)?.toInt() ?? 0;
     final codecName = map['codec']?.toString() ?? 'flac';
     final codec = AudioCodec.fromString(codecName);
+    final rawCover = map['cover_url']?.toString();
+    final rawAlbumArt = map['album_art_url']?.toString();
 
     return TrackInfo(
       id: id,
@@ -142,8 +145,12 @@ class PlaybackPersistenceService {
       artist: map['artist']?.toString() ?? '未知歌手',
       album: map['album']?.toString() ?? '未知專輯',
       duration: Duration(milliseconds: durMs < 0 ? 0 : durMs),
-      coverUrl: map['cover_url']?.toString(),
-      albumArtUrl: map['album_art_url']?.toString(),
+      coverUrl: rawCover == null
+          ? null
+          : (upgradeStreamingCoverUrl(rawCover) ?? rawCover),
+      albumArtUrl: rawAlbumArt == null
+          ? null
+          : (upgradeStreamingCoverUrl(rawAlbumArt) ?? rawAlbumArt),
       filePath: filePath,
       albumArtist: map['album_artist']?.toString(),
       genre: map['genre']?.toString(),

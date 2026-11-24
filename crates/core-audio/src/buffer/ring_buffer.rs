@@ -136,10 +136,10 @@ impl<T: Copy + Default> SpscRingBuffer<T> {
         let cap = capacity.max(2).next_power_of_two();
         assert!(cap <= (1 << 30), "SpscRingBuffer capacity must be <= 2^30");
 
-        let mut vec = Vec::with_capacity(cap);
-        for _ in 0..cap {
-            vec.push(UnsafeCell::new(T::default()));
-        }
+        let raw_box: Box<[T]> = vec![T::default(); cap].into_boxed_slice();
+        let raw_ptr = Box::into_raw(raw_box) as *mut [UnsafeCell<T>];
+        // SAFETY: `UnsafeCell<T>` is `#[repr(transparent)]` and has identical layout to `T`.
+        let buffer = unsafe { Box::from_raw(raw_ptr) };
 
         let epoch = Arc::new(EpochShared {
             requested_epoch: CachePadded(AtomicU32::new(0)),
@@ -150,7 +150,7 @@ impl<T: Copy + Default> SpscRingBuffer<T> {
         });
 
         let ring = Arc::new(Self {
-            buffer: vec.into_boxed_slice(),
+            buffer,
             capacity: cap,
             mask: cap - 1,
             tail: CachePadded(AtomicU32::new(0)),
@@ -239,9 +239,15 @@ impl<T: Copy> Producer<T> {
 
     /// Pushes a slice into the ring buffer. Returns the number of elements written (0 if full or flush pending).
     pub fn push_slice(&mut self, data: &[T]) -> usize {
+        self.push_slice_aligned(data, 1)
+    }
+
+    /// Pushes whole `align`-element frames into the ring buffer, never writing partial frames.
+    pub fn push_slice_aligned(&mut self, data: &[T], align: usize) -> usize {
         if data.is_empty() {
             return 0;
         }
+        let align = align.max(1);
 
         let req = self.inner.epoch.requested_epoch.0.load(Ordering::Acquire);
         if req != self.local_epoch {
@@ -258,7 +264,8 @@ impl<T: Copy> Producer<T> {
             available = cap.saturating_sub(used) as usize;
         }
 
-        let to_write = data.len().min(available);
+        let raw_write = data.len().min(available);
+        let to_write = (raw_write / align) * align;
         if to_write == 0 {
             return 0;
         }
@@ -290,6 +297,16 @@ impl<T: Copy> Producer<T> {
     /// Pushes `data` only if `epoch` matches the current requested epoch, syncing `Producer` if needed.
     /// Returns `Err(latest_requested_epoch)` if `epoch` is stale or a concurrent flush superseded it.
     pub fn push_with_epoch(&mut self, epoch: u64, data: &[T]) -> Result<usize, u64> {
+        self.push_with_epoch_aligned(epoch, data, 1)
+    }
+
+    /// Pushes whole `align`-element frames only if `epoch` matches the current requested epoch.
+    pub fn push_with_epoch_aligned(
+        &mut self,
+        epoch: u64,
+        data: &[T],
+        align: usize,
+    ) -> Result<usize, u64> {
         let req = self.inner.epoch.requested_epoch.0.load(Ordering::Acquire) as u64;
         if epoch != req {
             return Err(req);
@@ -301,7 +318,7 @@ impl<T: Copy> Producer<T> {
                 return Err(req2);
             }
         }
-        let written = self.push_slice(data);
+        let written = self.push_slice_aligned(data, align);
         if written == 0 && !data.is_empty() {
             let req3 = self.inner.epoch.requested_epoch.0.load(Ordering::Acquire) as u64;
             if req3 != epoch {
@@ -428,6 +445,14 @@ impl<T: Copy + Default> Consumer<T> {
         Ok(discarded)
     }
 
+    /// Bounded, wait-free flush acknowledgment for real-time audio callbacks.
+    /// Returns `Some(discarded)` when synced, or `None` if the producer is mid-barrier update
+    /// (allowing the RT callback to output silence and retry on the next period without spinning).
+    #[inline]
+    pub fn try_flush_and_ack(&mut self) -> Option<usize> {
+        self.sync_consumer_epoch().ok()
+    }
+
     /// Synchronizes the consumer to the latest flush epoch, discarding all pre-flush items and
     /// acknowledging the flush. Returns the number of stale elements discarded.
     pub fn flush_and_ack(&mut self) -> usize {
@@ -436,6 +461,28 @@ impl<T: Copy + Default> Consumer<T> {
                 return discarded;
             }
         }
+    }
+
+    /// Bounded, wait-free clear for real-time audio callbacks. Returns `Some(discarded)` if
+    /// cleared cleanly, or `None` if a concurrent producer epoch transition is still in progress.
+    pub fn try_clear(&mut self) -> Option<usize> {
+        let initial_tail = self.local_tail;
+        for _ in 0..8 {
+            self.sync_consumer_epoch().ok()?;
+            let h = self.inner.epoch.head_epoch.0.load(Ordering::Acquire);
+            let (w_epoch, head) = unpack_epoch_idx(h);
+            if !epoch_lt(self.synced_barrier_epoch, w_epoch) {
+                self.local_tail = head;
+                self.cached_head = head;
+                let discarded = self.local_tail.wrapping_sub(initial_tail) as usize;
+                if discarded > 0 {
+                    self.inner.tail.0.store(self.local_tail, Ordering::Release);
+                }
+                return Some(discarded);
+            }
+            std::hint::spin_loop();
+        }
+        None
     }
 
     /// Discards all currently buffered elements from the consumer side in O(1) without data races.
@@ -466,18 +513,13 @@ impl<T: Copy + Default> Consumer<T> {
         let req = self.inner.epoch.requested_epoch.0.load(Ordering::Acquire);
         if req == self.local_epoch && self.synced_barrier_epoch == self.local_epoch {
             let tail = self.local_tail;
-            let mut available = self.cached_head.wrapping_sub(tail);
-            if available == 0 {
-                let h = self.inner.epoch.head_epoch.0.load(Ordering::Acquire);
-                let (w_epoch, head) = unpack_epoch_idx(h);
-                if w_epoch == self.local_epoch {
-                    self.cached_head = head;
-                    available = self.cached_head.wrapping_sub(tail);
-                } else {
-                    return self.peek_unsynced_available();
-                }
+            let h = self.inner.epoch.head_epoch.0.load(Ordering::Acquire);
+            let (w_epoch, head) = unpack_epoch_idx(h);
+            if w_epoch == self.local_epoch {
+                self.cached_head = head;
+                return head.wrapping_sub(tail) as usize;
             }
-            return available as usize;
+            return self.peek_unsynced_available();
         }
         self.peek_unsynced_available()
     }
@@ -512,9 +554,15 @@ impl<T: Copy + Default> Consumer<T> {
 
     /// Pops elements into `out`. Returns the number of elements read (0 if empty or flush pending).
     pub fn pop_slice(&mut self, out: &mut [T]) -> usize {
+        self.pop_slice_aligned(out, 1)
+    }
+
+    /// Pops whole `align`-element frames into `out`, leaving partial trailing frames unread.
+    pub fn pop_slice_aligned(&mut self, out: &mut [T], align: usize) -> usize {
         if out.is_empty() {
             return 0;
         }
+        let align = align.max(1);
 
         let req = self.inner.epoch.requested_epoch.0.load(Ordering::Acquire);
         if req != self.local_epoch || self.synced_barrier_epoch != self.local_epoch {
@@ -541,15 +589,15 @@ impl<T: Copy + Default> Consumer<T> {
                 }
                 let tail2 = self.local_tail;
                 let available2 = self.cached_head.wrapping_sub(tail2) as usize;
-                return self.copy_out(tail2, available2, out);
+                return self.copy_out(tail2, available2, out, align);
             }
         }
 
-        self.copy_out(tail, available, out)
+        self.copy_out(tail, available, out, align)
     }
 
-    fn copy_out(&mut self, tail: u32, available: usize, out: &mut [T]) -> usize {
-        let to_read = out.len().min(available);
+    fn copy_out(&mut self, tail: u32, available: usize, out: &mut [T], align: usize) -> usize {
+        let to_read = (out.len().min(available) / align) * align;
         if to_read == 0 {
             return 0;
         }
@@ -581,6 +629,43 @@ impl<T: Copy + Default> Consumer<T> {
             Some(item[0])
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpscRingBuffer;
+
+    #[test]
+    fn aligned_push_and_pop_preserves_6_byte_frames_across_wraparounds() {
+        // Capacity 64 is not divisible by 6 (64 % 6 == 4), exercising partial-capacity wraparounds.
+        let (mut prod, mut cons) = SpscRingBuffer::<u8>::new(64);
+        let total_frames: u32 = 500;
+        let mut next_push: u32 = 0;
+        let mut next_pop: u32 = 0;
+        let mut pop_buf = [0u8; 29]; // Intentionally non-multiple of 6.
+
+        while next_pop < total_frames {
+            if next_push < total_frames {
+                let batch_frames = ((total_frames - next_push).min(4)) as usize;
+                let mut src = Vec::with_capacity(batch_frames * 6);
+                for f in next_push..next_push + batch_frames as u32 {
+                    let b = f.to_le_bytes();
+                    src.extend_from_slice(&[b[0], b[1], b[2], b[3], 0xA5, 0x5A]);
+                }
+                let pushed = prod.push_slice_aligned(&src, 6);
+                assert_eq!(pushed % 6, 0);
+                next_push += (pushed / 6) as u32;
+            }
+
+            let read = cons.pop_slice_aligned(&mut pop_buf, 6);
+            assert_eq!(read % 6, 0);
+            for frame in pop_buf[..read].chunks_exact(6) {
+                let b = next_pop.to_le_bytes();
+                assert_eq!(frame, [b[0], b[1], b[2], b[3], 0xA5, 0x5A]);
+                next_pop += 1;
+            }
         }
     }
 }

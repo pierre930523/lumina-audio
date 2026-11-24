@@ -78,6 +78,13 @@ class TrackInfo {
     this.hasLyrics = false,
   });
 
+  String? get artworkUrl =>
+      (coverUrl != null && coverUrl!.trim().isNotEmpty)
+          ? coverUrl
+          : ((albumArtUrl != null && albumArtUrl!.trim().isNotEmpty)
+                ? albumArtUrl
+                : null);
+
   String get effectiveAlbumArtist =>
       (albumArtist != null && albumArtist!.trim().isNotEmpty)
           ? albumArtist!.trim()

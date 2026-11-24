@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,17 +6,23 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use core_db::credential::CredentialStore;
-use core_types::{AudioCodec, AudioFormat, CanonicalAlbum, AlbumVersion, ProviderKind, TrackSource};
+use core_types::{
+    AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, ManifestFormat, NormalizedLoudness,
+    ProviderKind, StreamKey, StreamProviderCapabilities, StreamSourceSpec, TrackSource,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::error::ProviderError;
 use crate::http::{endpoint_url, HttpRequest, HttpTransport, ReqwestHttpTransport};
 use crate::local::dsd_meta::parse_year;
 use crate::local::extract_edition_label;
-use crate::traits::{MusicProvider, ProviderCapabilities, ResolvedStream, SyncResult};
+use crate::traits::{
+    extract_expire_at_from_url, validate_stream_key, MusicProvider, ProviderCapabilities,
+    ResolvedStream, StreamResolver, SyncResult,
+};
 
 pub const TIDAL_CREDENTIAL_SERVICE: &str = "com.lumina.audio.tidal";
 pub const TIDAL_KEY_OAUTH: &str = "oauth_tokens";
@@ -284,6 +291,7 @@ pub struct TidalProvider {
     credential_store: Option<Arc<dyn CredentialStore>>,
     active_tokens: RwLock<Option<TidalTokenResponse>>,
     pending_verifier: RwLock<Option<String>>,
+    refresh_lock: Mutex<()>,
 }
 
 impl TidalProvider {
@@ -309,6 +317,7 @@ impl TidalProvider {
             credential_store,
             active_tokens: RwLock::new(None),
             pending_verifier: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -394,7 +403,25 @@ impl TidalProvider {
     }
 
     pub async fn refresh_tokens(&self) -> Result<TidalTokenResponse, ProviderError> {
+        self.refresh_tokens_single_flight(None, true).await
+    }
+
+    async fn refresh_tokens_single_flight(
+        &self,
+        stale_access_token: Option<&str>,
+        force: bool,
+    ) -> Result<TidalTokenResponse, ProviderError> {
+        let _guard = self.refresh_lock.lock().await;
         let current = self.load_any_tokens().await?;
+
+        // Double-checked Single-Flight: if another caller already refreshed
+        // while we waited on the mutex, reuse the fresh token directly.
+        if !is_token_expired(current.issued_at, current.expires_in, 60) {
+            if !force || stale_access_token.is_some_and(|stale| stale != current.access_token) {
+                return Ok(current);
+            }
+        }
+
         if current.refresh_token.trim().is_empty() {
             return Err(ProviderError::Unauthenticated(
                 "Tidal refresh token missing".to_string(),
@@ -502,7 +529,7 @@ impl TidalProvider {
             return Ok(tok.access_token);
         }
         if !tok.refresh_token.trim().is_empty() {
-            let refreshed = self.refresh_tokens().await?;
+            let refreshed = self.refresh_tokens_single_flight(None, false).await?;
             return Ok(refreshed.access_token);
         }
         Err(ProviderError::Unauthenticated(
@@ -513,8 +540,11 @@ impl TidalProvider {
     fn map_http_error(&self, status: u16, context: &str, body: &str) -> Result<(), ProviderError> {
         match status {
             200..=299 => Ok(()),
-            401 | 403 => Err(ProviderError::AuthenticationFailed(format!(
-                "Tidal {context} unauthorized (HTTP {status})"
+            401 => Err(ProviderError::AuthenticationFailed(format!(
+                "Tidal {context} unauthorized (HTTP 401)"
+            ))),
+            403 => Err(ProviderError::StreamResolutionFailed(format!(
+                "Tidal {context} forbidden (HTTP 403): {body}"
             ))),
             404 => Err(ProviderError::AlbumNotFound(format!(
                 "Tidal {context} not found (HTTP 404)"
@@ -566,6 +596,169 @@ impl TidalProvider {
         album.add_version(version);
         Ok(album)
     }
+
+    async fn fetch_playback_info(
+        &self,
+        track_id: &str,
+        audio_quality: &str,
+    ) -> Result<(TidalPlaybackInfo, String), ProviderError> {
+        let mut access_token = self.get_valid_access_token().await?;
+        let cfg = self.config.read().await.clone();
+        let url = endpoint_url(
+            &cfg.api_base_url,
+            &format!("tracks/{track_id}/playbackinfo"),
+        );
+
+        let mut retried_auth = false;
+        let (resp, auth_header) = loop {
+            let auth_header = format!("Bearer {access_token}");
+            let req = HttpRequest::get(url.clone())
+                .with_header("Authorization", auth_header.clone())
+                .with_query("audioquality", audio_quality)
+                .with_query("playbackmode", "STREAM")
+                .with_query("assetpresentation", "FULL")
+                .with_query("countryCode", &cfg.country_code);
+
+            let resp = self.transport.execute(req).await?;
+            if resp.status == 401 && !retried_auth {
+                if let Ok(refreshed) = self
+                    .refresh_tokens_single_flight(Some(&access_token), true)
+                    .await
+                {
+                    access_token = refreshed.access_token;
+                    retried_auth = true;
+                    continue;
+                }
+            }
+            break (resp, auth_header);
+        };
+
+        if resp.status == 404 {
+            return Err(ProviderError::track_not_found("tidal", track_id));
+        }
+        self.map_http_error(resp.status, "tracks/playbackinfo", &resp.body)?;
+
+        let info: TidalPlaybackInfo = serde_json::from_str(&resp.body).map_err(|e| {
+            ProviderError::StreamResolutionFailed(format!(
+                "Failed to parse Tidal playbackinfo: {e}"
+            ))
+        })?;
+
+        if let Some(ref enc) = info.encryption_type {
+            if !enc.trim().is_empty() && !enc.eq_ignore_ascii_case("NONE") {
+                return Err(ProviderError::DrmRestricted(format!(
+                    "Tidal stream is encrypted ({enc})"
+                )));
+            }
+        }
+
+        Ok((info, auth_header))
+    }
+}
+
+struct TidalBtsDecoded {
+    stream_url: String,
+    codec_override: Option<AudioCodec>,
+    hint_ext: Option<String>,
+    mime_type: Option<String>,
+}
+
+fn decode_base64_padded(raw: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    let mut cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let rem = cleaned.len() % 4;
+    if rem != 0 {
+        cleaned.extend(std::iter::repeat_n('=', 4 - rem));
+    }
+    STANDARD.decode(cleaned)
+}
+
+fn parse_tidal_bts_manifest(manifest_b64: &str) -> Result<TidalBtsDecoded, ProviderError> {
+    let decoded = decode_base64_padded(manifest_b64).map_err(|e| {
+        ProviderError::StreamResolutionFailed(format!(
+            "Failed to decode Tidal BTS manifest base64: {e}"
+        ))
+    })?;
+    let bts: TidalBtsManifest = serde_json::from_slice(&decoded).map_err(|e| {
+        ProviderError::StreamResolutionFailed(format!(
+            "Failed to parse Tidal BTS manifest JSON: {e}"
+        ))
+    })?;
+    if let Some(ref enc) = bts.encryption_type {
+        if !enc.trim().is_empty() && !enc.eq_ignore_ascii_case("NONE") {
+            return Err(ProviderError::DrmRestricted(format!(
+                "Tidal BTS manifest encrypted ({enc})"
+            )));
+        }
+    }
+    let mut codec_override = None;
+    let mut hint_ext = None;
+    if let Some(ref mt) = bts.mime_type {
+        if mt.contains("mp4")
+            || mt.contains("aac")
+            || bts.codecs.as_deref().is_some_and(|c| c.starts_with("mp4a"))
+        {
+            codec_override = Some(AudioCodec::Aac);
+            hint_ext = Some("m4a".to_string());
+        } else if mt.contains("flac") {
+            codec_override = Some(AudioCodec::Flac);
+            hint_ext = Some("flac".to_string());
+        }
+    }
+    let stream_url = bts
+        .urls
+        .into_iter()
+        .find(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            ProviderError::StreamResolutionFailed(
+                "Tidal BTS manifest contains no stream URLs".to_string(),
+            )
+        })?;
+    Ok(TidalBtsDecoded {
+        stream_url,
+        codec_override,
+        hint_ext,
+        mime_type: bts.mime_type,
+    })
+}
+
+fn has_dash_content_protection(mpd_xml: &str) -> bool {
+    let lower = mpd_xml.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let needle = "contentprotection";
+    let mut idx = 0;
+    while let Some(pos) = lower[idx..].find(needle) {
+        let abs = idx + pos;
+        let before_is_tag = abs > 0 && (bytes[abs - 1] == b'<' || bytes[abs - 1] == b':');
+        let after = abs + needle.len();
+        let after_ok = after >= bytes.len()
+            || bytes[after].is_ascii_whitespace()
+            || bytes[after] == b'>'
+            || bytes[after] == b'/';
+        if before_is_tag && after_ok {
+            return true;
+        }
+        idx = after;
+    }
+    false
+}
+
+fn tidal_audio_quality(quality_key: &str, default_quality: &str) -> Result<String, ProviderError> {
+    let normalized = quality_key.trim().to_ascii_lowercase();
+    let mapped = match normalized.as_str() {
+        "" | "default" | "auto" => default_quality.to_string(),
+        "hi_res_lossless" | "hi_res" | "hires" | "hi_res_192" | "hi_res_96" | "max" | "best" => {
+            "HI_RES_LOSSLESS".to_string()
+        }
+        "lossless" | "flac" | "cd" => "LOSSLESS".to_string(),
+        "high" | "aac_320" | "320" => "HIGH".to_string(),
+        "low" | "aac_96" => "LOW".to_string(),
+        _ => {
+            return Err(ProviderError::UnsupportedFormat(format!(
+                "Unsupported Tidal quality key: '{quality_key}'"
+            )));
+        }
+    };
+    Ok(mapped)
 }
 
 #[async_trait]
@@ -676,43 +869,10 @@ impl MusicProvider for TidalProvider {
             )));
         }
 
-        let access_token = self.get_valid_access_token().await?;
-        let cfg = self.config.read().await.clone();
-        let auth_header = format!("Bearer {access_token}");
-
-        let url = endpoint_url(
-            &cfg.api_base_url,
-            &format!("tracks/{}/playbackinfo", track.external_track_id),
-        );
-        let req = HttpRequest::get(url)
-            .with_header("Authorization", auth_header.clone())
-            .with_query("audioquality", &cfg.audio_quality)
-            .with_query("playbackmode", "STREAM")
-            .with_query("assetpresentation", "FULL")
-            .with_query("countryCode", &cfg.country_code);
-
-        let resp = self.transport.execute(req).await?;
-        if resp.status == 404 {
-            return Err(ProviderError::track_not_found(
-                "tidal",
-                &track.external_track_id,
-            ));
-        }
-        self.map_http_error(resp.status, "tracks/playbackinfo", &resp.body)?;
-
-        let info: TidalPlaybackInfo = serde_json::from_str(&resp.body).map_err(|e| {
-            ProviderError::StreamResolutionFailed(format!(
-                "Failed to parse Tidal playbackinfo: {e}"
-            ))
-        })?;
-
-        if let Some(ref enc) = info.encryption_type {
-            if !enc.trim().is_empty() && !enc.eq_ignore_ascii_case("NONE") {
-                return Err(ProviderError::DrmRestricted(format!(
-                    "Tidal stream is encrypted ({enc})"
-                )));
-            }
-        }
+        let audio_quality = self.config.read().await.audio_quality.clone();
+        let (info, auth_header) = self
+            .fetch_playback_info(&track.external_track_id, &audio_quality)
+            .await?;
 
         let mut codec_override: Option<AudioCodec> = None;
         let mut hint_ext: Option<String> = None;
@@ -727,40 +887,10 @@ impl MusicProvider for TidalProvider {
                     "Encrypted/segmented Tidal DASH manifest is not directly streamable".to_string(),
                 ));
             }
-            let decoded = STANDARD.decode(manifest_b64.trim()).map_err(|e| {
-                ProviderError::StreamResolutionFailed(format!(
-                    "Failed to decode Tidal BTS manifest base64: {e}"
-                ))
-            })?;
-            let bts: TidalBtsManifest = serde_json::from_slice(&decoded).map_err(|e| {
-                ProviderError::StreamResolutionFailed(format!(
-                    "Failed to parse Tidal BTS manifest JSON: {e}"
-                ))
-            })?;
-            if let Some(ref enc) = bts.encryption_type {
-                if !enc.trim().is_empty() && !enc.eq_ignore_ascii_case("NONE") {
-                    return Err(ProviderError::DrmRestricted(format!(
-                        "Tidal BTS manifest encrypted ({enc})"
-                    )));
-                }
-            }
-            if let Some(ref mt) = bts.mime_type {
-                if mt.contains("mp4") || bts.codecs.as_deref() == Some("mp4a.40.2") {
-                    codec_override = Some(AudioCodec::Aac);
-                    hint_ext = Some("m4a".to_string());
-                } else if mt.contains("flac") {
-                    codec_override = Some(AudioCodec::Flac);
-                    hint_ext = Some("flac".to_string());
-                }
-            }
-            bts.urls
-                .into_iter()
-                .find(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    ProviderError::StreamResolutionFailed(
-                        "Tidal BTS manifest contains no stream URLs".to_string(),
-                    )
-                })?
+            let bts = parse_tidal_bts_manifest(&manifest_b64)?;
+            codec_override = bts.codec_override;
+            hint_ext = bts.hint_ext;
+            bts.stream_url
         } else {
             return Err(ProviderError::StreamResolutionFailed(
                 "Tidal playbackinfo missing both stream URL and manifest".to_string(),
@@ -803,6 +933,153 @@ impl MusicProvider for TidalProvider {
     }
 }
 
+#[async_trait]
+impl StreamResolver for TidalProvider {
+    fn provider_id(&self) -> &'static str {
+        "tidal"
+    }
+
+    fn capabilities(&self) -> StreamProviderCapabilities {
+        StreamProviderCapabilities::tidal()
+    }
+
+    async fn resolve_source(&self, key: &StreamKey) -> Result<StreamSourceSpec, ProviderError> {
+        validate_stream_key("tidal", key)?;
+        let default_quality = self.config.read().await.audio_quality.clone();
+        let requested_quality = tidal_audio_quality(&key.quality_key, &default_quality)?;
+        let (info, auth_header) = self
+            .fetch_playback_info(&key.track_id, &requested_quality)
+            .await?;
+
+        let headers = BTreeMap::from([("Authorization".to_string(), auth_header)]);
+        let loudness = info.track_replay_gain.filter(|g| g.is_finite()).map(|g| {
+            NormalizedLoudness::from_replay_gain(
+                g as f32,
+                info.track_peak_amplitude.filter(|p| p.is_finite()).map(|p| p as f32),
+            )
+        });
+        let album_loudness = info.album_replay_gain.filter(|g| g.is_finite()).map(|g| {
+            NormalizedLoudness::from_replay_gain(
+                g as f32,
+                info.album_peak_amplitude.filter(|p| p.is_finite()).map(|p| p as f32),
+            )
+        });
+
+        if let Some(u) = info
+            .url
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| info.urls.into_iter().find(|s| !s.trim().is_empty()))
+        {
+            let format = audio_format_for_tidal_quality(
+                info.audio_quality.as_deref().or(Some(&requested_quality)),
+                info.sample_rate,
+                info.bit_depth,
+            )?;
+            let hint_ext = format.codec.default_file_extension().to_string();
+            let mime_type = if format.codec == AudioCodec::Aac {
+                "audio/mp4"
+            } else {
+                "audio/flac"
+            };
+            let expire_at = extract_expire_at_from_url(&u);
+            return Ok(StreamSourceSpec::DirectRange {
+                key: key.clone(),
+                url: u,
+                headers,
+                content_length: None,
+                bitrate_bps: None,
+                mime_type: Some(mime_type.to_string()),
+                hint_extension: Some(hint_ext),
+                expire_at,
+                init_range_end: None,
+                index_range_start: None,
+                index_range_end: None,
+                loudness,
+                album_loudness,
+            });
+        }
+
+        let manifest_b64 = info
+            .manifest
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                ProviderError::StreamResolutionFailed(
+                    "Tidal playbackinfo missing both stream URL and manifest".to_string(),
+                )
+            })?;
+
+        let manifest_mime = info.manifest_mime_type.as_deref().unwrap_or("").trim();
+        if manifest_mime.eq_ignore_ascii_case("application/dash+xml") {
+            let decoded = decode_base64_padded(&manifest_b64).map_err(|e| {
+                ProviderError::StreamResolutionFailed(format!(
+                    "Failed to decode Tidal DASH manifest base64: {e}"
+                ))
+            })?;
+            let decoded_mpd_xml = String::from_utf8(decoded).map_err(|e| {
+                ProviderError::StreamResolutionFailed(format!(
+                    "Tidal DASH manifest is not valid UTF-8 XML: {e}"
+                ))
+            })?;
+
+            if has_dash_content_protection(&decoded_mpd_xml) {
+                return Err(ProviderError::DrmRestricted(
+                    "Tidal DASH manifest contains ContentProtection DRM".to_string(),
+                ));
+            }
+
+            return Ok(StreamSourceSpec::SegmentedManifest {
+                key: key.clone(),
+                manifest_url_or_xml: decoded_mpd_xml,
+                format: ManifestFormat::Dash,
+                headers,
+                bitrate_bps: None,
+                mime_type: Some("application/dash+xml".to_string()),
+                expire_at: None,
+                loudness,
+                album_loudness,
+            });
+        }
+
+        let bts = parse_tidal_bts_manifest(&manifest_b64)?;
+        let format = audio_format_for_tidal_quality(
+            info.audio_quality.as_deref().or(Some(&requested_quality)),
+            info.sample_rate,
+            info.bit_depth,
+        )?;
+        let effective_codec = bts.codec_override.unwrap_or(format.codec);
+        let hint_ext = bts
+            .hint_ext
+            .unwrap_or_else(|| effective_codec.default_file_extension().to_string());
+        let mime_type = bts.mime_type.or_else(|| {
+            Some(
+                if effective_codec == AudioCodec::Aac {
+                    "audio/mp4"
+                } else {
+                    "audio/flac"
+                }
+                .to_string(),
+            )
+        });
+        let expire_at = extract_expire_at_from_url(&bts.stream_url);
+
+        Ok(StreamSourceSpec::DirectRange {
+            key: key.clone(),
+            url: bts.stream_url,
+            headers,
+            content_length: None,
+            bitrate_bps: None,
+            mime_type,
+            hint_extension: Some(hint_ext),
+            expire_at,
+            init_range_end: None,
+            index_range_start: None,
+            index_range_end: None,
+            loudness,
+            album_loudness,
+        })
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -824,4 +1101,336 @@ fn audio_format_for_tidal_quality(
     let sr = sample_rate_override.unwrap_or(default_sr);
     let bd = bit_depth_override.unwrap_or(default_bd);
     Ok(AudioFormat::pcm(default_codec, sr, bd, 2)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{HttpResponse, MockHttpTransport};
+
+    async fn make_logged_in_tidal(transport: Arc<MockHttpTransport>) -> TidalProvider {
+        let provider = TidalProvider::with_config(TidalConfig::default(), transport, None);
+        provider
+            .login_with_tokens(TidalTokenResponse {
+                access_token: "tidal_tok_abc".to_string(),
+                refresh_token: "tidal_ref_abc".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+                user_id: 42,
+                issued_at: now_secs(),
+            })
+            .await
+            .unwrap();
+        provider
+    }
+
+    #[tokio::test]
+    async fn test_tidal_stream_resolver_bts_manifest_direct_range() {
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_fn("tracks/777/playbackinfo", |req| {
+                let quality = req
+                    .query_params
+                    .iter()
+                    .find(|(k, _)| k == "audioquality")
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("");
+                let manifest_json = if quality == "HIGH" {
+                    serde_json::json!({
+                        "mimeType": "audio/mp4",
+                        "codecs": "mp4a.40.2",
+                        "encryptionType": "NONE",
+                        "urls": ["https://sp-cf.tidal.com/777-high.m4a"]
+                    })
+                } else {
+                    serde_json::json!({
+                        "mimeType": "audio/flac",
+                        "codecs": "flac",
+                        "encryptionType": "NONE",
+                        "urls": ["https://sp-cf.tidal.com/777-lossless.flac"]
+                    })
+                };
+                let b64 = STANDARD.encode(manifest_json.to_string().as_bytes());
+                Ok(HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": quality,
+                        "sampleRate": 44100,
+                        "bitDepth": 16,
+                        "manifestMimeType": "application/vnd.tidal.bts",
+                        "manifest": b64
+                    })
+                    .to_string(),
+                ))
+            })
+            .await;
+
+        let provider = make_logged_in_tidal(transport).await;
+        assert_eq!(StreamResolver::provider_id(&provider), "tidal");
+        assert_eq!(
+            StreamResolver::capabilities(&provider),
+            StreamProviderCapabilities::tidal()
+        );
+
+        let flac_spec = provider
+            .resolve_source(&StreamKey::new("tidal", "777", "LOSSLESS"))
+            .await
+            .unwrap();
+        match flac_spec {
+            StreamSourceSpec::DirectRange {
+                url,
+                headers,
+                mime_type,
+                hint_extension,
+                ..
+            } => {
+                assert_eq!(url, "https://sp-cf.tidal.com/777-lossless.flac");
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer tidal_tok_abc")
+                );
+                assert_eq!(mime_type.as_deref(), Some("audio/flac"));
+                assert_eq!(hint_extension.as_deref(), Some("flac"));
+            }
+            other => panic!("expected DirectRange, got {other:?}"),
+        }
+
+        let high_spec = provider
+            .resolve_source(&StreamKey::new("tidal", "777", "HIGH"))
+            .await
+            .unwrap();
+        match high_spec {
+            StreamSourceSpec::DirectRange {
+                url,
+                mime_type,
+                hint_extension,
+                ..
+            } => {
+                assert_eq!(url, "https://sp-cf.tidal.com/777-high.m4a");
+                assert_eq!(mime_type.as_deref(), Some("audio/mp4"));
+                assert_eq!(hint_extension.as_deref(), Some("m4a"));
+            }
+            other => panic!("expected DirectRange, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tidal_stream_resolver_unencrypted_dash_segmented_manifest() {
+        let mpd_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">
+  <Period>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <Representation id="0" codecs="flac" audioSamplingRate="192000">
+        <SegmentTemplate initialization="https://cdn.tidal.com/init.mp4" media="https://cdn.tidal.com/seg-$Number$.m4s" startNumber="1"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let mpd_b64 = STANDARD.encode(mpd_xml.as_bytes());
+
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_exact(
+                "tracks/888/playbackinfo",
+                HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": "HI_RES_LOSSLESS",
+                        "sampleRate": 192000,
+                        "bitDepth": 24,
+                        "manifestMimeType": "application/dash+xml",
+                        "manifest": mpd_b64
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+
+        let provider = make_logged_in_tidal(transport).await;
+        let key = StreamKey::new("tidal", "888", "HI_RES_LOSSLESS");
+        let spec = provider.resolve_source(&key).await.unwrap();
+        match spec {
+            StreamSourceSpec::SegmentedManifest {
+                key: k,
+                manifest_url_or_xml,
+                format,
+                headers,
+                mime_type,
+                ..
+            } => {
+                assert_eq!(k, key);
+                assert_eq!(format, ManifestFormat::Dash);
+                assert_eq!(manifest_url_or_xml, mpd_xml);
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer tidal_tok_abc")
+                );
+                assert_eq!(mime_type.as_deref(), Some("application/dash+xml"));
+            }
+            other => panic!("expected SegmentedManifest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tidal_stream_resolver_drm_dash_rejected() {
+        let drm_mpd = r#"<MPD><Period><AdaptationSet><ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/><Representation/></AdaptationSet></Period></MPD>"#;
+        let drm_b64 = STANDARD.encode(drm_mpd.as_bytes());
+
+        let namespaced_drm_mpd = r#"<MPD><Period><AdaptationSet><cenc:ContentProtection value="cenc"/></AdaptationSet></Period></MPD>"#;
+        let namespaced_b64 = STANDARD.encode(namespaced_drm_mpd.as_bytes());
+
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_exact(
+                "tracks/666/playbackinfo",
+                HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": "HI_RES_LOSSLESS",
+                        "manifestMimeType": "application/dash+xml",
+                        "manifest": drm_b64
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+        transport
+            .register_exact(
+                "tracks/667/playbackinfo",
+                HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": "HI_RES_LOSSLESS",
+                        "manifestMimeType": "application/dash+xml",
+                        "manifest": namespaced_b64
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+
+        let provider = make_logged_in_tidal(transport).await;
+        let err1 = provider
+            .resolve_source(&StreamKey::new("tidal", "666", "HI_RES_LOSSLESS"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err1, ProviderError::DrmRestricted(_)));
+
+        let err2 = provider
+            .resolve_source(&StreamKey::new("tidal", "667", "HI_RES_LOSSLESS"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err2, ProviderError::DrmRestricted(_)));
+    }
+
+    #[tokio::test]
+    async fn test_tidal_phase3_401_single_flight_refresh_403_split_and_loudness() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let transport = Arc::new(MockHttpTransport::new());
+        let token_refresh_calls = Arc::new(AtomicUsize::new(0));
+        let refresh_counter = token_refresh_calls.clone();
+
+        transport
+            .register_fn("token", move |_req| {
+                refresh_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(HttpResponse::ok_json(
+                    serde_json::json!({
+                        "access_token": "tidal_fresh_tok_2",
+                        "refresh_token": "tidal_ref_2",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "user_id": 42
+                    })
+                    .to_string(),
+                ))
+            })
+            .await;
+
+        transport
+            .register_fn("tracks/501/playbackinfo", |req| {
+                let auth = req
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("");
+                if auth == "Bearer tidal_tok_abc" {
+                    return Ok(HttpResponse {
+                        status: 401,
+                        headers: vec![],
+                        body: r#"{"userMessage":"Expired access token"}"#.to_string(),
+                    });
+                }
+                let manifest_json = serde_json::json!({
+                    "mimeType": "audio/flac",
+                    "codecs": "flac",
+                    "encryptionType": "NONE",
+                    "urls": ["https://sp-cf.tidal.com/501-refreshed.flac"]
+                });
+                let b64 = STANDARD.encode(manifest_json.to_string().as_bytes());
+                Ok(HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": "LOSSLESS",
+                        "sampleRate": 44100,
+                        "bitDepth": 16,
+                        "trackReplayGain": -6.5,
+                        "trackPeakAmplitude": 0.92,
+                        "albumReplayGain": -5.0,
+                        "albumPeakAmplitude": 0.98,
+                        "manifestMimeType": "application/vnd.tidal.bts",
+                        "manifest": b64
+                    })
+                    .to_string(),
+                ))
+            })
+            .await;
+
+        transport
+            .register_exact(
+                "tracks/503/playbackinfo",
+                HttpResponse {
+                    status: 403,
+                    headers: vec![],
+                    body: r#"{"userMessage":"Forbidden stream"}"#.to_string(),
+                },
+            )
+            .await;
+
+        let provider = Arc::new(make_logged_in_tidal(transport).await);
+
+        // Concurrent 401s must deduplicate token refresh to exactly 1 /token call.
+        let p1 = provider.clone();
+        let p2 = provider.clone();
+        let key1 = StreamKey::new("tidal", "501", "LOSSLESS");
+        let key2 = key1.clone();
+        let (r1, r2) = tokio::join!(
+            p1.resolve_source(&key1),
+            p2.resolve_source(&key2),
+        );
+        assert_eq!(token_refresh_calls.load(Ordering::SeqCst), 1);
+
+        let spec = r1.unwrap();
+        assert!(r2.is_ok());
+        match spec {
+            StreamSourceSpec::DirectRange {
+                url,
+                loudness,
+                album_loudness,
+                ..
+            } => {
+                assert_eq!(url, "https://sp-cf.tidal.com/501-refreshed.flac");
+                let track_l = loudness.expect("track loudness should be populated");
+                assert!((track_l.gain_db - (-2.5)).abs() < 1e-4);
+                assert!((track_l.peak - 0.92).abs() < 1e-4);
+                let album_l = album_loudness.expect("album loudness should be populated");
+                assert!((album_l.gain_db - (-1.0)).abs() < 1e-4);
+                assert!((album_l.peak - 0.98).abs() < 1e-4);
+            }
+            other => panic!("expected DirectRange, got {other:?}"),
+        }
+
+        // HTTP 403 must NOT map to AuthenticationFailed.
+        let err_403 = provider
+            .resolve_source(&StreamKey::new("tidal", "503", "LOSSLESS"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err_403, ProviderError::StreamResolutionFailed(_)));
+    }
 }

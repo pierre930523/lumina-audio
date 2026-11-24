@@ -172,6 +172,9 @@ impl VisualizerTap {
 
     /// Retrieves a snapshot of the latest 64 smoothed frequency bands normalized to [0.0, 1.0].
     pub fn get_latest_bands(&self, out: &mut [f32; NUM_BANDS]) -> bool {
+        if self.enabled.load(Ordering::Relaxed) {
+            self.ensure_worker_started();
+        }
         if let Ok(guard) = self.latest_bands.read() {
             out.copy_from_slice(&*guard);
             true
@@ -181,12 +184,13 @@ impl VisualizerTap {
     }
 
     /// Ensures the independent analysis worker thread is running.
-    fn ensure_worker_started(&self) {
-        if self.worker_started.load(Ordering::Relaxed) {
+    /// Must only be called from non-real-time control/UI threads (never inside an audio callback).
+    pub(crate) fn ensure_worker_started(&self) {
+        if self.worker_started.load(Ordering::Acquire) {
             return;
         }
         let _guard = self.worker_spawn_lock.lock().unwrap();
-        if self.worker_started.load(Ordering::Relaxed) {
+        if self.worker_started.load(Ordering::Acquire) {
             return;
         }
 
@@ -239,7 +243,6 @@ impl VisualizerTap {
         }
 
         self.sample_rate.store(sample_rate.max(8000), Ordering::Relaxed);
-        self.ensure_worker_started();
 
         let total_frames = wire_bytes.len() / bytes_per_frame;
         const SCRATCH_FRAMES: usize = 1024;
