@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/pierre930523/lumina-audio/releases/latest">
-    <img src="https://img.shields.io/badge/release-v0.2.2-38BDF8.svg?style=for-the-badge&logo=github" alt="Latest Release" />
+    <img src="https://img.shields.io/badge/release-v0.2.4-38BDF8.svg?style=for-the-badge&logo=github" alt="Latest Release" />
   </a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6.svg?style=for-the-badge&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/installer-NSIS%20Modern%20UI-22C55E.svg?style=for-the-badge" alt="NSIS Installer" />
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>⬇️ 下載最新 Windows NSIS 安裝包 (Lumina-Audio-Setup-v0.2.2.exe)</strong></a>
+  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>⬇️ 下載最新 Windows NSIS 安裝包 (Lumina-Audio-Setup-v0.2.4.exe)</strong></a>
   &nbsp;•&nbsp;
   <a href="#-核心特色與技術亮點-key-features">核心特色</a>
   &nbsp;•&nbsp;
@@ -112,7 +112,7 @@ flowchart LR
 
   subgraph Core["Rust 2024 Audio & Database Core"]
     DB["SQLite (WAL + FTS5)\n本機曲庫與原圖封面快取"]
-    Decoder["Symphonia + DSD/DoP 解碼\n& HTTP Range 可取消串流"]
+    Decoder["Symphonia / libopus / DSD 解碼\n& HTTP Range L1+L2 串流"]
     DSP["64-bit Float DSP Pipeline\n(10-Band PEQ / AutoEQ / Crossfeed / Bypass)"]
     RingBuf["Epoch-based Lock-Free RingBuffer"]
     Output["WASAPI Exclusive / Shared\n& Win64 Native ASIO / DLNA / AirPlay"]
@@ -164,18 +164,15 @@ lumina-audio/
 1. **Windows 10 / 11 (x64)**
 2. **Flutter SDK** `3.14.0+` 與 **Rust Toolchain** (`stable-x86_64-pc-windows-msvc`)
 3. **Visual Studio 2022**（「使用 C++ 的桌面開發」工作負載）
-4. **NSIS (Nullsoft Scriptable Install System)** `3.x`（用於打包 `Lumina-Audio-Setup-v0.2.2.exe`）
+4. **NSIS (Nullsoft Scriptable Install System)** `3.x`（用於打包 `Lumina-Audio-Setup-v0.2.4.exe`）
 
 ### 1. 編譯 Rust 核心與 Flutter Windows Release
 ```powershell
 # 1. 編譯 Rust FFI 核心動態庫 (core_ffi.dll)
 cargo build --release -p core-ffi
 
-# 2. 編譯 Flutter Windows Release (CMake 會自動整合 core_ffi.dll 與 WebView2Loader.dll)
-cd app
-flutter pub get
-flutter build windows --release
-cd ..
+# 2. 一鍵準備依賴並編譯 Flutter Windows Release（或手動於 app/ 執行 flutter build windows --release）
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -SkipPrepareDeps
 ```
 
 ### 2. 使用 NSIS 封裝 Windows 安裝包
@@ -183,7 +180,7 @@ cd ..
 # 確保輸出目錄存在並執行 makensis 編譯安裝包
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 makensis installer\lumina_setup.nsi
-# 產出：dist\Lumina-Audio-Setup-v0.2.2.exe
+# 產出：dist\Lumina-Audio-Setup-v0.2.4.exe
 ```
 
 ---
