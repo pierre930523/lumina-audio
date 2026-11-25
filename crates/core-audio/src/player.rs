@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use core_types::{
     compute_l2_target_bytes, AudioCodec, AudioDeviceCapabilities, AudioDeviceDescription,
     AudioEngineOutputInfo, AudioFormat, ChannelLayout, CrossfeedConfig, DeckId, DeckState,
-    DeviceTransportKind, DsdOutputMode, DspPipelineConfig as SharedDspConfig,
+    DeckTrackMetadata, DeviceTransportKind, DsdOutputMode, DspPipelineConfig as SharedDspConfig,
     DualDeckStatusSnapshot, ManifestFormat, OutputBackendKind, OutputMode, PeqBandConfig,
     PeqFilterKind, PlaybackEnginePolicy, ReplayGainConfig as SharedReplayGainConfig,
     ReplayGainMode as SharedReplayGainMode, SignalPath, StreamCipher, StreamKey, StreamSourceSpec,
@@ -37,7 +37,7 @@ use crate::pcm::{AudioChunk, AudioDecoder, DecodedTrackMetadata, SymphoniaDecode
 use crate::signal_path::{SignalPathContext, SignalPathEngine};
 use crate::stream::{
     is_playlist_extension, looks_like_playlist_magic, resolve_playlist_url_with_cancel,
-    HttpRangeMediaSource, StreamOrigin, StreamSource,
+    resolve_playlist_url_with_token, HttpRangeMediaSource, StreamOrigin, StreamSource,
 };
 use crate::streaming::{
     drop_idle_http_connections, should_admit_to_l2, streaming_runtime, subscribe_network_epoch,
@@ -145,6 +145,7 @@ pub enum FadeTarget {
     PauseFadeOut = 1,
     StopFadeOut = 2,
     SeekFadeOut = 3,
+    SkipSilence = 4,
 }
 
 impl FadeTarget {
@@ -154,6 +155,7 @@ impl FadeTarget {
             1 => Self::PauseFadeOut,
             2 => Self::StopFadeOut,
             3 => Self::SeekFadeOut,
+            4 => Self::SkipSilence,
             _ => Self::Playing,
         }
     }
@@ -246,13 +248,29 @@ impl AudioFadeControl {
             return;
         }
         let already_silent =
-            self.target() == FadeTarget::PauseFadeOut && self.is_fade_out_done();
+            (self.target() == FadeTarget::PauseFadeOut || self.target() == FadeTarget::SkipSilence)
+                && self.is_fade_out_done();
         let immediate = already_silent
             || !self.fade_out_enabled()
             || !self.has_audible_output.load(Ordering::Acquire);
         self.fade_out_done.store(immediate, Ordering::Release);
         self.target
             .store(FadeTarget::StopFadeOut as u8, Ordering::Release);
+    }
+
+    pub fn request_skip_fade_out(&self) {
+        if self.target() == FadeTarget::SkipSilence {
+            return;
+        }
+        let already_silent =
+            (self.target() == FadeTarget::PauseFadeOut || self.target() == FadeTarget::StopFadeOut)
+                && self.is_fade_out_done();
+        let immediate = already_silent
+            || !self.fade_out_enabled()
+            || !self.has_audible_output.load(Ordering::Acquire);
+        self.fade_out_done.store(immediate, Ordering::Release);
+        self.target
+            .store(FadeTarget::SkipSilence as u8, Ordering::Release);
     }
 
     pub fn request_seek_fade_out(&self, seek_epoch: u64) {
@@ -771,6 +789,7 @@ pub struct ActiveTrackMeta {
     pub resampled_to_hz: Option<u32>,
     pub backend: OutputBackendKind,
     pub device_name: String,
+    pub track_meta: Option<DeckTrackMetadata>,
 }
 
 /// Default paused idle duration before releasing proxy RAM LRU caches & idle HTTP sockets (10 minutes).
@@ -945,22 +964,171 @@ fn source_spec_default_label(spec: &StreamSourceSpec) -> String {
     }
 }
 
-enum PlayerCommand {
-    Start {
-        session_id: u64,
-        decoder: Box<dyn AudioDecoder>,
-        path: PathBuf,
-        source_label: String,
-        origin: PlayerOrigin,
-        cancel_token: CancellationToken,
-        ack_tx: mpsc::SyncSender<Result<(), CoreAudioError>>,
+struct PendingStart {
+    session_id: u64,
+    decoder: Box<dyn AudioDecoder>,
+    path: PathBuf,
+    source_label: String,
+    origin: PlayerOrigin,
+    track_meta: Option<DeckTrackMetadata>,
+    cancel_token: CancellationToken,
+    ack_tx: mpsc::SyncSender<Result<(), CoreAudioError>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutputReuseKey {
+    #[cfg(target_os = "windows")]
+    WasapiExclusive(crate::backend::wasapi_win::WasapiExclusiveOpenSpec),
+    VirtualWire {
+        output_mode: OutputMode,
+        wire_format: WireSampleFormat,
+        sample_rate: u32,
+        channels: u16,
     },
+    VirtualPcm {
+        sample_rate: u32,
+        channels: u16,
+    },
+    CpalShared {
+        device_id: String,
+        sample_rate: u32,
+        channels: u16,
+    },
+    None,
+}
+
+enum ReaperMsg {
+    Decode(JoinHandle<Option<Box<dyn AudioDecoder>>>),
+    #[allow(dead_code)]
+    Unit(JoinHandle<()>),
+    Shutdown,
+}
+
+/// Off-control-path background thread reaper so `stop()`, `cancel_standby()`, `begin_skip_transition()`,
+/// and `commit_opened_decoder()` never synchronously block on `JoinHandle::join()`.
+struct ThreadReaper {
+    tx: Mutex<Option<mpsc::Sender<ReaperMsg>>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ThreadReaper {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel::<ReaperMsg>();
+        let handle = thread::Builder::new()
+            .name("lumina-thread-reaper".to_string())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        ReaperMsg::Decode(jh) => {
+                            let _ = jh.join();
+                        }
+                        ReaperMsg::Unit(jh) => {
+                            let _ = jh.join();
+                        }
+                        ReaperMsg::Shutdown => break,
+                    }
+                }
+            })
+            .ok();
+        Self {
+            tx: Mutex::new(Some(tx)),
+            handle: Mutex::new(handle),
+        }
+    }
+
+    fn retire_decode(&self, jh: JoinHandle<Option<Box<dyn AudioDecoder>>>) {
+        if let Ok(guard) = self.tx.lock()
+            && let Some(ref tx) = *guard
+        {
+            let _ = tx.send(ReaperMsg::Decode(jh));
+        }
+    }
+
+    #[allow(dead_code)]
+    fn retire_unit(&self, jh: JoinHandle<()>) {
+        if let Ok(guard) = self.tx.lock()
+            && let Some(ref tx) = *guard
+        {
+            let _ = tx.send(ReaperMsg::Unit(jh));
+        }
+    }
+
+    fn shutdown(&self) {
+        if let Ok(mut guard) = self.tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(ReaperMsg::Shutdown);
+        }
+        if let Ok(mut h_guard) = self.handle.lock()
+            && let Some(h) = h_guard.take()
+        {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !h.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
+        }
+    }
+}
+
+struct DecodeThreadGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl DecodeThreadGuard {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self {
+            counter: Arc::clone(counter),
+        }
+    }
+}
+
+impl Drop for DecodeThreadGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+const CLOCK_SRC_STREAM_FRAMES: u8 = 0;
+const CLOCK_SRC_WASAPI_HARDWARE: u8 = 1;
+const CLOCK_SRC_ASIO_HARDWARE: u8 = 2;
+const CLOCK_SRC_UNINIT: u8 = 255;
+
+#[inline]
+fn backend_to_clock_src(headless: bool, bk: OutputBackendKind) -> u8 {
+    if headless {
+        CLOCK_SRC_STREAM_FRAMES
+    } else if bk == OutputBackendKind::WindowsAsio {
+        CLOCK_SRC_ASIO_HARDWARE
+    } else if bk == OutputBackendKind::WindowsWasapiExclusive {
+        CLOCK_SRC_WASAPI_HARDWARE
+    } else {
+        CLOCK_SRC_STREAM_FRAMES
+    }
+}
+
+#[inline]
+fn clock_src_to_str(code: u8) -> &'static str {
+    match code {
+        CLOCK_SRC_ASIO_HARDWARE => "asio_hardware",
+        CLOCK_SRC_WASAPI_HARDWARE => "wasapi_hardware",
+        _ => "stream_frames",
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+enum PlayerCommand {
+    ApplyLatestStart,
     FormatSwitchNext {
         session_id: u64,
         decoder: Box<dyn AudioDecoder>,
         path: PathBuf,
         source_label: String,
         origin: PlayerOrigin,
+        track_meta: Option<DeckTrackMetadata>,
         cancel_token: CancellationToken,
         rg_tags: TrackReplayGainTags,
     },
@@ -1095,6 +1263,7 @@ struct DeckMetadataSnapshot {
     expected_stamp: u64,
     is_wire: bool,
     resampled_to_hz: Option<u32>,
+    track_meta: Option<DeckTrackMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -1150,6 +1319,9 @@ pub(crate) struct DualDeckControl {
     standby_target_pts_ms: [Arc<AtomicU64>; 2],
     standby_target_frame: [Arc<AtomicU64>; 2],
     deck_meta: [RwLock<Option<DeckMetadataSnapshot>>; 2],
+    deck_track_meta: [RwLock<Option<DeckTrackMetadata>>; 2],
+    swap_generation: Arc<AtomicU64>,
+    committed_deck_gen: AtomicU64,
     active_profile: RwLock<Option<ActiveOutputProfile>>,
     decode_entries: [Mutex<Option<DeckDecodeHandle>>; 2],
     standby_pending_pcm: [Mutex<Option<RtPcmInboxPayload>>; 2],
@@ -1164,6 +1336,7 @@ pub(crate) struct DualDeckControl {
     skip_handled_seq: AtomicU64,
     skip_target_deck: AtomicU8,
     skip_lock: Mutex<()>,
+    deck_lifecycle_locks: [Mutex<()>; 2],
     flip_done_sync: (Mutex<u64>, Condvar),
     mismatch_armed: AtomicBool,
     mismatch_target_deck: AtomicU8,
@@ -1215,6 +1388,9 @@ impl DualDeckControl {
                 Arc::new(AtomicU64::new(0)),
             ],
             deck_meta: [RwLock::new(None), RwLock::new(None)],
+            deck_track_meta: [RwLock::new(None), RwLock::new(None)],
+            swap_generation: Arc::new(AtomicU64::new(0)),
+            committed_deck_gen: AtomicU64::new(0),
             active_profile: RwLock::new(None),
             decode_entries: [Mutex::new(None), Mutex::new(None)],
             standby_pending_pcm: [Mutex::new(None), Mutex::new(None)],
@@ -1229,6 +1405,7 @@ impl DualDeckControl {
             skip_handled_seq: AtomicU64::new(0),
             skip_target_deck: AtomicU8::new(1),
             skip_lock: Mutex::new(()),
+            deck_lifecycle_locks: [Mutex::new(()), Mutex::new(())],
             flip_done_sync: (Mutex::new(0), Condvar::new()),
             mismatch_armed: AtomicBool::new(false),
             mismatch_target_deck: AtomicU8::new(1),
@@ -1271,6 +1448,12 @@ impl DualDeckControl {
     fn set_deck_key(&self, idx: usize, key: Option<StreamKey>) {
         if let Ok(mut g) = self.deck_keys.write() {
             g[idx & 1] = key;
+        }
+    }
+
+    fn set_deck_track_meta(&self, idx: usize, meta: Option<DeckTrackMetadata>) {
+        if let Ok(mut g) = self.deck_track_meta[idx & 1].write() {
+            *g = meta;
         }
     }
 
@@ -1476,8 +1659,11 @@ impl DualDeckControl {
         }
     }
 
-    fn retire_inactive_deck(&self, idx: usize) {
+    fn retire_inactive_deck(&self, idx: usize, reaper: &ThreadReaper) {
         let i = idx & 1;
+        let _lifecycle_guard = self.deck_lifecycle_locks[i]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if self.active_idx() == i {
             return;
         }
@@ -1485,7 +1671,7 @@ impl DualDeckControl {
         if st != DeckState::Idle && st != DeckState::Draining {
             return;
         }
-        let _ = self.cancel_and_join_deck(i);
+        self.cancel_and_retire_deck(i, reaper);
     }
 
     fn promote_decode_thread(&self, idx: usize) {
@@ -1496,6 +1682,41 @@ impl DualDeckControl {
         {
             *wg = StandbyWakeState::Promoted;
             entry.wake.1.notify_all();
+        }
+    }
+
+    /// Cancels deck `idx` and hands its decode thread `JoinHandle` to the background reaper
+    /// without blocking the caller on `JoinHandle::join()`.
+    fn cancel_and_retire_deck(&self, idx: usize, reaper: &ThreadReaper) {
+        let i = idx & 1;
+        self.alloc_deck_gen(i);
+        let entry_opt = self.decode_entries[i].lock().ok().and_then(|mut g| g.take());
+        if let Some(mut entry) = entry_opt {
+            entry.cancel_token.cancel();
+            entry.cancel_flag.store(true, Ordering::SeqCst);
+            if let Ok(mut wg) = entry.wake.0.lock() {
+                *wg = StandbyWakeState::Cancelled;
+                entry.wake.1.notify_all();
+            }
+            if let Some(jh) = entry.join_handle.take() {
+                reaper.retire_decode(jh);
+            }
+        }
+        self.clear_inboxes_for_deck(i);
+        self.drain_retired_payloads();
+        self.deck_states[i].store(DeckState::Idle as u8, Ordering::SeqCst);
+        self.set_deck_key(i, None);
+        self.deck_eof_flags[i].store(false, Ordering::SeqCst);
+        self.deck_buffered_ms[i].store(0, Ordering::Relaxed);
+        self.standby_compatible[i].store(false, Ordering::SeqCst);
+        self.standby_is_mismatch_recovery[i].store(false, Ordering::SeqCst);
+        self.standby_target_pts_ms[i].store(0, Ordering::SeqCst);
+        self.standby_target_frame[i].store(0, Ordering::SeqCst);
+        if let Ok(mut mg) = self.deck_meta[i].write() {
+            *mg = None;
+        }
+        if let Ok(mut tg) = self.deck_track_meta[i].write() {
+            *tg = None;
         }
     }
 
@@ -1529,11 +1750,35 @@ impl DualDeckControl {
         if let Ok(mut mg) = self.deck_meta[i].write() {
             *mg = None;
         }
+        if let Ok(mut tg) = self.deck_track_meta[i].write() {
+            *tg = None;
+        }
         reused
+    }
+
+    fn cancel_standby_nonblocking(&self, reaper: &ThreadReaper) {
+        let sb = self.standby_idx();
+        let _lifecycle_guard = self.deck_lifecycle_locks[sb]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.mismatch_armed.store(false, Ordering::Release);
+        self.standby_buffered_ms.store(0, Ordering::Relaxed);
+        self.cancel_and_retire_deck(sb, reaper);
+    }
+
+    fn cancel_active_nonblocking(&self, reaper: &ThreadReaper) {
+        let act = self.active_idx();
+        let _lifecycle_guard = self.deck_lifecycle_locks[act]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.cancel_and_retire_deck(act, reaper);
     }
 
     fn cancel_standby(&self) {
         let sb = self.standby_idx();
+        let _lifecycle_guard = self.deck_lifecycle_locks[sb]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.mismatch_armed.store(false, Ordering::Release);
         self.standby_buffered_ms.store(0, Ordering::Relaxed);
         let _ = self.cancel_and_join_deck(sb);
@@ -1568,7 +1813,7 @@ enum PcmRenderOutcome {
 struct DualDeckPcmFeeder {
     dual: Arc<DualDeckControl>,
     inner: Arc<PlayerInner>,
-    session_id: u64,
+    active_session_id: Arc<AtomicU64>,
     slot_ptrs: [*mut RtPcmInboxPayload; 2],
     out_rate: u32,
     out_channels: usize,
@@ -1590,7 +1835,7 @@ impl DualDeckPcmFeeder {
     fn new(
         dual: Arc<DualDeckControl>,
         inner: Arc<PlayerInner>,
-        session_id: u64,
+        active_session_id: Arc<AtomicU64>,
         active_deck: usize,
         initial_payload: RtPcmInboxPayload,
         fade_ctrl: &AudioFadeControl,
@@ -1605,7 +1850,7 @@ impl DualDeckPcmFeeder {
         let mut feeder = Self {
             dual,
             inner: Arc::clone(&inner),
-            session_id,
+            active_session_id,
             slot_ptrs,
             out_rate,
             out_channels,
@@ -1631,12 +1876,21 @@ impl DualDeckPcmFeeder {
 
     #[inline]
     fn poll_inbox(&mut self) {
+        let cur = self.dual.active_idx();
         for i in 0..2 {
             let incoming = self.dual.pcm_inbox[i].swap(null_mut(), Ordering::AcqRel);
             if !incoming.is_null() {
+                let wm = unsafe { (*incoming).watermark_samples };
                 let old = std::mem::replace(&mut self.slot_ptrs[i], incoming);
                 if !old.is_null() {
                     self.dual.retire_pcm_ptr(old);
+                }
+                if i == cur {
+                    self.drain_notified = false;
+                    self.active_skip_seq = None;
+                    self.crossfade_active = false;
+                    self.buffering_gate = wm > 0;
+                    self.fade.reset_for_play_start();
                 }
             }
         }
@@ -1660,6 +1914,10 @@ impl DualDeckPcmFeeder {
         self.inner
             .frames_rendered
             .store(resume_frame, Ordering::SeqCst);
+        if kind != RtTransitionKind::MismatchCrossfadeFlip {
+            self.dual.swap_generation.fetch_add(1, Ordering::Release);
+            self.inner.playback_epoch.fetch_add(1, Ordering::Release);
+        }
         self.dual
             .push_rt_event(kind, from_deck as u8, to_deck as u8, tgen);
     }
@@ -1686,9 +1944,15 @@ impl DualDeckPcmFeeder {
         let fade_target = fade_ctrl.target();
         if matches!(
             fade_target,
-            FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
+            FadeTarget::PauseFadeOut
+                | FadeTarget::StopFadeOut
+                | FadeTarget::SeekFadeOut
+                | FadeTarget::SkipSilence
         ) {
-            if !self.fade.fade_out_enabled() || self.fade.gain() <= 0.0 || self.slot_ptrs[cur].is_null() {
+            let stale_slot = self.slot_ptrs[cur].is_null()
+                || (fade_target == FadeTarget::SkipSilence
+                    && unsafe { (*self.slot_ptrs[cur]).deck_gen } != self.dual.deck_gen_for(cur));
+            if !self.fade.fade_out_enabled() || self.fade.gain() <= 0.0 || stale_slot {
                 self.fade.set_zero();
                 fade_ctrl.mark_fade_out_done();
                 if fade_target == FadeTarget::SeekFadeOut && !self.slot_ptrs[cur].is_null() {
@@ -1739,7 +2003,8 @@ impl DualDeckPcmFeeder {
 
         if self.inner.stopped.load(Ordering::Relaxed)
             || self.inner.paused.load(Ordering::Relaxed)
-            || self.inner.current_session_id.load(Ordering::Relaxed) != self.session_id
+            || self.inner.current_session_id.load(Ordering::Relaxed)
+                != self.active_session_id.load(Ordering::Acquire)
             || self.slot_ptrs[cur].is_null()
         {
             out_f32.fill(0.0);
@@ -2475,6 +2740,7 @@ pub(crate) struct DualDeckWireFeeder {
     buffered_ms: Arc<AtomicU64>,
     gapless_transitions: Arc<AtomicU64>,
     underrun_count: Arc<AtomicU64>,
+    playback_epoch: Arc<AtomicU64>,
     slot_ptrs: [*mut RtWireInboxPayload; 2],
     wire: WireSampleFormat,
     out_rate: u32,
@@ -2501,6 +2767,7 @@ impl DualDeckWireFeeder {
         buffered_ms: Arc<AtomicU64>,
         gapless_transitions: Arc<AtomicU64>,
         underrun_count: Arc<AtomicU64>,
+        playback_epoch: Arc<AtomicU64>,
         active_deck: usize,
         initial_payload: RtWireInboxPayload,
     ) -> Self {
@@ -2523,6 +2790,7 @@ impl DualDeckWireFeeder {
             buffered_ms,
             gapless_transitions,
             underrun_count,
+            playback_epoch,
             slot_ptrs,
             wire,
             out_rate,
@@ -2537,21 +2805,31 @@ impl DualDeckWireFeeder {
             crossfade_resume_frame: 0,
             drain_notified: false,
         };
-        feeder.poll_inbox();
+        let _ = feeder.poll_inbox();
         feeder
     }
 
     #[inline]
-    pub(crate) fn poll_inbox(&mut self) {
+    pub(crate) fn poll_inbox(&mut self) -> Option<usize> {
+        let cur = self.dual.active_idx();
+        let mut swapped_active_wm = None;
         for i in 0..2 {
             let incoming = self.dual.wire_inbox[i].swap(null_mut(), Ordering::AcqRel);
             if !incoming.is_null() {
+                let wm = unsafe { (*incoming).watermark_bytes };
                 let old = std::mem::replace(&mut self.slot_ptrs[i], incoming);
                 if !old.is_null() {
                     self.dual.retire_wire_ptr(old);
                 }
+                if i == cur {
+                    self.drain_notified = false;
+                    self.active_skip_seq = None;
+                    self.crossfade_active = false;
+                    swapped_active_wm = Some(wm);
+                }
             }
         }
+        swapped_active_wm
     }
 
     #[inline]
@@ -2656,6 +2934,10 @@ impl DualDeckWireFeeder {
         self.dual.deck_states[to_deck].store(DeckState::Playing as u8, Ordering::Release);
         self.dual.standby_buffered_ms.store(0, Ordering::Relaxed);
         self.frames_rendered.store(resume_frame, Ordering::SeqCst);
+        if kind != RtTransitionKind::MismatchCrossfadeFlip {
+            self.dual.swap_generation.fetch_add(1, Ordering::Release);
+            self.playback_epoch.fetch_add(1, Ordering::Release);
+        }
         self.dual
             .push_rt_event(kind, from_deck as u8, to_deck as u8, tgen);
     }
@@ -2670,7 +2952,11 @@ impl DualDeckWireFeeder {
         dop_phase: &mut bool,
         buffering_gate: &mut bool,
     ) -> DualDeckWireOutcome {
-        self.poll_inbox();
+        if let Some(wm) = self.poll_inbox() {
+            *buffering_gate = wm > 0;
+            fade.reset_for_play_start();
+            *dop_phase = false;
+        }
 
         let needed = (out.len() / bpf.max(1)) * bpf.max(1);
         if needed == 0 || bpf == 0 {
@@ -3347,6 +3633,7 @@ struct PlayerInner {
     current_session_id: Arc<AtomicU64>,
     seek_request_ms: AtomicI64,
     active_meta: RwLock<Option<ActiveTrackMeta>>,
+    active_track_metadata: RwLock<Option<DeckTrackMetadata>>,
     active_source_spec: RwLock<Option<StreamSourceSpec>>,
     last_error: Arc<RwLock<Option<String>>>,
     last_error_code: Arc<RwLock<Option<String>>>,
@@ -3356,12 +3643,13 @@ struct PlayerInner {
     saved_normal_volume_bits: AtomicU32,
     verification: RwLock<Option<(AudioVerificationEngine, String, String)>>,
     queued_next: RwLock<Option<(StreamSource, String)>>,
-    queued_next_spec: RwLock<Option<(StreamSourceSpec, String)>>,
+    queued_next_spec: RwLock<Option<(StreamSourceSpec, String, Option<DeckTrackMetadata>)>>,
     has_queued_next_spec: AtomicBool,
     gapless_transitions: Arc<AtomicU64>,
     format_reinit_count: AtomicU64,
     seek_epoch: AtomicU64,
     epoch: AtomicU64,
+    playback_epoch: Arc<AtomicU64>,
     play_epoch: AtomicU64,
     last_caller_play_epoch: AtomicU64,
     active_cancel: RwLock<CancellationToken>,
@@ -3374,11 +3662,18 @@ struct PlayerInner {
     cmd_tx_slot: OnceLock<mpsc::Sender<PlayerCommand>>,
     idle_reclaim_threshold: RwLock<Duration>,
     idle_reclaim_count: AtomicU64,
+    output_reopen_count: AtomicU64,
+    live_decode_threads: Arc<AtomicUsize>,
+    cached_clock_source: AtomicU8,
     is_seeking: AtomicBool,
     buffered_ms: Arc<AtomicU64>,
     ring_buffer_underrun_count: Arc<AtomicU64>,
     cpal_stream_error_flag: Arc<AtomicBool>,
     active_fade: RwLock<Option<Arc<AudioFadeControl>>>,
+    #[cfg(target_os = "windows")]
+    active_wasapi_ctrl: RwLock<Option<Arc<crate::backend::wasapi_win::WasapiRenderControl>>>,
+    latest_start: Mutex<Option<PendingStart>>,
+    reaper: ThreadReaper,
     dual_deck: Arc<DualDeckControl>,
 }
 
@@ -3430,6 +3725,7 @@ impl PlayerInner {
             current_session_id: Arc::new(AtomicU64::new(0)),
             seek_request_ms: AtomicI64::new(-1),
             active_meta: RwLock::new(None),
+            active_track_metadata: RwLock::new(None),
             active_source_spec: RwLock::new(None),
             last_error: Arc::new(RwLock::new(None)),
             last_error_code: Arc::new(RwLock::new(None)),
@@ -3445,6 +3741,7 @@ impl PlayerInner {
             format_reinit_count: AtomicU64::new(0),
             seek_epoch: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            playback_epoch: Arc::new(AtomicU64::new(0)),
             play_epoch: AtomicU64::new(0),
             last_caller_play_epoch: AtomicU64::new(0),
             active_cancel: RwLock::new(CancellationToken::new()),
@@ -3457,12 +3754,71 @@ impl PlayerInner {
             cmd_tx_slot: OnceLock::new(),
             idle_reclaim_threshold: RwLock::new(DEFAULT_IDLE_RECLAIM_THRESHOLD),
             idle_reclaim_count: AtomicU64::new(0),
+            output_reopen_count: AtomicU64::new(0),
+            live_decode_threads: Arc::new(AtomicUsize::new(0)),
+            cached_clock_source: AtomicU8::new(if headless {
+                CLOCK_SRC_STREAM_FRAMES
+            } else {
+                CLOCK_SRC_UNINIT
+            }),
             is_seeking: AtomicBool::new(false),
             buffered_ms: Arc::new(AtomicU64::new(0)),
             ring_buffer_underrun_count: Arc::new(AtomicU64::new(0)),
             cpal_stream_error_flag: Arc::new(AtomicBool::new(false)),
             active_fade: RwLock::new(None),
+            #[cfg(target_os = "windows")]
+            active_wasapi_ctrl: RwLock::new(None),
+            latest_start: Mutex::new(None),
+            reaper: ThreadReaper::new(),
             dual_deck: Arc::new(DualDeckControl::new()),
+        }
+    }
+
+    fn clear_latest_start(&self) {
+        let displaced = self.latest_start.lock().ok().and_then(|mut g| g.take());
+        if let Some(old) = displaced {
+            let _ = old.ack_tx.send(Ok(()));
+        }
+    }
+
+    fn advance_playback_epoch(&self, min_epoch: Option<u64>) -> u64 {
+        let floor = min_epoch.unwrap_or(0);
+        let mut cur = self.playback_epoch.load(Ordering::SeqCst);
+        loop {
+            let next = cur.saturating_add(1).max(floor);
+            match self.playback_epoch.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    fn enter_output_skip_silence(&self) {
+        #[cfg(target_os = "windows")]
+        if let Ok(guard) = self.active_wasapi_ctrl.read()
+            && let Some(ref ctrl) = *guard
+        {
+            ctrl.enter_skip_silence();
+        }
+        if let Ok(fade_lock) = self.active_fade.read()
+            && let Some(ref fc) = *fade_lock
+        {
+            fc.request_skip_fade_out();
+        }
+    }
+
+    fn set_active_wasapi_ctrl(
+        &self,
+        #[cfg(target_os = "windows")] ctrl: Option<Arc<crate::backend::wasapi_win::WasapiRenderControl>>,
+    ) {
+        #[cfg(target_os = "windows")]
+        if let Ok(mut guard) = self.active_wasapi_ctrl.write() {
+            *guard = ctrl;
         }
     }
 
@@ -3554,6 +3910,78 @@ impl AudioPlayer {
     /// Returns the player's monotonic lifecycle epoch (incremented on every play, stop, and seek).
     pub fn current_epoch(&self) -> u64 {
         self.inner.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Returns the player's monotonic track/transition epoch (incremented on play, skip, stop,
+    /// and standby-to-active flips; never incremented on seek). Strictly lock-free.
+    pub fn playback_epoch(&self) -> u64 {
+        self.inner.playback_epoch.load(Ordering::Acquire)
+    }
+
+    /// Returns the cumulative number of hardware/virtual output sessions opened (not hot-swapped).
+    pub fn output_reopen_count(&self) -> u64 {
+        self.inner.output_reopen_count.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of live background decode OS threads currently owned by this player.
+    pub fn active_decode_thread_count(&self) -> usize {
+        self.inner.live_decode_threads.load(Ordering::Acquire)
+    }
+
+    /// Cancels any active standby pre-decode without blocking the caller thread.
+    pub fn cancel_standby(&self) {
+        self.inner
+            .dual_deck
+            .cancel_standby_nonblocking(&self.inner.reaper);
+    }
+
+    fn enter_skip_transition_state(&self) {
+        self.inner.clear_latest_start();
+        if let Ok(mut q) = self.inner.queued_next.write() {
+            *q = None;
+        }
+        if let Ok(mut qs) = self.inner.queued_next_spec.write() {
+            *qs = None;
+        }
+        self.inner
+            .has_queued_next_spec
+            .store(false, Ordering::SeqCst);
+        self.inner.enter_output_skip_silence();
+        self.inner
+            .dual_deck
+            .cancel_standby_nonblocking(&self.inner.reaper);
+        self.inner
+            .dual_deck
+            .cancel_active_nonblocking(&self.inner.reaper);
+    }
+
+    /// Strictly non-blocking (`< 0.1 ms`) track-skip initiation:
+    /// atomically bumps `playback_epoch`, `epoch`, and `play_epoch`, cancels active+standby decode
+    /// tasks (retiring thread handles to the background reaper with zero `join()`), clears any
+    /// superseded pending start, and shifts live WASAPI/CPAL/Virtual output into silent keep-alive
+    /// without tearing down `IAudioClient`.
+    /// Returns `(play_ep, fresh_cancel)` for direct use with `open_source_spec_async_with_l2` and
+    /// `start_opened_source_spec_with_metadata` / `start_opened_decoder_with_epoch_and_metadata`.
+    pub fn begin_skip_transition(&self) -> (u64, CancellationToken) {
+        let fresh_cancel = CancellationToken::new();
+        let play_ep = self
+            .swap_cancel_and_bump_epoch(None, fresh_cancel.clone())
+            .expect("fresh cancellation token cannot be cancelled");
+        self.enter_skip_transition_state();
+        (play_ep, fresh_cancel)
+    }
+
+    /// Same strictly non-blocking skip transition as [`Self::begin_skip_transition`], accepting a
+    /// caller-supplied monotonic `caller_epoch` and `cancel` token in a single atomic step (zero
+    /// double-bump). Returns `None` if `caller_epoch` is stale or `cancel` is already cancelled.
+    pub fn begin_skip_transition_with_epoch(
+        &self,
+        caller_epoch: u64,
+        cancel: CancellationToken,
+    ) -> Option<u64> {
+        let play_ep = self.swap_cancel_and_bump_epoch(Some(caller_epoch), cancel)?;
+        self.enter_skip_transition_state();
+        Some(play_ep)
     }
 
     /// Returns a clone of the active stream `CancellationToken`.
@@ -3692,6 +4120,8 @@ impl AudioPlayer {
             _ => cur_ep.saturating_add(1),
         };
         self.inner.epoch.store(next_ep, Ordering::SeqCst);
+        self.inner
+            .advance_playback_epoch(caller_epoch.filter(|&r| r > 0));
         let play_ep = self.inner.play_epoch.fetch_add(1, Ordering::SeqCst) + 1;
 
         let prev_cancel = self
@@ -3732,6 +4162,18 @@ impl AudioPlayer {
         source_label: &str,
         epoch: u64,
         cancel: CancellationToken,
+    ) -> Result<(), CoreAudioError> {
+        self.play_source_spec_with_metadata(spec, source_label, epoch, cancel, None)
+    }
+
+    /// Opens and plays a [`StreamSourceSpec`] with a custom Signal Path label and track metadata.
+    pub fn play_source_spec_with_metadata(
+        &self,
+        spec: StreamSourceSpec,
+        source_label: &str,
+        epoch: u64,
+        cancel: CancellationToken,
+        track_meta: Option<DeckTrackMetadata>,
     ) -> Result<(), CoreAudioError> {
         if let StreamSourceSpec::ExternalBackend {
             key, provider_id, ..
@@ -3784,7 +4226,14 @@ impl AudioPlayer {
             }
         };
 
-        self.start_opened_source_spec(&adopted_spec, decoder, source_label, play_ep, cancel)
+        self.start_opened_source_spec_with_metadata(
+            &adopted_spec,
+            decoder,
+            source_label,
+            play_ep,
+            cancel,
+            track_meta,
+        )
     }
 
     /// Opens a [`StreamSourceSpec`] asynchronously using this player's L2 cache manager,
@@ -3863,6 +4312,27 @@ impl AudioPlayer {
         play_ep: u64,
         cancel: CancellationToken,
     ) -> Result<(), CoreAudioError> {
+        self.start_opened_source_spec_with_metadata(
+            spec,
+            decoder,
+            source_label,
+            play_ep,
+            cancel,
+            None,
+        )
+    }
+
+    /// Commits a pre-opened `decoder` for `spec` with deck track metadata if `play_ep` and
+    /// `cancel` are still current.
+    pub fn start_opened_source_spec_with_metadata(
+        &self,
+        spec: &StreamSourceSpec,
+        decoder: Box<dyn AudioDecoder>,
+        source_label: &str,
+        play_ep: u64,
+        cancel: CancellationToken,
+        track_meta: Option<DeckTrackMetadata>,
+    ) -> Result<(), CoreAudioError> {
         if let StreamSourceSpec::ExternalBackend {
             key, provider_id, ..
         } = spec
@@ -3879,6 +4349,7 @@ impl AudioPlayer {
             source_label,
             cancel,
             Some(play_ep),
+            track_meta,
         )
     }
 
@@ -3891,12 +4362,34 @@ impl AudioPlayer {
         play_ep: u64,
         cancel: CancellationToken,
     ) -> Result<(), CoreAudioError> {
+        self.start_opened_decoder_with_epoch_and_metadata(
+            stream,
+            decoder,
+            source_label,
+            play_ep,
+            cancel,
+            None,
+        )
+    }
+
+    /// Commits a pre-opened legacy `stream` decoder with deck track metadata if `play_ep` and
+    /// `cancel` are still current.
+    pub fn start_opened_decoder_with_epoch_and_metadata(
+        &self,
+        stream: &StreamSource,
+        decoder: Box<dyn AudioDecoder>,
+        source_label: &str,
+        play_ep: u64,
+        cancel: CancellationToken,
+        track_meta: Option<DeckTrackMetadata>,
+    ) -> Result<(), CoreAudioError> {
         self.commit_opened_decoder(
             PlayerOrigin::Legacy(stream.clone()),
             decoder,
             source_label,
             cancel,
             Some(play_ep),
+            track_meta,
         )
     }
 
@@ -3906,6 +4399,16 @@ impl AudioPlayer {
         &self,
         stream: StreamSource,
         source_label: &str,
+    ) -> Result<(), CoreAudioError> {
+        self.play_stream_with_metadata(stream, source_label, None)
+    }
+
+    /// Opens a `StreamSource` with explicit deck track metadata and starts streaming playback.
+    pub fn play_stream_with_metadata(
+        &self,
+        stream: StreamSource,
+        source_label: &str,
+        track_meta: Option<DeckTrackMetadata>,
     ) -> Result<(), CoreAudioError> {
         let cancel = CancellationToken::new();
         let Some(play_ep) = self.swap_cancel_and_bump_epoch(None, cancel.clone()) else {
@@ -3931,6 +4434,7 @@ impl AudioPlayer {
             source_label,
             cancel,
             Some(play_ep),
+            track_meta,
         )
     }
 
@@ -3940,6 +4444,17 @@ impl AudioPlayer {
         stream: &StreamSource,
         decoder: Box<dyn AudioDecoder>,
         source_label: &str,
+    ) -> Result<(), CoreAudioError> {
+        self.start_opened_decoder_with_metadata(stream, decoder, source_label, None)
+    }
+
+    /// Commits a pre-opened `decoder` with deck track metadata into active playback.
+    pub fn start_opened_decoder_with_metadata(
+        &self,
+        stream: &StreamSource,
+        decoder: Box<dyn AudioDecoder>,
+        source_label: &str,
+        track_meta: Option<DeckTrackMetadata>,
     ) -> Result<(), CoreAudioError> {
         let cancel = CancellationToken::new();
         let Some(play_ep) = self.swap_cancel_and_bump_epoch(None, cancel.clone()) else {
@@ -3951,6 +4466,7 @@ impl AudioPlayer {
             source_label,
             cancel,
             Some(play_ep),
+            track_meta,
         )
     }
 
@@ -3961,6 +4477,7 @@ impl AudioPlayer {
         source_label: &str,
         cancel: CancellationToken,
         expected_play_epoch: Option<u64>,
+        track_meta: Option<DeckTrackMetadata>,
     ) -> Result<(), CoreAudioError> {
         let label = if source_label.trim().is_empty() {
             match &origin {
@@ -3976,6 +4493,31 @@ impl AudioPlayer {
             .duration()
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let effective_track_meta = track_meta.map(|mut m| {
+            if duration_ms > 0 {
+                m.duration_ms = duration_ms;
+            }
+            m
+        });
+
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        if let Some(expected) = expected_play_epoch
+            && self.inner.play_epoch.load(Ordering::SeqCst) != expected
+        {
+            return Ok(());
+        }
+
+        // Resolve preview target OUTSIDE `epoch_lock` using existing active metadata or TTL-cached
+        // capabilities so we never run COM/ASIO device probing while holding any control lock.
+        let (preview_backend, preview_device) = self
+            .inner
+            .active_meta
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|m| (m.backend, m.device_name.clone())))
+            .unwrap_or_else(|| self.preview_output_target());
 
         let session_id = {
             let _ep_guard = self
@@ -3991,6 +4533,9 @@ impl AudioPlayer {
             {
                 return Ok(());
             }
+            if expected_play_epoch.is_none() {
+                self.inner.playback_epoch.fetch_add(1, Ordering::SeqCst);
+            }
 
             if let Ok(mut q) = self.inner.queued_next.write() {
                 *q = None;
@@ -4001,14 +4546,11 @@ impl AudioPlayer {
             self.inner
                 .has_queued_next_spec
                 .store(false, Ordering::SeqCst);
-            self.inner.dual_deck.cancel_standby();
-            let active_idx = self.inner.dual_deck.active_idx();
-            let _ = self.inner.dual_deck.cancel_and_join_deck(active_idx);
-            self.inner.dual_deck.active_deck_idx.store(0, Ordering::SeqCst);
-            self.inner.dual_deck.deck_states[0].store(DeckState::Playing as u8, Ordering::SeqCst);
-            self.inner.dual_deck.deck_states[1].store(DeckState::Idle as u8, Ordering::SeqCst);
-            self.inner.dual_deck.set_deck_key(0, origin.stream_key());
-            self.inner.dual_deck.set_deck_key(1, None);
+
+            // Transition any live output stream into silent keep-alive BEFORE bumping
+            // `current_session_id` so matching formats can hot-swap without hardware teardown.
+            self.inner.enter_output_skip_silence();
+
             if let Ok(mut rg_lock) = self.inner.track_replay_gain.write() {
                 *rg_lock = origin
                     .replay_gain_tags()
@@ -4021,12 +4563,6 @@ impl AudioPlayer {
                 };
             }
             self.inner.dsp_generation.fetch_add(1, Ordering::SeqCst);
-
-            if let Ok(fade_lock) = self.inner.active_fade.read()
-                && let Some(ref fc) = *fade_lock
-            {
-                fc.request_stop_fade_out();
-            }
 
             let sid = self
                 .inner
@@ -4054,7 +4590,6 @@ impl AudioPlayer {
                 .state_code
                 .store(PlaybackLifecycleState::Playing as i32, Ordering::SeqCst);
 
-            let (preview_backend, preview_device) = self.preview_output_target();
             if let Ok(mut meta_lock) = self.inner.active_meta.write() {
                 *meta_lock = Some(ActiveTrackMeta {
                     path: path_buf.clone(),
@@ -4064,25 +4599,73 @@ impl AudioPlayer {
                     resampled_to_hz: None,
                     backend: preview_backend,
                     device_name: preview_device,
+                    track_meta: effective_track_meta.clone(),
                 });
+            }
+            if let Ok(mut tm_lock) = self.inner.active_track_metadata.write() {
+                *tm_lock = effective_track_meta.clone();
             }
             sid
         };
 
+        // Non-blocking deck cancellation & retirement outside `epoch_lock` (zero `jh.join()`).
+        self.inner
+            .dual_deck
+            .cancel_standby_nonblocking(&self.inner.reaper);
+        self.inner
+            .dual_deck
+            .cancel_active_nonblocking(&self.inner.reaper);
+        if cancel.is_cancelled()
+            || self.inner.current_session_id.load(Ordering::Acquire) != session_id
+        {
+            return Ok(());
+        }
+        self.inner
+            .dual_deck
+            .active_deck_idx
+            .store(0, Ordering::SeqCst);
+        self.inner.dual_deck.deck_states[0].store(DeckState::Playing as u8, Ordering::SeqCst);
+        self.inner.dual_deck.deck_states[1].store(DeckState::Idle as u8, Ordering::SeqCst);
+        self.inner.dual_deck.set_deck_key(0, origin.stream_key());
+        self.inner.dual_deck.set_deck_key(1, None);
+        self.inner
+            .dual_deck
+            .set_deck_track_meta(0, effective_track_meta.clone());
+        self.inner.dual_deck.set_deck_track_meta(1, None);
+        self.inner.dual_deck.committed_deck_gen.store(
+            self.inner.dual_deck.deck_gen_for(0),
+            Ordering::Release,
+        );
+
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self
-            .cmd_tx
-            .send(PlayerCommand::Start {
+        let displaced = {
+            let mut slot = self
+                .inner
+                .latest_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cancel.is_cancelled()
+                || self.inner.current_session_id.load(Ordering::Acquire) != session_id
+            {
+                return Ok(());
+            }
+            slot.replace(PendingStart {
                 session_id,
                 decoder,
                 path: path_buf,
                 source_label: label,
                 origin,
-                cancel_token: cancel,
+                track_meta: effective_track_meta,
+                cancel_token: cancel.clone(),
                 ack_tx,
             })
-            .is_err()
-        {
+        };
+        if let Some(old) = displaced {
+            let _ = old.ack_tx.send(Ok(()));
+        }
+
+        if self.cmd_tx.send(PlayerCommand::ApplyLatestStart).is_err() {
+            self.inner.clear_latest_start();
             let msg = "Audio coordinator thread is shut down".to_string();
             if let Ok(mut err_lock) = self.inner.last_error.write() {
                 *err_lock = Some(msg.clone());
@@ -4097,16 +4680,25 @@ impl AudioPlayer {
         match ack_rx.recv() {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
-                if let Ok(mut err_lock) = self.inner.last_error.write() {
-                    *err_lock = Some(e.to_string());
+                if !cancel.is_cancelled()
+                    && self.inner.current_session_id.load(Ordering::Acquire) == session_id
+                {
+                    if let Ok(mut err_lock) = self.inner.last_error.write() {
+                        *err_lock = Some(e.to_string());
+                    }
+                    self.inner.stopped.store(true, Ordering::SeqCst);
+                    self.inner
+                        .state_code
+                        .store(PlaybackLifecycleState::Error as i32, Ordering::SeqCst);
                 }
-                self.inner.stopped.store(true, Ordering::SeqCst);
-                self.inner
-                    .state_code
-                    .store(PlaybackLifecycleState::Error as i32, Ordering::SeqCst);
                 Err(e)
             }
             Err(_) => {
+                if cancel.is_cancelled()
+                    || self.inner.current_session_id.load(Ordering::Acquire) != session_id
+                {
+                    return Ok(());
+                }
                 let msg = "Audio coordinator failed to acknowledge stream start".to_string();
                 if let Ok(mut err_lock) = self.inner.last_error.write() {
                     *err_lock = Some(msg.clone());
@@ -4158,9 +4750,71 @@ impl AudioPlayer {
         self.inner.format_reinit_count.load(Ordering::Relaxed)
     }
 
+    /// Returns the monotonic dual-deck standby-to-active transition counter.
+    pub fn swap_generation(&self) -> u64 {
+        self.inner.dual_deck.swap_generation.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` when an RT deck flip has occurred and `relay_loop` has not yet committed
+    /// the promoted deck's metadata snapshot into `PlayerInner`.
+    pub fn has_pending_transition_commit(&self) -> bool {
+        let active_idx = self.inner.dual_deck.active_idx();
+        let active_gen = self.inner.dual_deck.deck_gen_for(active_idx);
+        let committed_gen = self.inner.dual_deck.committed_deck_gen.load(Ordering::Acquire);
+        active_gen != 0
+            && active_gen != committed_gen
+            && self.inner.dual_deck.deck_state(active_idx) != DeckState::Idle
+    }
+
+    /// Returns metadata for the currently active playback track, if known.
+    pub fn active_track_metadata(&self) -> Option<DeckTrackMetadata> {
+        let active_idx = self.inner.dual_deck.active_idx();
+        if self.has_pending_transition_commit() {
+            if let Ok(mg) = self.inner.dual_deck.deck_meta[active_idx].read()
+                && let Some(ref snap) = *mg
+            {
+                return patched_track_meta(snap);
+            }
+            if let Ok(tg) = self.inner.dual_deck.deck_track_meta[active_idx].read()
+                && let Some(ref m) = *tg
+            {
+                return Some(m.clone());
+            }
+        }
+        self.inner
+            .active_track_metadata
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Updates metadata for the currently active playback track.
+    pub fn set_active_track_metadata(&self, meta: Option<DeckTrackMetadata>) {
+        if let Ok(mut lock) = self.inner.active_track_metadata.write() {
+            *lock = meta.clone();
+        }
+        if let Ok(mut am_lock) = self.inner.active_meta.write()
+            && let Some(ref mut am) = *am_lock
+        {
+            am.track_meta = meta.clone();
+        }
+        let active_idx = self.inner.dual_deck.active_idx();
+        if self.inner.dual_deck.deck_state(active_idx) != DeckState::Idle {
+            self.inner
+                .dual_deck
+                .set_deck_track_meta(active_idx, meta.clone());
+            if let Ok(mut mg) = self.inner.dual_deck.deck_meta[active_idx].write()
+                && let Some(ref mut snap) = *mg
+            {
+                snap.track_meta = meta;
+            }
+        }
+    }
+
     /// Returns a live snapshot of both physical decks (`Deck A` / `Deck B`), standby buffer
     /// depth, and transition telemetry counters.
     pub fn dual_deck_status(&self) -> DualDeckStatusSnapshot {
+        let swap_generation = self.swap_generation();
         let keys = self
             .inner
             .dual_deck
@@ -4190,6 +4844,9 @@ impl AudioPlayer {
                 .dual_deck
                 .format_mismatch_recoveries
                 .load(Ordering::Relaxed),
+            swap_generation,
+            playback_epoch: self.playback_epoch(),
+            active_track: self.active_track_metadata(),
         }
     }
 
@@ -4211,6 +4868,17 @@ impl AudioPlayer {
     /// Registers a next queued [`StreamSourceSpec`] for automatic pre-decoding onto Standby
     /// once Active reaches `<= 20s` remaining or `> 75%` progress. Skips `ExternalBackend`.
     pub fn queue_next_spec(&self, spec: StreamSourceSpec, source_label: Option<String>) {
+        self.queue_next_spec_with_metadata(spec, source_label, None);
+    }
+
+    /// Registers a next queued [`StreamSourceSpec`] with deck track metadata for automatic
+    /// pre-decoding onto Standby.
+    pub fn queue_next_spec_with_metadata(
+        &self,
+        spec: StreamSourceSpec,
+        source_label: Option<String>,
+        track_meta: Option<DeckTrackMetadata>,
+    ) {
         if matches!(spec, StreamSourceSpec::ExternalBackend { .. }) {
             if let Ok(mut qs) = self.inner.queued_next_spec.write() {
                 *qs = None;
@@ -4224,7 +4892,7 @@ impl AudioPlayer {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| source_spec_default_label(&spec));
         if let Ok(mut qs) = self.inner.queued_next_spec.write() {
-            *qs = Some((spec, label));
+            *qs = Some((spec, label, track_meta));
         }
         self.inner
             .has_queued_next_spec
@@ -4236,6 +4904,27 @@ impl AudioPlayer {
     /// its decode thread on a `Condvar` until promoted or replaced.
     /// Cleanly skips [`StreamSourceSpec::ExternalBackend`] (e.g., Apple Music).
     pub fn prepare_standby_spec(&self, spec: StreamSourceSpec) -> Result<(), CoreAudioError> {
+        self.prepare_standby_spec_with_metadata(spec, None)
+    }
+
+    /// Pre-resolves and pre-decodes 2–3 seconds of `spec` with deck track metadata onto the
+    /// Standby deck.
+    pub fn prepare_standby_spec_with_metadata(
+        &self,
+        spec: StreamSourceSpec,
+        track_meta: Option<DeckTrackMetadata>,
+    ) -> Result<(), CoreAudioError> {
+        self.prepare_standby_spec_with_label_and_metadata(spec, None, track_meta)
+    }
+
+    /// Pre-resolves and pre-decodes `spec` onto the Standby deck with an optional source label
+    /// and deck track metadata.
+    pub fn prepare_standby_spec_with_label_and_metadata(
+        &self,
+        spec: StreamSourceSpec,
+        source_label: Option<&str>,
+        track_meta: Option<DeckTrackMetadata>,
+    ) -> Result<(), CoreAudioError> {
         if matches!(spec, StreamSourceSpec::ExternalBackend { .. }) {
             let _op_guard = self
                 .inner
@@ -4243,10 +4932,16 @@ impl AudioPlayer {
                 .skip_lock
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            self.inner.dual_deck.cancel_standby();
+            self.inner
+                .dual_deck
+                .cancel_standby_nonblocking(&self.inner.reaper);
             return Ok(());
         }
-        let label = source_spec_default_label(&spec);
+        let label = source_label
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| source_spec_default_label(&spec));
         self.prepare_standby_internal(
             PlayerOrigin::SourceSpec(spec),
             label,
@@ -4254,6 +4949,8 @@ impl AudioPlayer {
             false,
             None,
             None,
+            track_meta,
+            false,
         )
     }
 
@@ -4262,6 +4959,17 @@ impl AudioPlayer {
         &self,
         stream: StreamSource,
         label: impl Into<String>,
+    ) -> Result<(), CoreAudioError> {
+        self.prepare_standby_with_metadata(stream, label, None)
+    }
+
+    /// Pre-resolves and pre-decodes a legacy `StreamSource` with deck track metadata onto the
+    /// Standby deck.
+    pub fn prepare_standby_with_metadata(
+        &self,
+        stream: StreamSource,
+        label: impl Into<String>,
+        track_meta: Option<DeckTrackMetadata>,
     ) -> Result<(), CoreAudioError> {
         let raw_label = label.into();
         let eff_label = if raw_label.trim().is_empty() {
@@ -4276,34 +4984,36 @@ impl AudioPlayer {
             false,
             None,
             None,
+            track_meta,
+            false,
         )
     }
 
     /// Performs a zero-latency switch to the Standby deck if it is `StandbyReady`.
     /// Returns `Ok(true)` when the fast transition completes, or `Ok(false)` if Standby is not ready.
     pub fn skip_to_standby(&self) -> Result<bool, CoreAudioError> {
-        let _op_guard = self
-            .inner
-            .dual_deck
-            .skip_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let (sb, cur, sb_gen, compat, flip_before, needs_reopen, req) = {
+            let _op_guard = self
+                .inner
+                .dual_deck
+                .skip_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
 
-        let sb = self.inner.dual_deck.standby_idx();
-        let cur = 1 - sb;
-        if self.inner.dual_deck.deck_state(sb) != DeckState::StandbyReady {
-            return Ok(false);
-        }
+            let sb = self.inner.dual_deck.standby_idx();
+            let cur = 1 - sb;
+            if self.inner.dual_deck.deck_state(sb) != DeckState::StandbyReady {
+                return Ok(false);
+            }
 
-        let sb_gen = self.inner.dual_deck.deck_gen_for(sb);
-        let compat = self.inner.dual_deck.standby_compatible[sb].load(Ordering::Acquire);
-        let state = self.inner.state_code.load(Ordering::Acquire);
-        let is_paused = self.inner.paused.load(Ordering::Acquire);
-        let has_active_output = !self.inner.stopped.load(Ordering::Acquire)
-            && (state == PlaybackLifecycleState::Playing as i32
-                || state == PlaybackLifecycleState::Paused as i32);
+            let sb_gen = self.inner.dual_deck.deck_gen_for(sb);
+            let compat = self.inner.dual_deck.standby_compatible[sb].load(Ordering::Acquire);
+            let state = self.inner.state_code.load(Ordering::Acquire);
+            let is_paused = self.inner.paused.load(Ordering::Acquire);
+            let has_active_output = !self.inner.stopped.load(Ordering::Acquire)
+                && (state == PlaybackLifecycleState::Playing as i32
+                    || state == PlaybackLifecycleState::Paused as i32);
 
-        if !has_active_output || is_paused {
             let flip_before = self
                 .inner
                 .dual_deck
@@ -4312,22 +5022,43 @@ impl AudioPlayer {
                 .lock()
                 .map(|g| *g)
                 .unwrap_or(0);
-            if self
-                .cmd_tx
-                .send(PlayerCommand::ReopenOntoStandby {
-                    from_deck: cur,
-                    to_deck: sb,
-                    to_deck_gen: sb_gen,
-                    is_manual_skip: true,
-                    is_mismatch_recovery: false,
-                })
-                .is_err()
-            {
-                return Err(CoreAudioError::Backend(BackendError::InvalidState(
-                    "Audio coordinator shut down".into(),
-                )));
+
+            if !has_active_output || is_paused {
+                if self
+                    .cmd_tx
+                    .send(PlayerCommand::ReopenOntoStandby {
+                        from_deck: cur,
+                        to_deck: sb,
+                        to_deck_gen: sb_gen,
+                        is_manual_skip: true,
+                        is_mismatch_recovery: false,
+                    })
+                    .is_err()
+                {
+                    return Err(CoreAudioError::Backend(BackendError::InvalidState(
+                        "Audio coordinator shut down".into(),
+                    )));
+                }
+                (sb, cur, sb_gen, compat, flip_before, true, 0u64)
+            } else {
+                self.inner
+                    .dual_deck
+                    .skip_target_deck
+                    .store(sb as u8, Ordering::Release);
+                let req = self
+                    .inner
+                    .dual_deck
+                    .skip_request_seq
+                    .fetch_add(1, Ordering::AcqRel)
+                    + 1;
+                (sb, cur, sb_gen, compat, flip_before, false, req)
             }
-            let (lock, cvar) = &self.inner.dual_deck.flip_done_sync;
+        };
+        // `skip_lock` is released BEFORE waiting on `flip_done_sync` to eliminate any
+        // AB-BA deadlock with `coordinator_loop` (`TriggerAutoStandby`).
+
+        let (lock, cvar) = &self.inner.dual_deck.flip_done_sync;
+        if needs_reopen {
             if let Ok(mut g) = lock.lock() {
                 let deadline = Instant::now() + Duration::from_millis(500);
                 while *g == flip_before && Instant::now() < deadline {
@@ -4339,28 +5070,7 @@ impl AudioPlayer {
             return Ok(self.inner.dual_deck.active_idx() == sb);
         }
 
-        let flip_before = self
-            .inner
-            .dual_deck
-            .flip_done_sync
-            .0
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
-
-        self.inner
-            .dual_deck
-            .skip_target_deck
-            .store(sb as u8, Ordering::Release);
-        let req = self
-            .inner
-            .dual_deck
-            .skip_request_seq
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-
         let wait_ms = if compat { 80 } else { 400 };
-        let (lock, cvar) = &self.inner.dual_deck.flip_done_sync;
         if let Ok(mut g) = lock.lock() {
             let deadline = Instant::now() + Duration::from_millis(wait_ms);
             while *g == flip_before && Instant::now() < deadline {
@@ -4371,6 +5081,16 @@ impl AudioPlayer {
         }
 
         if self.inner.dual_deck.active_idx() == sb {
+            if self.has_pending_transition_commit()
+                && let Ok(mut g) = lock.lock()
+            {
+                let commit_deadline = Instant::now() + Duration::from_millis(120);
+                while self.has_pending_transition_commit() && Instant::now() < commit_deadline {
+                    let rem = commit_deadline.saturating_duration_since(Instant::now());
+                    let (ng, _) = cvar.wait_timeout(g, rem).unwrap_or_else(|e| e.into_inner());
+                    g = ng;
+                }
+            }
             return Ok(true);
         }
 
@@ -4446,6 +5166,7 @@ impl AudioPlayer {
         let out_rate = self.inner.out_sample_rate.load(Ordering::Acquire).max(8_000) as u128;
         let target_frame = ((target_pts_ms as u128) * out_rate / 1000) as u64;
         let label = source_spec_default_label(&fresh_spec);
+        let current_track_meta = self.active_track_metadata();
 
         self.prepare_standby_internal(
             PlayerOrigin::SourceSpec(fresh_spec),
@@ -4454,9 +5175,12 @@ impl AudioPlayer {
             true,
             Some(target_pts_ms),
             Some(target_frame),
+            current_track_meta,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_standby_internal(
         &self,
         origin: PlayerOrigin,
@@ -4465,21 +5189,41 @@ impl AudioPlayer {
         is_mismatch_recovery: bool,
         mismatch_pts_ms: Option<u64>,
         mismatch_frame: Option<u64>,
+        track_meta: Option<DeckTrackMetadata>,
+        try_skip_lock: bool,
     ) -> Result<(), CoreAudioError> {
-        let _op_guard = self
-            .inner
-            .dual_deck
-            .skip_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _op_guard = if try_skip_lock {
+            match self.inner.dual_deck.skip_lock.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(()),
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            }
+        } else {
+            self.inner
+                .dual_deck
+                .skip_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        };
 
         let sb = self.inner.dual_deck.standby_idx();
-        let _ = self.inner.dual_deck.cancel_and_join_deck(sb);
+        let _lifecycle_guard = self
+            .inner
+            .dual_deck
+            .deck_lifecycle_locks[sb]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner
+            .dual_deck
+            .cancel_and_retire_deck(sb, &self.inner.reaper);
 
         let deck_gen = self.inner.dual_deck.alloc_deck_gen(sb);
         self.inner.dual_deck.deck_states[sb]
             .store(DeckState::Resolving as u8, Ordering::SeqCst);
         self.inner.dual_deck.set_deck_key(sb, origin.stream_key());
+        self.inner
+            .dual_deck
+            .set_deck_track_meta(sb, track_meta.clone());
         self.inner
             .dual_deck
             .standby_buffered_ms
@@ -4501,6 +5245,7 @@ impl AudioPlayer {
         let worker_cancel_flag = Arc::clone(&cancel_flag);
         let worker_cancel_token = cancel_token.clone();
         let worker_wake = Arc::clone(&wake);
+        let thread_guard_counter = Arc::clone(&self.inner.live_decode_threads);
 
         let mut entry_guard = self.inner.dual_deck.decode_entries[sb]
             .lock()
@@ -4509,6 +5254,7 @@ impl AudioPlayer {
         let jh = thread::Builder::new()
             .name(format!("lumina-deck-standby-{sb}"))
             .spawn(move || {
+                let _live_guard = DecodeThreadGuard::new(&thread_guard_counter);
                 run_standby_deck_worker(
                     worker_inner,
                     worker_cmd_tx,
@@ -4516,6 +5262,7 @@ impl AudioPlayer {
                     deck_gen,
                     origin,
                     label,
+                    track_meta,
                     bypass_l2_read,
                     is_mismatch_recovery,
                     mismatch_pts_ms.unwrap_or(0),
@@ -4529,6 +5276,7 @@ impl AudioPlayer {
                 self.inner.dual_deck.deck_states[sb]
                     .store(DeckState::Idle as u8, Ordering::SeqCst);
                 self.inner.dual_deck.set_deck_key(sb, None);
+                self.inner.dual_deck.set_deck_track_meta(sb, None);
                 CoreAudioError::Backend(BackendError::DriverError(format!(
                     "Failed to spawn standby deck worker: {e}"
                 )))
@@ -4582,17 +5330,32 @@ impl AudioPlayer {
     }
 
     pub fn stop(&self) {
+        self.inner.clear_latest_start();
         if let Ok(fade_lock) = self.inner.active_fade.read()
             && let Some(ref fc) = *fade_lock
         {
             fc.request_stop_fade_out();
         }
         let _ = self.swap_cancel_and_bump_epoch(None, CancellationToken::new());
-        self.inner.dual_deck.cancel_standby();
+        self.inner
+            .dual_deck
+            .cancel_standby_nonblocking(&self.inner.reaper);
+        self.inner
+            .dual_deck
+            .cancel_active_nonblocking(&self.inner.reaper);
         self.inner.dual_deck.deck_states[0].store(DeckState::Idle as u8, Ordering::SeqCst);
         self.inner.dual_deck.deck_states[1].store(DeckState::Idle as u8, Ordering::SeqCst);
         self.inner.dual_deck.set_deck_key(0, None);
         self.inner.dual_deck.set_deck_key(1, None);
+        self.inner.dual_deck.set_deck_track_meta(0, None);
+        self.inner.dual_deck.set_deck_track_meta(1, None);
+        self.inner
+            .dual_deck
+            .committed_deck_gen
+            .store(0, Ordering::Release);
+        if let Ok(mut tm_lock) = self.inner.active_track_metadata.write() {
+            *tm_lock = None;
+        }
         self.inner
             .dual_deck
             .standby_buffered_ms
@@ -5065,6 +5828,9 @@ impl AudioPlayer {
         if let Ok(mut guard) = self.inner.selected_output.write() {
             *guard = (clean_id, effective_backend);
         }
+        self.inner
+            .cached_clock_source
+            .store(CLOCK_SRC_UNINIT, Ordering::Release);
 
         // Switching to explicit WASAPI Shared clears Strict Bit-Perfect Mode before a single
         // RerouteOutput so Shared playback immediately restores normal volume/DSP rules.
@@ -5224,6 +5990,10 @@ impl AudioPlayer {
         if self.inner.headless {
             return "stream_frames";
         }
+        let cached = self.inner.cached_clock_source.load(Ordering::Acquire);
+        if cached != CLOCK_SRC_UNINIT {
+            return clock_src_to_str(cached);
+        }
         let (sel_id, sel_backend) = self
             .inner
             .selected_output
@@ -5231,13 +6001,11 @@ impl AudioPlayer {
             .map(|g| g.clone())
             .unwrap_or((None, None));
         let caps = resolve_target_capabilities(&self.inner, sel_id.as_deref(), sel_backend);
-        if caps.backend == OutputBackendKind::WindowsAsio {
-            "asio_hardware"
-        } else if caps.backend == OutputBackendKind::WindowsWasapiExclusive {
-            "wasapi_hardware"
-        } else {
-            "stream_frames"
-        }
+        let code = backend_to_clock_src(false, caps.backend);
+        self.inner
+            .cached_clock_source
+            .store(code, Ordering::Release);
+        clock_src_to_str(code)
     }
 
     pub fn hardware_clock_position_ms(&self) -> Option<u64> {
@@ -5630,25 +6398,29 @@ fn open_segmented_proxy_sync(
     let (tx, rx) = mpsc::sync_channel(1);
     let needs_epoch_reset = provider_needs_network_epoch_reset(&key.provider_id);
     rt.spawn(async move {
-        let res = async {
-            let transport = Arc::new(ReqwestStreamTransport::shared()?);
-            SegmentedStreamProxy::open_with_refresh(
-                manifest_url_or_xml,
-                &headers,
-                None,
-                mime_type,
-                transport,
-                StreamHttpConfig::default(),
-                cancel,
-                Some(key),
-                refresh_handler,
-                needs_epoch_reset,
-                DEFAULT_REFRESH_403_BACKOFFS,
-                subscribe_network_epoch(),
-            )
-            .await
-        }
-        .await;
+        let cancel_sel = cancel.clone();
+        let res = tokio::select! {
+            biased;
+            _ = cancel_sel.cancelled() => Err(StreamError::Cancelled),
+            r = async {
+                let transport = Arc::new(ReqwestStreamTransport::shared()?);
+                SegmentedStreamProxy::open_with_refresh(
+                    manifest_url_or_xml,
+                    &headers,
+                    None,
+                    mime_type,
+                    transport,
+                    StreamHttpConfig::default(),
+                    cancel,
+                    Some(key),
+                    refresh_handler,
+                    needs_epoch_reset,
+                    DEFAULT_REFRESH_403_BACKOFFS,
+                    subscribe_network_epoch(),
+                )
+                .await
+            } => r,
+        };
         let _ = tx.send(res);
     });
     rx.recv()
@@ -5670,48 +6442,71 @@ async fn open_segmented_proxy_async(
     let rt = streaming_runtime().map_err(stream_error_to_core)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let needs_epoch_reset = provider_needs_network_epoch_reset(&key.provider_id);
+    let cancel_outer = cancel.clone();
     rt.spawn(async move {
-        let res = async {
-            let transport = Arc::new(ReqwestStreamTransport::shared()?);
-            SegmentedStreamProxy::open_with_refresh(
-                manifest_url_or_xml,
-                &headers,
-                None,
-                mime_type,
-                transport,
-                StreamHttpConfig::default(),
-                cancel,
-                Some(key),
-                refresh_handler,
-                needs_epoch_reset,
-                DEFAULT_REFRESH_403_BACKOFFS,
-                subscribe_network_epoch(),
-            )
-            .await
-        }
-        .await;
+        let cancel_sel = cancel.clone();
+        let res = tokio::select! {
+            biased;
+            _ = cancel_sel.cancelled() => Err(StreamError::Cancelled),
+            r = async {
+                let transport = Arc::new(ReqwestStreamTransport::shared()?);
+                SegmentedStreamProxy::open_with_refresh(
+                    manifest_url_or_xml,
+                    &headers,
+                    None,
+                    mime_type,
+                    transport,
+                    StreamHttpConfig::default(),
+                    cancel,
+                    Some(key),
+                    refresh_handler,
+                    needs_epoch_reset,
+                    DEFAULT_REFRESH_403_BACKOFFS,
+                    subscribe_network_epoch(),
+                )
+                .await
+            } => r,
+        };
         let _ = tx.send(res);
     });
-    rx.await
-        .map_err(|_| CoreAudioError::Io(StreamError::Cancelled.to_io_error()))?
-        .map_err(stream_error_to_core)
+    tokio::select! {
+        biased;
+        _ = cancel_outer.cancelled() => Err(CoreAudioError::Io(StreamError::Cancelled.to_io_error())),
+        res = rx => res
+            .map_err(|_| CoreAudioError::Io(StreamError::Cancelled.to_io_error()))?
+            .map_err(stream_error_to_core),
+    }
 }
 
-fn run_on_streaming_runtime<F, T>(fut: F) -> Result<T, StreamError>
+fn run_on_streaming_runtime_cancellable<F, T>(
+    fut: F,
+    cancel: &CancellationToken,
+) -> Result<T, StreamError>
 where
     F: std::future::Future<Output = Result<T, StreamError>> + Send + 'static,
     T: Send + 'static,
 {
+    if cancel.is_cancelled() {
+        return Err(StreamError::Cancelled);
+    }
     let rt = streaming_runtime()?;
+    let cancel_c = cancel.clone();
+    let wrapped = async move {
+        tokio::select! {
+            biased;
+            _ = cancel_c.cancelled() => Err(StreamError::Cancelled),
+            res = fut => res,
+        }
+    };
     if tokio::runtime::Handle::try_current().is_ok() {
         let (tx, rx) = mpsc::sync_channel(1);
         rt.spawn(async move {
-            let _ = tx.send(fut.await);
+            let _ = tx.send(wrapped.await);
         });
         rx.recv()
             .map_err(|_| StreamError::Io("L2 runtime channel closed".to_string()))?
     } else {
-        rt.block_on(fut)
+        rt.block_on(wrapped)
     }
 }
 
@@ -5779,9 +6574,7 @@ async fn wait_for_l2_stable_play_gate(
             return None;
         }
         if let Some(wi) = weak_inner {
-            let Some(inner) = wi.upgrade() else {
-                return None;
-            };
+            let inner = wi.upgrade()?;
             if inner.stopped.load(Ordering::Relaxed) {
                 return None;
             }
@@ -5934,9 +6727,16 @@ fn open_bridge_for_sync_spec(
             let l2_hit = if !bypass_l2_read && let Some(ref l2) = l2_manager {
                 let l2_c = Arc::clone(l2);
                 let key_c = key.clone();
-                run_on_streaming_runtime(async move { l2_c.lookup_direct_head(&key_c).await })
-                    .ok()
-                    .flatten()
+                match run_on_streaming_runtime_cancellable(
+                    async move { l2_c.lookup_direct_head(&key_c).await },
+                    &cancel,
+                ) {
+                    Ok(hit) => hit,
+                    Err(StreamError::Cancelled) => {
+                        return Err(CoreAudioError::Io(StreamError::Cancelled.to_io_error()));
+                    }
+                    Err(_) => None,
+                }
             } else {
                 None
             };
@@ -6009,9 +6809,16 @@ fn open_bridge_for_sync_spec(
                 let l2_hit = if !bypass_l2_read && let Some(ref l2) = l2_manager {
                     let l2_c = Arc::clone(l2);
                     let key_c = key.clone();
-                    run_on_streaming_runtime(async move { l2_c.lookup_direct_head(&key_c).await })
-                        .ok()
-                        .flatten()
+                    match run_on_streaming_runtime_cancellable(
+                        async move { l2_c.lookup_direct_head(&key_c).await },
+                        &cancel,
+                    ) {
+                        Ok(hit) => hit,
+                        Err(StreamError::Cancelled) => {
+                            return Err(CoreAudioError::Io(StreamError::Cancelled.to_io_error()));
+                        }
+                        Err(_) => None,
+                    }
                 } else {
                     None
                 };
@@ -6184,13 +6991,27 @@ fn open_decoder_for_source_spec_with_l2_adopted(
 async fn lookup_dash_head_async(
     l2: Arc<L2CacheManager>,
     key: StreamKey,
+    cancel: &CancellationToken,
 ) -> Option<crate::streaming::L2DashHit> {
+    if cancel.is_cancelled() {
+        return None;
+    }
     let rt = streaming_runtime().ok()?;
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let cancel_inner = cancel.clone();
     rt.spawn(async move {
-        let _ = tx.send(l2.lookup_dash_head(&key).await.ok().flatten());
+        let hit = tokio::select! {
+            biased;
+            _ = cancel_inner.cancelled() => None,
+            res = l2.lookup_dash_head(&key) => res.ok().flatten(),
+        };
+        let _ = tx.send(hit);
     });
-    rx.await.ok().flatten()
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        res = rx => res.ok().flatten(),
+    }
 }
 
 async fn open_decoder_for_source_spec_async_with_l2(
@@ -6242,7 +7063,8 @@ async fn open_decoder_for_source_spec_async_with_l2(
 
                 if !current_bypass_l2
                     && let Some(ref l2) = l2_manager
-                    && let Some(hit) = lookup_dash_head_async(Arc::clone(l2), key.clone()).await
+                    && let Some(hit) =
+                        lookup_dash_head_async(Arc::clone(l2), key.clone(), &cancel).await
                 {
                     let cfg = HybridSegmentedConfig {
                         headers: headers.clone(),
@@ -6441,11 +7263,17 @@ fn open_decoder_for_source_spec_once(
             if !bypass_l2_read && let Some(ref l2) = l2_manager {
                 let l2_c = Arc::clone(l2);
                 let key_c = key.clone();
-                if let Some(hit) = run_on_streaming_runtime(async move {
-                    l2_c.lookup_dash_head(&key_c).await
-                })
-                .ok()
-                .flatten()
+                let dash_hit = match run_on_streaming_runtime_cancellable(
+                    async move { l2_c.lookup_dash_head(&key_c).await },
+                    &cancel,
+                ) {
+                    Ok(hit) => hit,
+                    Err(StreamError::Cancelled) => {
+                        return Err(CoreAudioError::Io(StreamError::Cancelled.to_io_error()));
+                    }
+                    Err(_) => None,
+                };
+                if let Some(hit) = dash_hit
                 {
                     let cfg = HybridSegmentedConfig {
                         headers: headers.clone(),
@@ -6638,22 +7466,7 @@ fn open_decoder_for_stream_with_token(
     cancel: CancellationToken,
     timeout: Duration,
 ) -> Result<Box<dyn AudioDecoder>, CoreAudioError> {
-    if cancel.is_cancelled() {
-        return Err(CoreAudioError::Io(StreamError::Cancelled.to_io_error()));
-    }
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    let guard_token = cancel.child_token();
-    if let Ok(rt) = streaming_runtime() {
-        let watch_token = guard_token.clone();
-        let watch_flag = Arc::clone(&cancel_flag);
-        rt.spawn(async move {
-            watch_token.cancelled().await;
-            watch_flag.store(true, Ordering::SeqCst);
-        });
-    }
-    let res = open_decoder_for_stream_cancellable(stream, Some(cancel_flag), timeout);
-    guard_token.cancel();
-    res
+    open_decoder_for_stream_impl(stream, Some(cancel), None, timeout)
 }
 
 pub fn open_decoder_for_stream_cancellable(
@@ -6661,8 +7474,21 @@ pub fn open_decoder_for_stream_cancellable(
     cancel: Option<Arc<AtomicBool>>,
     timeout: Duration,
 ) -> Result<Box<dyn AudioDecoder>, CoreAudioError> {
+    open_decoder_for_stream_impl(stream, None, cancel, timeout)
+}
+
+fn open_decoder_for_stream_impl(
+    stream: &StreamSource,
+    cancel_token: Option<CancellationToken>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    timeout: Duration,
+) -> Result<Box<dyn AudioDecoder>, CoreAudioError> {
     let check_cancelled = || -> Result<(), CoreAudioError> {
-        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        if cancel_token.as_ref().is_some_and(|t| t.is_cancelled())
+            || cancel_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
             Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Stream open cancelled").into())
         } else {
             Ok(())
@@ -6681,29 +7507,51 @@ pub fn open_decoder_for_stream_cancellable(
                     rem
                 }
             };
-            let mut media = HttpRangeMediaSource::open_with_cancel(
-                url,
-                headers,
-                cancel.clone(),
-                remaining(),
-            )?;
+            let mut media = if let Some(ref tok) = cancel_token {
+                HttpRangeMediaSource::open_with_token(url, headers, tok.clone(), remaining())?
+            } else {
+                HttpRangeMediaSource::open_with_cancel(
+                    url,
+                    headers,
+                    cancel_flag.clone(),
+                    remaining(),
+                )?
+            };
             check_cancelled()?;
             let mut magic = media.read_magic_prefix(32)?;
             check_cancelled()?;
             if looks_like_playlist_magic(&magic) {
-                let resolved = resolve_playlist_url_with_cancel(
-                    media.resolved_url(),
-                    headers,
-                    cancel.clone(),
-                    remaining(),
-                )?;
+                let resolved = if let Some(ref tok) = cancel_token {
+                    resolve_playlist_url_with_token(
+                        media.resolved_url(),
+                        headers,
+                        tok.clone(),
+                        remaining(),
+                    )?
+                } else {
+                    resolve_playlist_url_with_cancel(
+                        media.resolved_url(),
+                        headers,
+                        cancel_flag.clone(),
+                        remaining(),
+                    )?
+                };
                 check_cancelled()?;
-                media = HttpRangeMediaSource::open_with_cancel(
-                    &resolved,
-                    headers,
-                    cancel.clone(),
-                    remaining(),
-                )?;
+                media = if let Some(ref tok) = cancel_token {
+                    HttpRangeMediaSource::open_with_token(
+                        &resolved,
+                        headers,
+                        tok.clone(),
+                        remaining(),
+                    )?
+                } else {
+                    HttpRangeMediaSource::open_with_cancel(
+                        &resolved,
+                        headers,
+                        cancel_flag.clone(),
+                        remaining(),
+                    )?
+                };
                 check_cancelled()?;
                 magic = media.read_magic_prefix(32)?;
                 check_cancelled()?;
@@ -6834,6 +7682,9 @@ struct ActiveSession {
     virtual_handle: Option<JoinHandle<()>>,
     _cpal_stream: Option<cpal::Stream>,
     native_output: Option<NativeOutputSession>,
+    output_reuse_key: OutputReuseKey,
+    feeder_session_id: Arc<AtomicU64>,
+    expected_stamp_arc: Arc<AtomicU64>,
     path: PathBuf,
     source_label: String,
     origin: PlayerOrigin,
@@ -6841,6 +7692,7 @@ struct ActiveSession {
     duration_ms: u64,
     pcm_rate: u32,
     active_device_id: String,
+    track_meta: Option<DeckTrackMetadata>,
 }
 
 struct SavedRecoverySession {
@@ -6853,10 +7705,104 @@ struct SavedRecoverySession {
     resume_pos_ms: u64,
     was_playing: bool,
     from_suspend: bool,
+    track_meta: Option<DeckTrackMetadata>,
 }
 
 impl ActiveSession {
+    fn is_output_alive(&self, inner: &PlayerInner) -> bool {
+        if self.output_kill_flag.load(Ordering::Acquire)
+            || inner.device_lost.load(Ordering::Acquire)
+            || inner.cpal_stream_error_flag.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        if let Some(ref native) = self.native_output {
+            return match native {
+                #[cfg(target_os = "windows")]
+                NativeOutputSession::WasapiExclusive(s) => s.is_alive(),
+                #[cfg(target_os = "windows")]
+                NativeOutputSession::AsioNative(_) => false,
+                NativeOutputSession::VirtualWire(h) => !h.is_finished(),
+            };
+        }
+        if let Some(ref vh) = self.virtual_handle {
+            return !vh.is_finished();
+        }
+        self._cpal_stream.is_some()
+    }
+
+    /// Stops output and retires any active decode thread handle to `inner.reaper` without
+    /// blocking the coordinator on decode thread `join()`.
+    fn stop_retiring_decode(&mut self, inner: &PlayerInner, cancel_own_token: bool) {
+        if cancel_own_token {
+            self.cancel_token.cancel();
+        } else {
+            // Detach parent token so `Drop::drop` cannot cancel a child token handed off to
+            // `FormatSwitchNext`.
+            self.cancel_token = CancellationToken::new();
+        }
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        let cur_active = self.dual_deck.active_idx();
+        let deck_entry = self.dual_deck.decode_entries[cur_active]
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(mut entry) = deck_entry {
+            if cancel_own_token {
+                entry.cancel_token.cancel();
+            }
+            entry.cancel_flag.store(true, Ordering::SeqCst);
+            if let Ok(mut wg) = entry.wake.0.lock() {
+                *wg = StandbyWakeState::Cancelled;
+                entry.wake.1.notify_all();
+            }
+            if let Some(h) = entry.join_handle.take() {
+                inner.reaper.retire_decode(h);
+            }
+        }
+        if let Some(h) = self.decode_handle.take() {
+            inner.reaper.retire_decode(h);
+        }
+
+        // Skip blocking fade sleep if already silent or already in skip-silence keep-alive.
+        let already_in_skip = self.fade_ctrl.target() == FadeTarget::SkipSilence;
+        if !already_in_skip {
+            self.fade_ctrl.request_stop_fade_out();
+            if !self.fade_ctrl.is_fade_out_done() {
+                let deadline = Instant::now() + Duration::from_millis(12);
+                while !self.fade_ctrl.is_fade_out_done() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        inner.set_active_wasapi_ctrl(None);
+        #[cfg(not(target_os = "windows"))]
+        inner.set_active_wasapi_ctrl();
+        self.output_kill_flag.store(true, Ordering::SeqCst);
+        if let Some(stream) = self._cpal_stream.take() {
+            let _ = stream.pause();
+            drop(stream);
+        }
+        if let Some(native) = self.native_output.take() {
+            native.stop_and_join();
+        }
+        if let Some(h) = self.virtual_handle.take() {
+            let _ = h.join();
+        }
+        self.dual_deck.clear_inboxes_for_deck(cur_active);
+        self.dual_deck.drain_retired_payloads();
+    }
+
     fn stop_and_join(&mut self) -> Option<Box<dyn AudioDecoder>> {
+        if self.output_kill_flag.load(Ordering::Acquire)
+            && self._cpal_stream.is_none()
+            && self.native_output.is_none()
+            && self.virtual_handle.is_none()
+            && self.decode_handle.is_none()
+        {
+            return None;
+        }
         // Cancel token first so any blocking HTTP Range/DASH read unblocks
         // immediately instead of stalling thread join on a network timeout.
         self.cancel_token.cancel();
@@ -6983,6 +7929,7 @@ fn wait_at_eof(
     inner: &PlayerInner,
     decoder: &mut dyn AudioDecoder,
     cancel_flag: &AtomicBool,
+    cancel_token: &CancellationToken,
     eof_flag: &AtomicBool,
     paused_since: &mut Option<Instant>,
     idle_reclaimed: &mut bool,
@@ -6990,6 +7937,7 @@ fn wait_at_eof(
     eof_flag.store(true, Ordering::SeqCst);
     loop {
         if cancel_flag.load(Ordering::Relaxed)
+            || cancel_token.is_cancelled()
             || inner.stopped.load(Ordering::Relaxed)
             || inner.device_lost.load(Ordering::Acquire)
         {
@@ -7014,7 +7962,7 @@ fn wait_at_eof(
             eof_flag.store(false, Ordering::SeqCst);
             return true;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -7102,6 +8050,7 @@ struct PipelineSpec {
     path: PathBuf,
     source_label: String,
     origin: PlayerOrigin,
+    track_meta: Option<DeckTrackMetadata>,
     cancel_token: CancellationToken,
     format: AudioFormat,
     duration_ms: u64,
@@ -7204,6 +8153,16 @@ fn resolve_target_capabilities(
         .unwrap_or_else(AudioDeviceManager::virtual_device_capabilities)
 }
 
+fn patched_track_meta(snap: &DeckMetadataSnapshot) -> Option<DeckTrackMetadata> {
+    snap.track_meta.as_ref().map(|m| {
+        let mut copy = m.clone();
+        if snap.duration_ms > 0 {
+            copy.duration_ms = snap.duration_ms;
+        }
+        copy
+    })
+}
+
 fn commit_deck_metadata_to_inner(inner: &PlayerInner, snap: &DeckMetadataSnapshot) {
     inner.duration_ms.store(snap.duration_ms, Ordering::SeqCst);
     inner.out_sample_rate.store(snap.out_rate, Ordering::SeqCst);
@@ -7224,6 +8183,7 @@ fn commit_deck_metadata_to_inner(inner: &PlayerInner, snap: &DeckMetadataSnapsho
             snap.device_name.clone(),
         ));
     }
+    let resolved_track_meta = patched_track_meta(snap);
     if let Ok(mut meta_lock) = inner.active_meta.write() {
         *meta_lock = Some(ActiveTrackMeta {
             path: snap.path.clone(),
@@ -7233,11 +8193,16 @@ fn commit_deck_metadata_to_inner(inner: &PlayerInner, snap: &DeckMetadataSnapsho
             resampled_to_hz: snap.resampled_to_hz,
             backend: snap.backend,
             device_name: snap.device_name.clone(),
+            track_meta: resolved_track_meta.clone(),
         });
+    }
+    if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+        *tm_lock = resolved_track_meta;
     }
 }
 
 fn relay_loop(weak_inner: std::sync::Weak<PlayerInner>, cmd_tx: mpsc::Sender<PlayerCommand>) {
+    let mut last_auto_reopen: Option<(usize, u64)> = None;
     loop {
         let Some(inner) = weak_inner.upgrade() else {
             break;
@@ -7276,12 +8241,31 @@ fn relay_loop(weak_inner: std::sync::Weak<PlayerInner>, cmd_tx: mpsc::Sender<Pla
                     if (inner.dual_deck.deck_gen_for(to_idx) & 0xFF_FFFF_FFFF)
                         == (evt.to_deck_gen & 0xFF_FFFF_FFFF)
                     {
+                        let existing_tm = if evt.kind == RtTransitionKind::MismatchCrossfadeFlip {
+                            inner.active_track_metadata.read().ok().and_then(|g| g.clone())
+                        } else {
+                            None
+                        };
                         if let Ok(mg) = inner.dual_deck.deck_meta[to_idx].read()
                             && let Some(ref snap) = *mg
                         {
                             commit_deck_metadata_to_inner(&inner, snap);
+                            if evt.kind == RtTransitionKind::MismatchCrossfadeFlip
+                                && snap.track_meta.is_none()
+                                && let Some(prev_tm) = existing_tm
+                                && let Ok(mut tm_lock) = inner.active_track_metadata.write()
+                            {
+                                *tm_lock = Some(prev_tm);
+                            }
+                        }
+                        if evt.kind != RtTransitionKind::MismatchCrossfadeFlip {
+                            inner.dual_deck.set_deck_track_meta(from_idx, None);
                         }
                         inner.dual_deck.set_deck_key(from_idx, None);
+                        inner
+                            .dual_deck
+                            .committed_deck_gen
+                            .store(inner.dual_deck.deck_gen_for(to_idx), Ordering::Release);
                         inner.dual_deck.promote_decode_thread(to_idx);
                     }
                     inner.dual_deck.notify_flip_done();
@@ -7302,6 +8286,46 @@ fn relay_loop(weak_inner: std::sync::Weak<PlayerInner>, cmd_tx: mpsc::Sender<Pla
                     });
                 }
             }
+        }
+
+        // Hardware Exclusive / ASIO EOF Standby Promotion (when uses_dual_feeder == false)
+        if !inner.stopped.load(Ordering::Acquire)
+            && inner.state_code.load(Ordering::Acquire) == PlaybackLifecycleState::Ended as i32
+        {
+            let uses_dual_feeder = inner
+                .dual_deck
+                .active_profile
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|p| p.uses_dual_feeder))
+                .unwrap_or(true);
+            if !uses_dual_feeder {
+                let active_idx = inner.dual_deck.active_idx();
+                let sb = inner.dual_deck.standby_idx();
+                let sb_gen = inner.dual_deck.deck_gen_for(sb);
+                if let Some((prev_sb, prev_gen)) = last_auto_reopen
+                    && (prev_sb != sb || prev_gen != sb_gen)
+                {
+                    last_auto_reopen = None;
+                }
+                if inner.dual_deck.deck_state(sb) == DeckState::StandbyReady
+                    && !inner.dual_deck.standby_is_mismatch_recovery[sb].load(Ordering::Acquire)
+                    && last_auto_reopen != Some((sb, sb_gen))
+                {
+                    last_auto_reopen = Some((sb, sb_gen));
+                    let _ = cmd_tx.send(PlayerCommand::ReopenOntoStandby {
+                        from_deck: active_idx,
+                        to_deck: sb,
+                        to_deck_gen: sb_gen,
+                        is_manual_skip: false,
+                        is_mismatch_recovery: false,
+                    });
+                }
+            } else {
+                last_auto_reopen = None;
+            }
+        } else {
+            last_auto_reopen = None;
         }
 
         if inner.has_queued_next_spec.load(Ordering::Acquire)
@@ -7341,6 +8365,7 @@ struct StandbyDeckGate {
 }
 
 impl StandbyDeckGate {
+    #[allow(clippy::too_many_arguments)]
     fn complete_prebuffer_and_park(
         &mut self,
         inner: &PlayerInner,
@@ -7445,6 +8470,7 @@ fn run_standby_deck_worker(
     deck_gen: u64,
     origin: PlayerOrigin,
     source_label: String,
+    incoming_track_meta: Option<DeckTrackMetadata>,
     bypass_l2_read: bool,
     is_mismatch_recovery: bool,
     mismatch_pts_ms: u64,
@@ -7465,6 +8491,7 @@ fn run_standby_deck_worker(
     ) {
         inner.dual_deck.deck_states[deck_idx].store(DeckState::Idle as u8, Ordering::SeqCst);
         inner.dual_deck.set_deck_key(deck_idx, None);
+        inner.dual_deck.set_deck_track_meta(deck_idx, None);
         return None;
     }
 
@@ -7484,6 +8511,7 @@ fn run_standby_deck_worker(
                 inner.dual_deck.deck_states[deck_idx]
                     .store(DeckState::Idle as u8, Ordering::SeqCst);
                 inner.dual_deck.set_deck_key(deck_idx, None);
+                inner.dual_deck.set_deck_track_meta(deck_idx, None);
             }
             return None;
         }
@@ -7521,6 +8549,15 @@ fn run_standby_deck_worker(
         .duration()
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    let standby_track_meta = incoming_track_meta.map(|mut m| {
+        if duration_ms > 0 {
+            m.duration_ms = duration_ms;
+        }
+        m
+    });
+    inner
+        .dual_deck
+        .set_deck_track_meta(deck_idx, standby_track_meta.clone());
     let pcm_rate = if format.is_dsd {
         (format.sample_rate_hz / 8).max(44_100)
     } else {
@@ -7688,6 +8725,7 @@ fn run_standby_deck_worker(
                 expected_stamp,
                 is_wire: true,
                 resampled_to_hz: None,
+                track_meta: standby_track_meta.clone(),
             };
             if let Ok(mut mg) = inner.dual_deck.deck_meta[deck_idx].write() {
                 *mg = Some(snap);
@@ -7856,6 +8894,7 @@ fn run_standby_deck_worker(
         } else {
             None
         },
+        track_meta: standby_track_meta,
     };
     if let Ok(mut mg) = inner.dual_deck.deck_meta[deck_idx].write() {
         *mg = Some(snap);
@@ -7979,7 +9018,10 @@ fn start_output_pipeline_from_standby(
                     OutputMode::DoPOverWasapiExclusive | OutputMode::AsioNativeDsd
                 ));
 
-        let (native_sess, actual_frames, dev_name, bk, api_label) = if allow_virtual_wire {
+        let feeder_session_id = Arc::new(AtomicU64::new(session_id));
+        let expected_stamp_arc = Arc::new(AtomicU64::new(expected_stamp));
+        let (native_sess, actual_frames, dev_name, bk, api_label, reuse_key) = if allow_virtual_wire
+        {
             let feeder = DualDeckWireFeeder::new(
                 Arc::clone(&inner.dual_deck),
                 Arc::clone(&inner.frames_rendered),
@@ -7987,6 +9029,7 @@ fn start_output_pipeline_from_standby(
                 Arc::clone(&inner.buffered_ms),
                 Arc::clone(&inner.gapless_transitions),
                 Arc::clone(&inner.ring_buffer_underrun_count),
+                Arc::clone(&inner.playback_epoch),
                 to_deck,
                 payload,
             );
@@ -7997,10 +9040,10 @@ fn start_output_pipeline_from_standby(
                 snap.out_channels,
                 Arc::clone(inner),
                 Arc::clone(&output_kill_flag),
-                session_id,
+                Arc::clone(&feeder_session_id),
                 watermark_bytes,
                 Arc::clone(&fade_ctrl),
-                expected_stamp,
+                Arc::clone(&expected_stamp_arc),
             );
             (
                 NativeOutputSession::VirtualWire(h),
@@ -8008,6 +9051,12 @@ fn start_output_pipeline_from_standby(
                 VIRTUAL_DEVICE_NAME.to_string(),
                 sel_backend.unwrap_or(OutputBackendKind::WindowsWasapiExclusive),
                 "Virtual Wire Engine",
+                OutputReuseKey::VirtualWire {
+                    output_mode: snap.negotiated.output_mode,
+                    wire_format: wire,
+                    sample_rate: snap.out_rate,
+                    channels: snap.out_channels,
+                },
             )
         } else {
             #[cfg(target_os = "windows")]
@@ -8058,6 +9107,7 @@ fn start_output_pipeline_from_standby(
                             dname,
                             OutputBackendKind::WindowsAsio,
                             "ASIO 2.x COM Driver",
+                            OutputReuseKey::None,
                         )
                     })
                 } else {
@@ -8070,6 +9120,7 @@ fn start_output_pipeline_from_standby(
                         is_dop: snap.negotiated.output_mode == OutputMode::DoPOverWasapiExclusive,
                         buffer_frames_hint: policy.preferred_buffer_frames,
                     };
+                    let reuse_spec = open_spec.clone();
                     crate::backend::wasapi_win::WasapiExclusiveSession::open_and_start_with_telemetry(
                         open_spec,
                         byte_cons,
@@ -8102,6 +9153,7 @@ fn start_output_pipeline_from_standby(
                             dname,
                             OutputBackendKind::WindowsWasapiExclusive,
                             "WASAPI Exclusive (Event-Driven)",
+                            OutputReuseKey::WasapiExclusive(reuse_spec),
                         )
                     })
                 };
@@ -8115,6 +9167,19 @@ fn start_output_pipeline_from_standby(
             }
         };
 
+        inner.output_reopen_count.fetch_add(1, Ordering::Relaxed);
+        inner
+            .cached_clock_source
+            .store(backend_to_clock_src(inner.headless, bk), Ordering::Release);
+        #[cfg(target_os = "windows")]
+        match &native_sess {
+            NativeOutputSession::WasapiExclusive(s) => {
+                inner.set_active_wasapi_ctrl(Some(s.control()));
+            }
+            _ => inner.set_active_wasapi_ctrl(None),
+        }
+        #[cfg(not(target_os = "windows"))]
+        inner.set_active_wasapi_ctrl();
         native_sess.set_eof_state_code(PlaybackLifecycleState::Ended as i32);
         snap.verification.set_buffer_size_frames(actual_frames);
         if let Ok(mut af) = inner.active_fade.write() {
@@ -8152,6 +9217,9 @@ fn start_output_pipeline_from_standby(
             virtual_handle: None,
             _cpal_stream: None,
             native_output: Some(native_sess),
+            output_reuse_key: reuse_key,
+            feeder_session_id,
+            expected_stamp_arc,
             path: updated_snap.path,
             source_label: updated_snap.source_label,
             origin: updated_snap.origin,
@@ -8159,6 +9227,7 @@ fn start_output_pipeline_from_standby(
             duration_ms: updated_snap.duration_ms,
             pcm_rate: updated_snap.pcm_rate,
             active_device_id: updated_snap.active_device_id,
+            track_meta: updated_snap.track_meta,
         });
     }
 
@@ -8171,6 +9240,8 @@ fn start_output_pipeline_from_standby(
             ))
         })?;
     let fade_ctrl = Arc::new(AudioFadeControl::new(true, true, start_paused));
+    let feeder_session_id = Arc::new(AtomicU64::new(session_id));
+    let expected_stamp_arc = Arc::new(AtomicU64::new(0));
     let use_virtual = inner.headless
         || (sel_id.as_deref() == Some(VIRTUAL_DEVICE_ID) && enumerate_cpal_devices().is_empty());
 
@@ -8182,13 +9253,14 @@ fn start_output_pipeline_from_standby(
         out_sample_format,
         backend_kind,
         device_name,
+        reuse_key,
     ) = if use_virtual {
         let out_rate = payload.out_rate;
         let out_channels = payload.out_channels;
         let feeder = DualDeckPcmFeeder::new(
             Arc::clone(&inner.dual_deck),
             Arc::clone(inner),
-            session_id,
+            Arc::clone(&feeder_session_id),
             to_deck,
             payload,
             &fade_ctrl,
@@ -8199,7 +9271,7 @@ fn start_output_pipeline_from_standby(
             out_channels,
             Arc::clone(inner),
             Arc::clone(&output_kill_flag),
-            session_id,
+            Arc::clone(&feeder_session_id),
             Arc::clone(&fade_ctrl),
         );
         (
@@ -8210,6 +9282,10 @@ fn start_output_pipeline_from_standby(
             SampleFormat::F32,
             OutputBackendKind::WindowsWasapiExclusive,
             VIRTUAL_DEVICE_NAME.to_string(),
+            OutputReuseKey::VirtualPcm {
+                sample_rate: out_rate,
+                channels: out_channels,
+            },
         )
     } else {
         let (stream, actual_rate, actual_ch, sample_fmt, bk, dev_name) =
@@ -8218,7 +9294,7 @@ fn start_output_pipeline_from_standby(
                 payload,
                 inner,
                 &output_kill_flag,
-                session_id,
+                Arc::clone(&feeder_session_id),
                 &fade_ctrl,
             )?;
         if !start_paused && let Err(e) = stream.play() {
@@ -8236,8 +9312,23 @@ fn start_output_pipeline_from_standby(
             sample_fmt,
             bk,
             dev_name,
+            OutputReuseKey::CpalShared {
+                device_id: caps.device_id.clone(),
+                sample_rate: actual_rate,
+                channels: actual_ch,
+            },
         )
     };
+
+    inner.output_reopen_count.fetch_add(1, Ordering::Relaxed);
+    inner.cached_clock_source.store(
+        backend_to_clock_src(inner.headless, backend_kind),
+        Ordering::Release,
+    );
+    #[cfg(target_os = "windows")]
+    inner.set_active_wasapi_ctrl(None);
+    #[cfg(not(target_os = "windows"))]
+    inner.set_active_wasapi_ctrl();
 
     if is_opus_dump_enabled() && snap.unified_format.codec == AudioCodec::Opus {
         tracing::info!(
@@ -8286,6 +9377,9 @@ fn start_output_pipeline_from_standby(
         virtual_handle,
         _cpal_stream: cpal_stream,
         native_output: None,
+        output_reuse_key: reuse_key,
+        feeder_session_id,
+        expected_stamp_arc,
         path: updated_snap.path,
         source_label: updated_snap.source_label,
         origin: updated_snap.origin,
@@ -8293,7 +9387,736 @@ fn start_output_pipeline_from_standby(
         duration_ms: updated_snap.duration_ms,
         pcm_rate: updated_snap.pcm_rate,
         active_device_id: updated_snap.active_device_id,
+        track_meta: updated_snap.track_meta,
     })
+}
+
+/// Attempts a zero-reopen lock-free hot-swap of `decoder` onto an already-running `active`
+/// output session (WASAPI Exclusive `IAudioClient`, Virtual Wire, Virtual PCM, or CPAL Shared)
+/// when the hardware/virtual format specification matches.
+///
+/// Returns:
+/// - `Ok(Ok(()))` when hot-swap succeeded (zero hardware teardown/reopen).
+/// - `Ok(Err(decoder))` when output format/mode/device changed or session is not alive (caller
+///   tears down `active` and calls [`start_output_pipeline`] once).
+/// - `Err(err)` on hard format negotiation failure (e.g., Strict Bit-Perfect unsupported rate).
+fn try_hot_swap_active_session(
+    inner: &Arc<PlayerInner>,
+    active: &mut ActiveSession,
+    decoder: Box<dyn AudioDecoder>,
+    spec: &PipelineSpec,
+    cmd_tx: &mpsc::Sender<PlayerCommand>,
+) -> Result<Result<(), Box<dyn AudioDecoder>>, CoreAudioError> {
+    if !active.is_output_alive(inner) {
+        return Ok(Err(decoder));
+    }
+
+    let (sel_id, sel_backend) = inner
+        .selected_output
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or((None, None));
+    let unified_src = decoder.unified_format();
+    let track_meta: Option<DecodedTrackMetadata> = decoder.metadata().cloned();
+    let caps = resolve_target_capabilities(inner, sel_id.as_deref(), sel_backend);
+    let policy = inner.policy.read().map(|g| g.clone()).unwrap_or_default();
+    let dsp_bypassed = inner.dsp_bypassed.load(Ordering::SeqCst);
+    let eff_vol = if policy.strict_bit_perfect {
+        1.0
+    } else {
+        f32::from_bits(inner.volume_bits.load(Ordering::Relaxed))
+    };
+
+    let explicit_shared = sel_backend == Some(OutputBackendKind::WindowsWasapiShared)
+        || sel_id
+            .as_deref()
+            .is_some_and(|s| s.starts_with("wasapi-shared::"));
+    let want_native_wire = !explicit_shared
+        && (policy.strict_bit_perfect
+            || dsp_bypassed
+            || caps.backend == OutputBackendKind::WindowsAsio
+            || sel_backend == Some(OutputBackendKind::WindowsAsio)
+            || sel_backend == Some(OutputBackendKind::WindowsWasapiExclusive)
+            || (unified_src.dsd_rate.is_some()
+                && !matches!(policy.dsd_output_mode, DsdOutputMode::DsdToPcm)
+                && dsp_bypassed
+                && (eff_vol - 1.0).abs() < 1e-6));
+
+    let negotiated_res = AudioFormatManager::negotiate(&unified_src, &caps, &policy);
+    if let Err(ref msg) = negotiated_res
+        && policy.strict_bit_perfect
+        && !policy.allow_shared_fallback
+    {
+        tracing::warn!("Strict bit-perfect format negotiation rejected stream: {msg}");
+        return Err(CoreAudioError::Backend(BackendError::UnsupportedFormat(
+            spec.format.clone(),
+        )));
+    }
+
+    let effective_deck_track_meta = spec.track_meta.clone().map(|mut m| {
+        if spec.duration_ms > 0 {
+            m.duration_ms = spec.duration_ms;
+        }
+        m
+    });
+
+    // Path A: Native Wire (WASAPI Exclusive / Virtual Wire) hot-swap
+    if want_native_wire
+        && let Ok(ref negotiated) = negotiated_res
+        && negotiated.output_mode.is_exclusive_or_asio()
+    {
+        let allow_virtual_wire = caps.transport == DeviceTransportKind::Virtual
+            && (policy.strict_bit_perfect
+                || dsp_bypassed
+                || sel_backend == Some(OutputBackendKind::WindowsWasapiExclusive)
+                || sel_backend == Some(OutputBackendKind::WindowsAsio)
+                || matches!(
+                    negotiated.output_mode,
+                    OutputMode::DoPOverWasapiExclusive | OutputMode::AsioNativeDsd
+                ));
+
+        if caps.transport != DeviceTransportKind::Virtual || allow_virtual_wire {
+            let wire = negotiated.wire_format;
+            let desired_key = if allow_virtual_wire {
+                OutputReuseKey::VirtualWire {
+                    output_mode: negotiated.output_mode,
+                    wire_format: wire,
+                    sample_rate: negotiated.target_sample_rate,
+                    channels: negotiated.target_channels,
+                }
+            } else if matches!(
+                negotiated.output_mode,
+                OutputMode::AsioPcm | OutputMode::AsioNativeDsd | OutputMode::DoPOverAsio
+            ) {
+                OutputReuseKey::None
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    OutputReuseKey::WasapiExclusive(
+                        crate::backend::wasapi_win::WasapiExclusiveOpenSpec {
+                            device_id: Some(caps.device_id.clone()),
+                            sample_rate: negotiated.target_sample_rate,
+                            channels: negotiated.target_channels,
+                            layout: ChannelLayout::from_channels(negotiated.target_channels),
+                            wire_format: wire,
+                            is_dop: negotiated.output_mode == OutputMode::DoPOverWasapiExclusive,
+                            buffer_frames_hint: policy.preferred_buffer_frames,
+                        },
+                    )
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    OutputReuseKey::None
+                }
+            };
+
+            if desired_key == OutputReuseKey::None || active.output_reuse_key != desired_key {
+                return Ok(Err(decoder));
+            }
+
+            let active_idx = inner.dual_deck.active_idx();
+            let active_gen = inner.dual_deck.alloc_deck_gen(active_idx);
+            inner.dual_deck.deck_states[active_idx]
+                .store(DeckState::Playing as u8, Ordering::SeqCst);
+            inner
+                .dual_deck
+                .set_deck_key(active_idx, spec.origin.stream_key());
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            let eof_flag = Arc::clone(&inner.dual_deck.deck_eof_flags[active_idx]);
+            eof_flag.store(false, Ordering::SeqCst);
+            inner.dual_deck.deck_buffered_ms[active_idx].store(0, Ordering::Relaxed);
+            inner.buffered_ms.store(0, Ordering::Relaxed);
+
+            let is_dsd_wire = matches!(
+                wire,
+                WireSampleFormat::NativeDsd { .. } | WireSampleFormat::Dop24In32MsbLe { .. }
+            );
+            let initial_wire_dsp_active = !policy.strict_bit_perfect
+                && !dsp_bypassed
+                && !is_dsd_wire
+                && is_any_dsp_active(inner);
+            let actual_frames = match active.native_output {
+                #[cfg(target_os = "windows")]
+                Some(NativeOutputSession::WasapiExclusive(ref s)) => s.actual_buffer_frames,
+                _ => policy.preferred_buffer_frames,
+            };
+            let ver_cfg = VerificationConfig {
+                source_format: unified_src.clone(),
+                output_mode: negotiated.output_mode,
+                transport: caps.transport,
+                target_rate_hz: negotiated.target_sample_rate,
+                target_channels: negotiated.target_channels,
+                target_valid_bits: negotiated.valid_bits,
+                target_container_bits: negotiated.container_bits,
+                buffer_size_frames: actual_frames,
+                dsp_active: initial_wire_dsp_active,
+                software_volume_unity: true,
+                resampled: negotiated.requires_resampling,
+                exclusive_unavailable_reason: None,
+            };
+            let verification = AudioVerificationEngine::new(ver_cfg.clone());
+            if let Some(ref m) = track_meta {
+                verification.set_source_metadata(
+                    m.title.clone(),
+                    m.artist.clone(),
+                    m.album.clone(),
+                );
+            }
+
+            let expected_stamp = WireFormatStamp::from_wire(
+                negotiated.target_sample_rate,
+                negotiated.target_channels,
+                wire,
+            )
+            .0;
+            inner
+                .published_format_stamp
+                .store(expected_stamp, Ordering::Release);
+            inner.format_mismatch_flag.store(false, Ordering::Release);
+            inner.device_lost.store(false, Ordering::SeqCst);
+            inner
+                .out_sample_rate
+                .store(negotiated.target_sample_rate, Ordering::SeqCst);
+
+            let ring_bytes = compute_wire_ring_bytes(
+                negotiated.target_sample_rate,
+                negotiated.target_channels,
+                wire,
+            );
+            let (byte_prod, byte_cons) = SpscRingBuffer::<u8>::new(ring_bytes);
+            let watermark_bytes = compute_startup_watermark_bytes(
+                negotiated.target_sample_rate,
+                negotiated.target_channels,
+                wire,
+                byte_prod.capacity(),
+            );
+            let ver_tap = verification.attach_rt_tap(
+                wire,
+                negotiated.target_channels,
+                negotiated.target_sample_rate,
+                1024 * 1024,
+            );
+
+            let (dev_name, bk, api_label, fade_ctrl) = match active.native_output {
+                #[cfg(target_os = "windows")]
+                Some(NativeOutputSession::WasapiExclusive(ref sess)) => {
+                    if spec.cancel_token.is_cancelled()
+                        || inner.current_session_id.load(Ordering::Acquire) != spec.session_id
+                    {
+                        return Ok(Ok(()));
+                    }
+                    let fade_in_enabled = !is_dsd_wire && !policy.strict_bit_perfect;
+                    let fade_out_enabled = !is_dsd_wire;
+                    let fc = Arc::new(AudioFadeControl::new(
+                        fade_in_enabled,
+                        fade_out_enabled,
+                        spec.start_paused,
+                    ));
+                    if sess
+                        .try_hot_swap(crate::backend::wasapi_win::WasapiHotSwapPayload {
+                            consumer: byte_cons,
+                            ver_tap,
+                            watermark_bytes,
+                            eof_flag: Arc::clone(&eof_flag),
+                            fade_ctrl: Some(Arc::clone(&fc)),
+                            session_id: spec.session_id,
+                            expected_format_stamp: expected_stamp,
+                        })
+                        .is_err()
+                    {
+                        return Ok(Err(decoder));
+                    }
+                    sess.set_paused(spec.start_paused);
+                    (
+                        sess.device_name.clone(),
+                        OutputBackendKind::WindowsWasapiExclusive,
+                        "WASAPI Exclusive (Event-Driven)",
+                        fc,
+                    )
+                }
+                Some(NativeOutputSession::VirtualWire(ref vh)) => {
+                    if spec.cancel_token.is_cancelled()
+                        || inner.current_session_id.load(Ordering::Acquire) != spec.session_id
+                    {
+                        return Ok(Ok(()));
+                    }
+                    let last_ring_epoch = byte_cons.epoch();
+                    let wire_payload = RtWireInboxPayload {
+                        consumer: byte_cons,
+                        ver_tap,
+                        watermark_bytes,
+                        wire,
+                        out_rate: negotiated.target_sample_rate,
+                        out_channels: negotiated.target_channels,
+                        expected_stamp,
+                        deck_gen: active_gen,
+                        last_ring_epoch,
+                    };
+                    active
+                        .expected_stamp_arc
+                        .store(expected_stamp, Ordering::Release);
+                    active
+                        .feeder_session_id
+                        .store(spec.session_id, Ordering::Release);
+                    inner.dual_deck.send_wire_inbox(active_idx, wire_payload);
+                    if vh.is_finished() {
+                        inner.dual_deck.clear_inboxes_for_deck(active_idx);
+                        return Ok(Err(decoder));
+                    }
+                    let fc = Arc::clone(&active.fade_ctrl);
+                    if spec.start_paused {
+                        fc.request_pause_fade_out();
+                    } else {
+                        fc.request_play_fade_in();
+                    }
+                    (
+                        VIRTUAL_DEVICE_NAME.to_string(),
+                        sel_backend.unwrap_or(OutputBackendKind::WindowsWasapiExclusive),
+                        "Virtual Wire Engine",
+                        fc,
+                    )
+                }
+                _ => return Ok(Err(decoder)),
+            };
+
+            inner
+                .cached_clock_source
+                .store(backend_to_clock_src(inner.headless, bk), Ordering::Release);
+            if let Ok(mut af) = inner.active_fade.write() {
+                *af = Some(Arc::clone(&fade_ctrl));
+            }
+            if let Ok(mut vw) = inner.verification.write() {
+                *vw = Some((verification.clone(), api_label.to_string(), dev_name.clone()));
+            }
+            if let Ok(mut meta_lock) = inner.active_meta.write() {
+                *meta_lock = Some(ActiveTrackMeta {
+                    path: spec.path.clone(),
+                    source_label: spec.source_label.clone(),
+                    format: spec.format.clone(),
+                    duration_ms: spec.duration_ms,
+                    resampled_to_hz: None,
+                    backend: bk,
+                    device_name: dev_name.clone(),
+                    track_meta: effective_deck_track_meta.clone(),
+                });
+            }
+            if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                *tm_lock = effective_deck_track_meta.clone();
+            }
+            inner
+                .dual_deck
+                .set_deck_track_meta(active_idx, effective_deck_track_meta.clone());
+            inner
+                .dual_deck
+                .committed_deck_gen
+                .store(active_gen, Ordering::Release);
+            let rg_tags = inner
+                .track_replay_gain
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if let Ok(mut mg) = inner.dual_deck.deck_meta[active_idx].write() {
+                *mg = Some(DeckMetadataSnapshot {
+                    path: spec.path.clone(),
+                    source_label: spec.source_label.clone(),
+                    origin: spec.origin.clone(),
+                    format: spec.format.clone(),
+                    unified_format: unified_src.clone(),
+                    negotiated: negotiated.clone(),
+                    duration_ms: spec.duration_ms,
+                    pcm_rate: negotiated.target_sample_rate,
+                    out_rate: negotiated.target_sample_rate,
+                    out_channels: negotiated.target_channels,
+                    rg_tags,
+                    verification: verification.clone(),
+                    api_label: api_label.to_string(),
+                    device_name: dev_name,
+                    backend: bk,
+                    active_device_id: caps.device_id.clone(),
+                    expected_stamp,
+                    is_wire: true,
+                    resampled_to_hz: None,
+                    track_meta: effective_deck_track_meta.clone(),
+                });
+            }
+            inner
+                .dual_deck
+                .rebind_standby_for_new_profile(ActiveOutputProfile {
+                    session_id: spec.session_id,
+                    is_wire: true,
+                    uses_dual_feeder: allow_virtual_wire,
+                    output_mode: negotiated.output_mode,
+                    wire_format: wire,
+                    out_rate: negotiated.target_sample_rate,
+                    out_channels: negotiated.target_channels,
+                });
+
+            let dec_inner = Arc::clone(inner);
+            let dec_cancel = Arc::clone(&cancel_flag);
+            let dec_cancel_token = spec.cancel_token.clone();
+            let dec_eof = Arc::clone(&eof_flag);
+            let dec_fade = Arc::clone(&fade_ctrl);
+            let dec_neg = negotiated.clone();
+            let dec_caps = caps.clone();
+            let dec_tx = cmd_tx.clone();
+            let dec_path = spec.path.clone();
+            let dec_label = spec.source_label.clone();
+            let dec_sid = spec.session_id;
+            let thread_guard_counter = Arc::clone(&inner.live_decode_threads);
+            let decode_handle = thread::Builder::new()
+                .name("lumina-wire-decoder".to_string())
+                .spawn(move || {
+                    let _live_guard = DecodeThreadGuard::new(&thread_guard_counter);
+                    decode_wire_loop(
+                        decoder,
+                        byte_prod,
+                        unified_src,
+                        dec_neg,
+                        dec_caps,
+                        verification,
+                        ver_cfg,
+                        dec_inner,
+                        dec_cancel,
+                        dec_cancel_token,
+                        dec_eof,
+                        dec_fade,
+                        watermark_bytes,
+                        expected_stamp,
+                        dec_sid,
+                        dec_tx,
+                        dec_path,
+                        dec_label,
+                        active_idx,
+                        active_gen,
+                        None,
+                    )
+                })
+                .ok();
+            let old_entry = inner.dual_deck.decode_entries[active_idx]
+                .lock()
+                .ok()
+                .and_then(|mut eg| {
+                    eg.replace(DeckDecodeHandle {
+                        deck_gen: active_gen,
+                        cancel_flag: Arc::clone(&cancel_flag),
+                        cancel_token: spec.cancel_token.clone(),
+                        wake: Arc::new((Mutex::new(StandbyWakeState::Promoted), Condvar::new())),
+                        join_handle: decode_handle,
+                    })
+                });
+            if let Some(mut old) = old_entry {
+                old.cancel_token.cancel();
+                old.cancel_flag.store(true, Ordering::SeqCst);
+                if let Some(h) = old.join_handle.take() {
+                    inner.reaper.retire_decode(h);
+                }
+            }
+
+            active.cancel_flag = cancel_flag;
+            active.fade_ctrl = fade_ctrl;
+            active.cancel_token = spec.cancel_token.clone();
+            active.eof_flag = eof_flag;
+            active.path = spec.path.clone();
+            active.source_label = spec.source_label.clone();
+            active.origin = spec.origin.clone();
+            active.format = spec.format.clone();
+            active.duration_ms = spec.duration_ms;
+            active.pcm_rate = negotiated.target_sample_rate;
+            active.active_device_id = caps.device_id;
+            active.track_meta = effective_deck_track_meta;
+            return Ok(Ok(()));
+        }
+    }
+
+    // Path B: Virtual PCM / CPAL Shared hot-swap
+    let use_virtual = inner.headless
+        || (sel_id.as_deref() == Some(VIRTUAL_DEVICE_ID) && enumerate_cpal_devices().is_empty());
+    let (out_rate, out_channels, backend_kind, device_name, api_label_b) =
+        match &active.output_reuse_key {
+            OutputReuseKey::VirtualPcm {
+                sample_rate,
+                channels,
+            } if use_virtual
+                && *sample_rate == spec.pcm_rate
+                && *channels == spec.out_channels =>
+            {
+                (
+                    *sample_rate,
+                    *channels,
+                    OutputBackendKind::WindowsWasapiExclusive,
+                    VIRTUAL_DEVICE_NAME.to_string(),
+                    "Virtual Consumer".to_string(),
+                )
+            }
+            OutputReuseKey::CpalShared {
+                device_id,
+                sample_rate,
+                channels,
+            } if !use_virtual
+                && *device_id == caps.device_id
+                && *channels == spec.out_channels =>
+            {
+                let (bk, dn) = inner
+                    .active_meta
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|m| (m.backend, m.device_name.clone())))
+                    .unwrap_or((OutputBackendKind::WindowsWasapiShared, caps.name.clone()));
+                (*sample_rate, *channels, bk, dn, format!("{bk:?}"))
+            }
+            _ => return Ok(Err(decoder)),
+        };
+
+    let active_idx = inner.dual_deck.active_idx();
+    let active_gen = inner.dual_deck.alloc_deck_gen(active_idx);
+    inner.dual_deck.deck_states[active_idx].store(DeckState::Playing as u8, Ordering::SeqCst);
+    inner
+        .dual_deck
+        .set_deck_key(active_idx, spec.origin.stream_key());
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let eof_flag = Arc::clone(&inner.dual_deck.deck_eof_flags[active_idx]);
+    eof_flag.store(false, Ordering::SeqCst);
+    inner.dual_deck.deck_buffered_ms[active_idx].store(0, Ordering::Relaxed);
+    inner.buffered_ms.store(0, Ordering::Relaxed);
+
+    let mode_b = if unified_src.dsd_rate.is_some() {
+        OutputMode::DsdToPcm
+    } else if use_virtual {
+        OutputMode::VirtualMock
+    } else {
+        OutputMode::WasapiShared
+    };
+    let degrad_b = if unified_src.dsd_rate.is_some() {
+        Some("DSD-to-PCM 轉換輸出".to_string())
+    } else if mode_b == OutputMode::WasapiShared {
+        Some("Windows Shared Mode (經過系統混音器)".to_string())
+    } else {
+        None
+    };
+    let shared_verification = AudioVerificationEngine::new(VerificationConfig {
+        source_format: unified_src.clone(),
+        output_mode: mode_b,
+        transport: caps.transport,
+        target_rate_hz: out_rate,
+        target_channels: out_channels,
+        target_valid_bits: 32,
+        target_container_bits: 32,
+        buffer_size_frames: policy.preferred_buffer_frames,
+        dsp_active: !dsp_bypassed,
+        software_volume_unity: (eff_vol - 1.0).abs() < 1e-6,
+        resampled: spec.pcm_rate != out_rate,
+        exclusive_unavailable_reason: degrad_b,
+    });
+    if let Some(ref m) = track_meta {
+        shared_verification.set_source_metadata(m.title.clone(), m.artist.clone(), m.album.clone());
+    }
+
+    let ring_samples = compute_pcm_ring_samples(out_rate, out_channels);
+    let (producer, consumer) = SpscRingBuffer::<f32>::new(ring_samples);
+    let watermark_samples =
+        compute_startup_watermark_samples(out_rate, out_channels, producer.capacity());
+    let ver_tap = shared_verification.attach_rt_tap(
+        WireSampleFormat::Float32Le,
+        out_channels,
+        out_rate,
+        1024 * 1024,
+    );
+    let last_ring_epoch = consumer.epoch();
+    let pcm_payload = RtPcmInboxPayload {
+        consumer,
+        ver_tap: Some(ver_tap),
+        watermark_samples,
+        out_rate,
+        out_channels,
+        deck_gen: active_gen,
+        last_ring_epoch,
+    };
+
+    inner.out_sample_rate.store(out_rate, Ordering::SeqCst);
+    inner.cached_clock_source.store(
+        backend_to_clock_src(inner.headless, backend_kind),
+        Ordering::Release,
+    );
+    let fade_ctrl = Arc::clone(&active.fade_ctrl);
+    active
+        .feeder_session_id
+        .store(spec.session_id, Ordering::Release);
+    inner.dual_deck.send_pcm_inbox(active_idx, pcm_payload);
+    if spec.start_paused {
+        fade_ctrl.request_pause_fade_out();
+        if let Some(ref st) = active._cpal_stream {
+            let _ = st.pause();
+        }
+    } else {
+        fade_ctrl.request_play_fade_in();
+        if let Some(ref st) = active._cpal_stream {
+            let _ = st.play();
+        }
+    }
+
+    let resampled_to_hz = if spec.pcm_rate != out_rate {
+        Some(out_rate)
+    } else {
+        None
+    };
+    if let Ok(mut af) = inner.active_fade.write() {
+        *af = Some(Arc::clone(&fade_ctrl));
+    }
+    if let Ok(mut vw) = inner.verification.write() {
+        *vw = Some((
+            shared_verification.clone(),
+            api_label_b.clone(),
+            device_name.clone(),
+        ));
+    }
+    if let Ok(mut meta_lock) = inner.active_meta.write() {
+        *meta_lock = Some(ActiveTrackMeta {
+            path: spec.path.clone(),
+            source_label: spec.source_label.clone(),
+            format: spec.format.clone(),
+            duration_ms: spec.duration_ms,
+            resampled_to_hz,
+            backend: backend_kind,
+            device_name: device_name.clone(),
+            track_meta: effective_deck_track_meta.clone(),
+        });
+    }
+    if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+        *tm_lock = effective_deck_track_meta.clone();
+    }
+    inner
+        .dual_deck
+        .set_deck_track_meta(active_idx, effective_deck_track_meta.clone());
+    inner
+        .dual_deck
+        .committed_deck_gen
+        .store(active_gen, Ordering::Release);
+
+    let fallback_neg = NegotiatedFormat {
+        output_mode: mode_b,
+        wire_format: WireSampleFormat::Float32Le,
+        target_sample_rate: out_rate,
+        target_channels: out_channels,
+        container_bits: 32,
+        valid_bits: 32,
+        is_bit_perfect_candidate: false,
+        requires_dsp_bypass: false,
+        requires_unity_volume: false,
+        requires_resampling: spec.pcm_rate != out_rate,
+        degradation_reason: None,
+    };
+    let rg_tags = inner
+        .track_replay_gain
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    if let Ok(mut mg) = inner.dual_deck.deck_meta[active_idx].write() {
+        *mg = Some(DeckMetadataSnapshot {
+            path: spec.path.clone(),
+            source_label: spec.source_label.clone(),
+            origin: spec.origin.clone(),
+            format: spec.format.clone(),
+            unified_format: unified_src.clone(),
+            negotiated: fallback_neg.clone(),
+            duration_ms: spec.duration_ms,
+            pcm_rate: spec.pcm_rate,
+            out_rate,
+            out_channels,
+            rg_tags,
+            verification: shared_verification.clone(),
+            api_label: api_label_b,
+            device_name,
+            backend: backend_kind,
+            active_device_id: caps.device_id.clone(),
+            expected_stamp: 0,
+            is_wire: false,
+            resampled_to_hz,
+            track_meta: effective_deck_track_meta.clone(),
+        });
+    }
+    inner
+        .dual_deck
+        .rebind_standby_for_new_profile(ActiveOutputProfile {
+            session_id: spec.session_id,
+            is_wire: false,
+            uses_dual_feeder: true,
+            output_mode: mode_b,
+            wire_format: WireSampleFormat::Float32Le,
+            out_rate,
+            out_channels,
+        });
+
+    let decode_inner = Arc::clone(inner);
+    let decode_cancel = Arc::clone(&cancel_flag);
+    let decode_cancel_token = spec.cancel_token.clone();
+    let decode_eof = Arc::clone(&eof_flag);
+    let decode_fade = Arc::clone(&fade_ctrl);
+    let decode_tx = cmd_tx.clone();
+    let dec_pcm_rate = spec.pcm_rate;
+    let dec_sid = spec.session_id;
+    let active_device_id = caps.device_id.clone();
+    let thread_guard_counter = Arc::clone(&inner.live_decode_threads);
+    let decode_handle = thread::Builder::new()
+        .name("lumina-audio-decoder".to_string())
+        .spawn(move || {
+            let _live_guard = DecodeThreadGuard::new(&thread_guard_counter);
+            decode_loop(
+                decoder,
+                producer,
+                dec_pcm_rate,
+                out_rate,
+                out_channels,
+                None,
+                decode_inner,
+                Some(shared_verification),
+                unified_src,
+                fallback_neg,
+                caps,
+                decode_cancel,
+                decode_cancel_token,
+                decode_eof,
+                decode_fade,
+                watermark_samples,
+                dec_sid,
+                decode_tx,
+                active_idx,
+                active_gen,
+                None,
+            )
+        })
+        .ok();
+    let old_entry = inner.dual_deck.decode_entries[active_idx]
+        .lock()
+        .ok()
+        .and_then(|mut eg| {
+            eg.replace(DeckDecodeHandle {
+                deck_gen: active_gen,
+                cancel_flag: Arc::clone(&cancel_flag),
+                cancel_token: spec.cancel_token.clone(),
+                wake: Arc::new((Mutex::new(StandbyWakeState::Promoted), Condvar::new())),
+                join_handle: decode_handle,
+            })
+        });
+    if let Some(mut old) = old_entry {
+        old.cancel_token.cancel();
+        old.cancel_flag.store(true, Ordering::SeqCst);
+        if let Some(h) = old.join_handle.take() {
+            inner.reaper.retire_decode(h);
+        }
+    }
+
+    active.cancel_flag = cancel_flag;
+    active.cancel_token = spec.cancel_token.clone();
+    active.eof_flag = eof_flag;
+    active.path = spec.path.clone();
+    active.source_label = spec.source_label.clone();
+    active.origin = spec.origin.clone();
+    active.format = spec.format.clone();
+    active.duration_ms = spec.duration_ms;
+    active.pcm_rate = spec.pcm_rate;
+    active.active_device_id = active_device_id;
+    active.track_meta = effective_deck_track_meta;
+    Ok(Ok(()))
 }
 
 fn start_output_pipeline(
@@ -8309,11 +10132,18 @@ fn start_output_pipeline(
         path,
         source_label,
         origin,
+        track_meta: incoming_deck_track_meta,
         cancel_token,
         format,
         duration_ms,
         start_paused,
     } = spec;
+    let effective_deck_track_meta = incoming_deck_track_meta.map(|mut m| {
+        if duration_ms > 0 {
+            m.duration_ms = duration_ms;
+        }
+        m
+    });
     crate::visualizer::global_tap().ensure_worker_started();
     let active_idx = inner.dual_deck.active_idx();
     let active_gen = inner.dual_deck.alloc_deck_gen(active_idx);
@@ -8449,169 +10279,200 @@ fn start_output_pipeline(
                 start_paused,
             ));
 
-            let native_attempt: Result<(NativeOutputSession, u32, String, OutputBackendKind, &'static str), BackendError> =
-                if allow_virtual_wire {
-                    let ver_tap = verification.attach_rt_tap(
-                        wire,
-                        negotiated.target_channels,
-                        negotiated.target_sample_rate,
-                        1024 * 1024,
-                    );
-                    let last_ring_epoch = byte_cons.epoch();
-                    let wire_payload = RtWireInboxPayload {
-                        consumer: byte_cons,
-                        ver_tap,
-                        watermark_bytes,
-                        wire,
-                        out_rate: negotiated.target_sample_rate,
-                        out_channels: negotiated.target_channels,
-                        expected_stamp,
-                        deck_gen: active_gen,
-                        last_ring_epoch,
-                    };
-                    let feeder = DualDeckWireFeeder::new(
-                        Arc::clone(&inner.dual_deck),
-                        Arc::clone(&inner.frames_rendered),
-                        Arc::clone(&inner.nonzero_output_frames),
-                        Arc::clone(&inner.buffered_ms),
-                        Arc::clone(&inner.gapless_transitions),
-                        Arc::clone(&inner.ring_buffer_underrun_count),
-                        active_idx,
-                        wire_payload,
-                    );
-                    let h = spawn_virtual_wire_consumer(
-                        feeder,
-                        wire,
-                        negotiated.target_sample_rate,
-                        negotiated.target_channels,
-                        Arc::clone(inner),
-                        Arc::clone(&output_kill_flag),
-                        session_id,
-                        watermark_bytes,
-                        Arc::clone(&fade_ctrl),
-                        expected_stamp,
-                    );
-                    Ok((
-                        NativeOutputSession::VirtualWire(h),
-                        policy.preferred_buffer_frames,
-                        VIRTUAL_DEVICE_NAME.to_string(),
-                        sel_backend.unwrap_or(OutputBackendKind::WindowsWasapiExclusive),
-                        "Virtual Wire Engine",
-                    ))
-                } else {
-                    #[cfg(target_os = "windows")]
-                    {
-                        if matches!(
-                            negotiated.output_mode,
-                            OutputMode::AsioPcm | OutputMode::AsioNativeDsd | OutputMode::DoPOverAsio
-                        ) {
-                            let is_native_dsd =
-                                negotiated.output_mode == OutputMode::AsioNativeDsd;
-                            crate::backend::asio_win::AsioNativeSession::open_and_start_with_telemetry(
-                                Some(&caps.device_id),
-                                negotiated.target_sample_rate,
-                                negotiated.target_channels,
-                                wire,
-                                is_native_dsd,
-                                byte_cons,
-                                verification.clone(),
-                                Arc::clone(&inner.frames_rendered),
-                                Arc::clone(&inner.nonzero_output_frames),
-                                Arc::clone(&inner.state_code),
-                                Arc::clone(&eof_flag),
-                                session_id,
-                                Arc::clone(&inner.current_session_id),
-                                watermark_bytes,
-                                Some(Arc::clone(&fade_ctrl)),
-                                Some(Arc::clone(&inner.buffered_ms)),
-                                Arc::clone(&inner.ring_buffer_underrun_count),
-                                Arc::clone(&inner.device_lost),
-                                Arc::clone(&inner.last_error),
-                                Arc::clone(&inner.format_mismatch_flag),
-                                Arc::clone(&inner.published_format_stamp),
-                                expected_stamp,
-                                None,
-                            )
-                            .map(|sess| {
-                                if start_paused {
-                                    sess.set_paused(true);
-                                }
-                                let frames = sess.buffer_frames;
-                                let dname = sess.driver_name.clone();
-                                (
-                                    NativeOutputSession::AsioNative(sess),
-                                    frames,
-                                    dname,
-                                    OutputBackendKind::WindowsAsio,
-                                    "ASIO 2.x COM Driver",
-                                )
-                            })
-                        } else {
-                            let open_spec = crate::backend::wasapi_win::WasapiExclusiveOpenSpec {
-                                device_id: Some(caps.device_id.clone()),
-                                sample_rate: negotiated.target_sample_rate,
-                                channels: negotiated.target_channels,
-                                layout: ChannelLayout::from_channels(negotiated.target_channels),
-                                wire_format: wire,
-                                is_dop: negotiated.output_mode == OutputMode::DoPOverWasapiExclusive,
-                                buffer_frames_hint: policy.preferred_buffer_frames,
-                            };
-                            crate::backend::wasapi_win::WasapiExclusiveSession::open_and_start_with_telemetry(
-                                open_spec,
-                                byte_cons,
-                                verification.clone(),
-                                Arc::clone(&inner.frames_rendered),
-                                Arc::clone(&inner.nonzero_output_frames),
-                                Arc::clone(&inner.state_code),
-                                Arc::clone(&eof_flag),
-                                Arc::clone(&inner.last_error),
-                                session_id,
-                                Arc::clone(&inner.current_session_id),
-                                watermark_bytes,
-                                Some(Arc::clone(&fade_ctrl)),
-                                Some(Arc::clone(&inner.buffered_ms)),
-                                Arc::clone(&inner.ring_buffer_underrun_count),
-                                Arc::clone(&inner.device_lost),
-                                Arc::clone(&inner.format_mismatch_flag),
-                                Arc::clone(&inner.published_format_stamp),
-                                expected_stamp,
-                            )
-                            .map(|sess| {
-                                if start_paused {
-                                    sess.set_paused(true);
-                                }
-                                let frames = sess.actual_buffer_frames;
-                                let dname = sess.device_name.clone();
-                                (
-                                    NativeOutputSession::WasapiExclusive(sess),
-                                    frames,
-                                    dname,
-                                    OutputBackendKind::WindowsWasapiExclusive,
-                                    "WASAPI Exclusive (Event-Driven)",
-                                )
-                            })
-                        }
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        Err(BackendError::DeviceNotFound(
-                            "Native Windows WASAPI/ASIO unavailable on this OS".into(),
-                        ))
-                    }
+            let feeder_session_id = Arc::new(AtomicU64::new(session_id));
+            let expected_stamp_arc = Arc::new(AtomicU64::new(expected_stamp));
+            let native_attempt: Result<
+                (
+                    NativeOutputSession,
+                    u32,
+                    String,
+                    OutputBackendKind,
+                    &'static str,
+                    OutputReuseKey,
+                ),
+                BackendError,
+            > = if allow_virtual_wire {
+                let ver_tap = verification.attach_rt_tap(
+                    wire,
+                    negotiated.target_channels,
+                    negotiated.target_sample_rate,
+                    1024 * 1024,
+                );
+                let last_ring_epoch = byte_cons.epoch();
+                let wire_payload = RtWireInboxPayload {
+                    consumer: byte_cons,
+                    ver_tap,
+                    watermark_bytes,
+                    wire,
+                    out_rate: negotiated.target_sample_rate,
+                    out_channels: negotiated.target_channels,
+                    expected_stamp,
+                    deck_gen: active_gen,
+                    last_ring_epoch,
                 };
+                let feeder = DualDeckWireFeeder::new(
+                    Arc::clone(&inner.dual_deck),
+                    Arc::clone(&inner.frames_rendered),
+                    Arc::clone(&inner.nonzero_output_frames),
+                    Arc::clone(&inner.buffered_ms),
+                    Arc::clone(&inner.gapless_transitions),
+                    Arc::clone(&inner.ring_buffer_underrun_count),
+                    Arc::clone(&inner.playback_epoch),
+                    active_idx,
+                    wire_payload,
+                );
+                let h = spawn_virtual_wire_consumer(
+                    feeder,
+                    wire,
+                    negotiated.target_sample_rate,
+                    negotiated.target_channels,
+                    Arc::clone(inner),
+                    Arc::clone(&output_kill_flag),
+                    Arc::clone(&feeder_session_id),
+                    watermark_bytes,
+                    Arc::clone(&fade_ctrl),
+                    Arc::clone(&expected_stamp_arc),
+                );
+                Ok((
+                    NativeOutputSession::VirtualWire(h),
+                    policy.preferred_buffer_frames,
+                    VIRTUAL_DEVICE_NAME.to_string(),
+                    sel_backend.unwrap_or(OutputBackendKind::WindowsWasapiExclusive),
+                    "Virtual Wire Engine",
+                    OutputReuseKey::VirtualWire {
+                        output_mode: negotiated.output_mode,
+                        wire_format: wire,
+                        sample_rate: negotiated.target_sample_rate,
+                        channels: negotiated.target_channels,
+                    },
+                ))
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    if matches!(
+                        negotiated.output_mode,
+                        OutputMode::AsioPcm | OutputMode::AsioNativeDsd | OutputMode::DoPOverAsio
+                    ) {
+                        let is_native_dsd =
+                            negotiated.output_mode == OutputMode::AsioNativeDsd;
+                        crate::backend::asio_win::AsioNativeSession::open_and_start_with_telemetry(
+                            Some(&caps.device_id),
+                            negotiated.target_sample_rate,
+                            negotiated.target_channels,
+                            wire,
+                            is_native_dsd,
+                            byte_cons,
+                            verification.clone(),
+                            Arc::clone(&inner.frames_rendered),
+                            Arc::clone(&inner.nonzero_output_frames),
+                            Arc::clone(&inner.state_code),
+                            Arc::clone(&eof_flag),
+                            session_id,
+                            Arc::clone(&inner.current_session_id),
+                            watermark_bytes,
+                            Some(Arc::clone(&fade_ctrl)),
+                            Some(Arc::clone(&inner.buffered_ms)),
+                            Arc::clone(&inner.ring_buffer_underrun_count),
+                            Arc::clone(&inner.device_lost),
+                            Arc::clone(&inner.last_error),
+                            Arc::clone(&inner.format_mismatch_flag),
+                            Arc::clone(&inner.published_format_stamp),
+                            expected_stamp,
+                            None,
+                        )
+                        .map(|sess| {
+                            if start_paused {
+                                sess.set_paused(true);
+                            }
+                            let frames = sess.buffer_frames;
+                            let dname = sess.driver_name.clone();
+                            (
+                                NativeOutputSession::AsioNative(sess),
+                                frames,
+                                dname,
+                                OutputBackendKind::WindowsAsio,
+                                "ASIO 2.x COM Driver",
+                                OutputReuseKey::None,
+                            )
+                        })
+                    } else {
+                        let open_spec = crate::backend::wasapi_win::WasapiExclusiveOpenSpec {
+                            device_id: Some(caps.device_id.clone()),
+                            sample_rate: negotiated.target_sample_rate,
+                            channels: negotiated.target_channels,
+                            layout: ChannelLayout::from_channels(negotiated.target_channels),
+                            wire_format: wire,
+                            is_dop: negotiated.output_mode == OutputMode::DoPOverWasapiExclusive,
+                            buffer_frames_hint: policy.preferred_buffer_frames,
+                        };
+                        let reuse_spec = open_spec.clone();
+                        crate::backend::wasapi_win::WasapiExclusiveSession::open_and_start_with_telemetry(
+                            open_spec,
+                            byte_cons,
+                            verification.clone(),
+                            Arc::clone(&inner.frames_rendered),
+                            Arc::clone(&inner.nonzero_output_frames),
+                            Arc::clone(&inner.state_code),
+                            Arc::clone(&eof_flag),
+                            Arc::clone(&inner.last_error),
+                            session_id,
+                            Arc::clone(&inner.current_session_id),
+                            watermark_bytes,
+                            Some(Arc::clone(&fade_ctrl)),
+                            Some(Arc::clone(&inner.buffered_ms)),
+                            Arc::clone(&inner.ring_buffer_underrun_count),
+                            Arc::clone(&inner.device_lost),
+                            Arc::clone(&inner.format_mismatch_flag),
+                            Arc::clone(&inner.published_format_stamp),
+                            expected_stamp,
+                        )
+                        .map(|sess| {
+                            if start_paused {
+                                sess.set_paused(true);
+                            }
+                            let frames = sess.actual_buffer_frames;
+                            let dname = sess.device_name.clone();
+                            (
+                                NativeOutputSession::WasapiExclusive(sess),
+                                frames,
+                                dname,
+                                OutputBackendKind::WindowsWasapiExclusive,
+                                "WASAPI Exclusive (Event-Driven)",
+                                OutputReuseKey::WasapiExclusive(reuse_spec),
+                            )
+                        })
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(BackendError::DeviceNotFound(
+                        "Native Windows WASAPI/ASIO unavailable on this OS".into(),
+                    ))
+                }
+            };
 
             match native_attempt {
-                Ok((native_sess, actual_frames, dev_name, bk, api_label)) => {
+                Ok((native_sess, actual_frames, dev_name, bk, api_label, reuse_key)) => {
+                    inner.output_reopen_count.fetch_add(1, Ordering::Relaxed);
+                    inner.cached_clock_source.store(
+                        backend_to_clock_src(inner.headless, bk),
+                        Ordering::Release,
+                    );
+                    #[cfg(target_os = "windows")]
+                    match &native_sess {
+                        NativeOutputSession::WasapiExclusive(s) => {
+                            inner.set_active_wasapi_ctrl(Some(s.control()));
+                        }
+                        _ => inner.set_active_wasapi_ctrl(None),
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    inner.set_active_wasapi_ctrl();
                     native_sess.set_eof_state_code(PlaybackLifecycleState::Ended as i32);
                     verification.set_buffer_size_frames(actual_frames);
                     let mut dec_ver_cfg = ver_cfg;
                     dec_ver_cfg.buffer_size_frames = actual_frames;
                     // Native DSD clocks at 1-bit frequency; track frame clock cleanly for position_ms()
-                    let rate_for_pos = if matches!(wire, WireSampleFormat::NativeDsd { .. }) {
-                        negotiated.target_sample_rate
-                    } else {
-                        negotiated.target_sample_rate
-                    };
+                    let rate_for_pos = negotiated.target_sample_rate;
                     inner.out_sample_rate.store(rate_for_pos, Ordering::SeqCst);
                     if is_opus_dump_enabled() && unified_src.codec == AudioCodec::Opus {
                         tracing::info!(
@@ -8639,8 +10500,19 @@ fn start_output_pipeline(
                             resampled_to_hz: None,
                             backend: bk,
                             device_name: dev_name.clone(),
+                            track_meta: effective_deck_track_meta.clone(),
                         });
                     }
+                    if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                        *tm_lock = effective_deck_track_meta.clone();
+                    }
+                    inner
+                        .dual_deck
+                        .set_deck_track_meta(active_idx, effective_deck_track_meta.clone());
+                    inner
+                        .dual_deck
+                        .committed_deck_gen
+                        .store(active_gen, Ordering::Release);
                     let rg_tags = inner
                         .track_replay_gain
                         .read()
@@ -8667,6 +10539,7 @@ fn start_output_pipeline(
                             expected_stamp,
                             is_wire: true,
                             resampled_to_hz: None,
+                            track_meta: effective_deck_track_meta.clone(),
                         });
                     }
                     inner
@@ -8691,9 +10564,11 @@ fn start_output_pipeline(
                     let dec_tx = cmd_tx.clone();
                     let dec_path = path.clone();
                     let dec_label = source_label.clone();
+                    let thread_guard_counter = Arc::clone(&inner.live_decode_threads);
                     let decode_handle = thread::Builder::new()
                         .name("lumina-wire-decoder".to_string())
                         .spawn(move || {
+                            let _live_guard = DecodeThreadGuard::new(&thread_guard_counter);
                             decode_wire_loop(
                                 decoder,
                                 byte_prod,
@@ -8743,6 +10618,9 @@ fn start_output_pipeline(
                         virtual_handle: None,
                         _cpal_stream: None,
                         native_output: Some(native_sess),
+                        output_reuse_key: reuse_key,
+                        feeder_session_id,
+                        expected_stamp_arc,
                         path,
                         source_label,
                         origin,
@@ -8750,6 +10628,7 @@ fn start_output_pipeline(
                         duration_ms,
                         pcm_rate: rate_for_pos,
                         active_device_id: caps.device_id,
+                        track_meta: effective_deck_track_meta,
                     });
                 }
                 Err(backend_err) => {
@@ -8790,6 +10669,8 @@ fn start_output_pipeline(
     }
 
     let fade_ctrl = Arc::new(AudioFadeControl::new(true, true, start_paused));
+    let feeder_session_id = Arc::new(AtomicU64::new(session_id));
+    let expected_stamp_arc = Arc::new(AtomicU64::new(0));
 
     let (
         producer,
@@ -8801,6 +10682,7 @@ fn start_output_pipeline(
         backend_kind,
         device_name,
         watermark_samples,
+        reuse_key,
     ) = if use_virtual {
         let ring_samples = compute_pcm_ring_samples(pcm_rate, default_out_channels);
         let (prod, cons) = SpscRingBuffer::<f32>::new(ring_samples);
@@ -8825,7 +10707,7 @@ fn start_output_pipeline(
         let feeder = DualDeckPcmFeeder::new(
             Arc::clone(&inner.dual_deck),
             Arc::clone(inner),
-            session_id,
+            Arc::clone(&feeder_session_id),
             active_idx,
             pcm_payload,
             &fade_ctrl,
@@ -8836,7 +10718,7 @@ fn start_output_pipeline(
             default_out_channels,
             Arc::clone(inner),
             Arc::clone(&output_kill_flag),
-            session_id,
+            Arc::clone(&feeder_session_id),
             Arc::clone(&fade_ctrl),
         );
         (
@@ -8849,6 +10731,10 @@ fn start_output_pipeline(
             OutputBackendKind::WindowsWasapiExclusive,
             VIRTUAL_DEVICE_NAME.to_string(),
             wm_samples,
+            OutputReuseKey::VirtualPcm {
+                sample_rate: pcm_rate,
+                channels: default_out_channels,
+            },
         )
     } else {
         let (stream, prod, actual_rate, actual_ch, sample_fmt, bk, dev_name, wm_samples) =
@@ -8860,7 +10746,7 @@ fn start_output_pipeline(
                 &output_kill_flag,
                 active_idx,
                 active_gen,
-                session_id,
+                Arc::clone(&feeder_session_id),
                 &fade_ctrl,
             )?;
         (
@@ -8873,9 +10759,23 @@ fn start_output_pipeline(
             bk,
             dev_name,
             wm_samples,
+            OutputReuseKey::CpalShared {
+                device_id: caps.device_id.clone(),
+                sample_rate: actual_rate,
+                channels: actual_ch,
+            },
         )
     };
 
+    inner.output_reopen_count.fetch_add(1, Ordering::Relaxed);
+    inner.cached_clock_source.store(
+        backend_to_clock_src(inner.headless, backend_kind),
+        Ordering::Release,
+    );
+    #[cfg(target_os = "windows")]
+    inner.set_active_wasapi_ctrl(None);
+    #[cfg(not(target_os = "windows"))]
+    inner.set_active_wasapi_ctrl();
     inner.out_sample_rate.store(out_rate, Ordering::SeqCst);
     if is_opus_dump_enabled() && unified_src.codec == AudioCodec::Opus {
         tracing::info!(
@@ -8948,8 +10848,19 @@ fn start_output_pipeline(
             resampled_to_hz,
             backend: backend_kind,
             device_name: device_name.clone(),
+            track_meta: effective_deck_track_meta.clone(),
         });
     }
+    if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+        *tm_lock = effective_deck_track_meta.clone();
+    }
+    inner
+        .dual_deck
+        .set_deck_track_meta(active_idx, effective_deck_track_meta.clone());
+    inner
+        .dual_deck
+        .committed_deck_gen
+        .store(active_gen, Ordering::Release);
 
     let decode_inner = Arc::clone(inner);
     let decode_cancel = Arc::clone(&cancel_flag);
@@ -8996,6 +10907,7 @@ fn start_output_pipeline(
             expected_stamp: 0,
             is_wire: false,
             resampled_to_hz,
+            track_meta: effective_deck_track_meta.clone(),
         });
     }
     inner
@@ -9010,9 +10922,11 @@ fn start_output_pipeline(
             out_channels,
         });
     let active_device_id = caps.device_id.clone();
+    let thread_guard_counter = Arc::clone(&inner.live_decode_threads);
     let decode_handle = thread::Builder::new()
         .name("lumina-audio-decoder".to_string())
         .spawn(move || {
+            let _live_guard = DecodeThreadGuard::new(&thread_guard_counter);
             decode_loop(
                 decoder,
                 producer,
@@ -9048,7 +10962,7 @@ fn start_output_pipeline(
         output_kill_flag.store(true, Ordering::SeqCst);
         let _ = stream.pause();
         if let Some(h) = decode_handle {
-            let _ = h.join();
+            inner.reaper.retire_decode(h);
         }
         if let Some(h) = virtual_handle {
             let _ = h.join();
@@ -9079,6 +10993,9 @@ fn start_output_pipeline(
         virtual_handle,
         _cpal_stream: cpal_stream,
         native_output: None,
+        output_reuse_key: reuse_key,
+        feeder_session_id,
+        expected_stamp_arc,
         path,
         source_label,
         origin,
@@ -9086,6 +11003,7 @@ fn start_output_pipeline(
         duration_ms,
         pcm_rate,
         active_device_id,
+        track_meta: effective_deck_track_meta,
     })
 }
 
@@ -9186,24 +11104,25 @@ fn coordinator_loop(
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
-            PlayerCommand::Start {
-                session_id,
-                decoder,
-                path,
-                source_label,
-                origin,
-                cancel_token,
-                ack_tx,
-            } => {
-                saved_recovery = None;
-                if cancel_token.is_cancelled() || inner.stopped.load(Ordering::SeqCst) {
-                    let _ = ack_tx.send(Ok(()));
+            PlayerCommand::ApplyLatestStart => {
+                let Some(PendingStart {
+                    session_id,
+                    mut decoder,
+                    path,
+                    source_label,
+                    origin,
+                    track_meta,
+                    cancel_token,
+                    ack_tx,
+                }) = inner.latest_start.lock().ok().and_then(|mut g| g.take())
+                else {
                     continue;
-                }
-                if let Some(mut prev) = active.take() {
-                    let _ = prev.stop_and_join();
-                }
-                if cancel_token.is_cancelled() || inner.stopped.load(Ordering::SeqCst) {
+                };
+                saved_recovery = None;
+                if cancel_token.is_cancelled()
+                    || inner.stopped.load(Ordering::SeqCst)
+                    || inner.current_session_id.load(Ordering::Acquire) != session_id
+                {
                     let _ = ack_tx.send(Ok(()));
                     continue;
                 }
@@ -9224,23 +11143,58 @@ fn coordinator_loop(
                 let default_out_channels = if src_channels == 1 { 2 } else { src_channels };
                 let start_paused = inner.paused.load(Ordering::SeqCst);
 
-                match start_output_pipeline(
-                    &inner,
-                    decoder,
-                    PipelineSpec {
-                        session_id,
-                        pcm_rate,
-                        out_channels: default_out_channels,
-                        path,
-                        source_label,
-                        origin,
-                        cancel_token,
-                        format,
-                        duration_ms,
-                        start_paused,
-                    },
-                    &cmd_tx,
-                ) {
+                let pipeline_spec = PipelineSpec {
+                    session_id,
+                    pcm_rate,
+                    out_channels: default_out_channels,
+                    path,
+                    source_label,
+                    origin,
+                    track_meta,
+                    cancel_token: cancel_token.clone(),
+                    format,
+                    duration_ms,
+                    start_paused,
+                };
+
+                // Try lock-free zero-reopen hot-swap onto the existing live output session first.
+                if let Some(ref mut live_sess) = active {
+                    match try_hot_swap_active_session(
+                        &inner,
+                        live_sess,
+                        decoder,
+                        &pipeline_spec,
+                        &cmd_tx,
+                    ) {
+                        Ok(Ok(())) => {
+                            let _ = ack_tx.send(Ok(()));
+                            continue;
+                        }
+                        Ok(Err(returned_decoder)) => {
+                            decoder = returned_decoder;
+                        }
+                        Err(e) => {
+                            record_playback_error(&inner, e.to_string());
+                            let _ = ack_tx.send(Err(e));
+                            continue;
+                        }
+                    }
+                    // Format/mode/device genuinely changed: tear down old output once, retiring
+                    // old decode thread to background reaper without blocking.
+                    if let Some(mut prev) = active.take() {
+                        prev.stop_retiring_decode(&inner, true);
+                    }
+                }
+
+                if cancel_token.is_cancelled()
+                    || inner.stopped.load(Ordering::SeqCst)
+                    || inner.current_session_id.load(Ordering::Acquire) != session_id
+                {
+                    let _ = ack_tx.send(Ok(()));
+                    continue;
+                }
+
+                match start_output_pipeline(&inner, decoder, pipeline_spec, &cmd_tx) {
                     Ok(sess) => {
                         active = Some(sess);
                         let _ = ack_tx.send(Ok(()));
@@ -9257,6 +11211,7 @@ fn coordinator_loop(
                 path,
                 source_label,
                 origin,
+                track_meta,
                 cancel_token,
                 rg_tags,
             } => {
@@ -9272,14 +11227,16 @@ fn coordinator_loop(
                     while prev.eof_flag.load(Ordering::SeqCst)
                         && inner.state_code.load(Ordering::SeqCst)
                             == PlaybackLifecycleState::Playing as i32
+                        && !cancel_token.is_cancelled()
                         && wait_start.elapsed() < Duration::from_millis(600)
                     {
-                        thread::sleep(Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(5));
                     }
                 }
                 if let Some(mut prev) = active.take() {
                     prev.fade_ctrl.mark_silent();
-                    let _ = prev.stop_and_join();
+                    // Do NOT cancel `prev.cancel_token` because `cancel_token` is its child token.
+                    prev.stop_retiring_decode(&inner, false);
                 }
                 if inner.stopped.load(Ordering::SeqCst) || cancel_token.is_cancelled() {
                     continue;
@@ -9295,6 +11252,7 @@ fn coordinator_loop(
                 }
 
                 inner.format_reinit_count.fetch_add(1, Ordering::SeqCst);
+                inner.playback_epoch.fetch_add(1, Ordering::SeqCst);
                 let effective_rg = rg_tags.with_metadata_fallback(decoder.metadata());
                 if let Ok(mut rg_lock) = inner.track_replay_gain.write() {
                     *rg_lock = effective_rg;
@@ -9330,6 +11288,7 @@ fn coordinator_loop(
                         path,
                         source_label,
                         origin,
+                        track_meta,
                         cancel_token,
                         format,
                         duration_ms,
@@ -9363,6 +11322,7 @@ fn coordinator_loop(
                 let path = prev.path.clone();
                 let source_label = prev.source_label.clone();
                 let origin = prev.origin.clone();
+                let prev_track_meta = prev.track_meta.clone();
                 prev.fade_ctrl.mark_silent();
                 let reused = prev.stop_and_join();
 
@@ -9427,6 +11387,7 @@ fn coordinator_loop(
                         path,
                         source_label,
                         origin,
+                        track_meta: prev_track_meta,
                         cancel_token: fresh_cancel,
                         format,
                         duration_ms,
@@ -9473,9 +11434,13 @@ fn coordinator_loop(
                     .as_ref()
                     .map(|s| s.source_label.clone())
                     .unwrap_or_else(|| source_spec_default_label(&new_spec));
+                let prev_track_meta = active
+                    .as_ref()
+                    .and_then(|s| s.track_meta.clone())
+                    .or_else(|| inner.active_track_metadata.read().ok().and_then(|g| g.clone()));
                 if let Some(mut prev) = active.take() {
                     prev.fade_ctrl.mark_silent();
-                    let _ = prev.stop_and_join();
+                    prev.stop_retiring_decode(&inner, true);
                 }
 
                 let Some(fresh_cancel) = install_fresh_cancel_token(&inner) else {
@@ -9563,6 +11528,7 @@ fn coordinator_loop(
                         path: new_path,
                         source_label,
                         origin: new_origin,
+                        track_meta: prev_track_meta,
                         cancel_token: fresh_cancel,
                         format,
                         duration_ms,
@@ -9596,6 +11562,10 @@ fn coordinator_loop(
             }
             PlayerCommand::HardwareDeviceEvent(event) => match event {
                 DeviceEvent::DefaultRenderChanged(_) => {
+                    AudioDeviceManager::invalidate_device_cache();
+                    inner
+                        .cached_clock_source
+                        .store(CLOCK_SRC_UNINIT, Ordering::Release);
                     let following_default = inner
                         .selected_output
                         .read()
@@ -9617,6 +11587,7 @@ fn coordinator_loop(
                         let format = prev.format.clone();
                         let duration_ms = prev.duration_ms;
                         let pcm_rate = prev.pcm_rate;
+                        let prev_track_meta = prev.track_meta.clone();
                         let src_channels = (format.channels as u16).max(1);
                         let default_out_channels =
                             if src_channels == 1 { 2 } else { src_channels };
@@ -9639,6 +11610,7 @@ fn coordinator_loop(
                                     path,
                                     source_label,
                                     origin: prev_origin,
+                                    track_meta: prev_track_meta,
                                     cancel_token: fresh_cancel,
                                     format,
                                     duration_ms,
@@ -9667,6 +11639,10 @@ fn coordinator_loop(
                     }
                 }
                 DeviceEvent::DeviceRemoved(device_id) => {
+                    AudioDeviceManager::invalidate_device_cache();
+                    inner
+                        .cached_clock_source
+                        .store(CLOCK_SRC_UNINIT, Ordering::Release);
                     let affects = active
                         .as_ref()
                         .is_some_and(|s| device_removal_affects_session(&inner, s, &device_id));
@@ -9699,6 +11675,7 @@ fn coordinator_loop(
                             resume_pos_ms,
                             was_playing,
                             from_suspend: false,
+                            track_meta: prev.track_meta.clone(),
                         });
                         prev.fade_ctrl.mark_silent();
                         let _ = prev.stop_and_join();
@@ -9708,8 +11685,12 @@ fn coordinator_loop(
                     }
                 }
                 DeviceEvent::DeviceAdded(_) => {
+                    AudioDeviceManager::invalidate_device_cache();
+                    inner
+                        .cached_clock_source
+                        .store(CLOCK_SRC_UNINIT, Ordering::Release);
                     if !inner.headless {
-                        let _ = AudioDeviceManager::list_devices();
+                        let _ = AudioDeviceManager::list_devices_with_meta_fresh();
                     }
                     // Keep saved_recovery intact so RerouteOutput or Resume recovers at saved_pos cleanly.
                 }
@@ -9740,6 +11721,7 @@ fn coordinator_loop(
                             resume_pos_ms,
                             was_playing,
                             from_suspend: true,
+                            track_meta: prev.track_meta.clone(),
                         });
                         let _ = prev.stop_and_join();
                         if let Ok(mut af) = inner.active_fade.write() {
@@ -9748,8 +11730,12 @@ fn coordinator_loop(
                     }
                 }
                 DeviceEvent::SystemResume => {
+                    AudioDeviceManager::invalidate_device_cache();
+                    inner
+                        .cached_clock_source
+                        .store(CLOCK_SRC_UNINIT, Ordering::Release);
                     if !inner.headless {
-                        let _ = AudioDeviceManager::list_devices();
+                        let _ = AudioDeviceManager::list_devices_with_meta_fresh();
                     }
                     if active.is_none()
                         && !inner.stopped.load(Ordering::SeqCst)
@@ -9782,6 +11768,7 @@ fn coordinator_loop(
                                     path: rec.path.clone(),
                                     source_label: rec.source_label.clone(),
                                     origin: rec.origin.clone(),
+                                    track_meta: rec.track_meta.clone(),
                                     cancel_token: fresh_cancel,
                                     format: rec.format.clone(),
                                     duration_ms: rec.duration_ms,
@@ -9869,6 +11856,7 @@ fn coordinator_loop(
                     resume_pos_ms,
                     is_paused,
                     reused,
+                    prev_track_meta,
                 ) = if can_recover_active {
                     let resume_pos_ms = position_ms_from_inner(&inner);
                     let is_paused = inner.paused.load(Ordering::SeqCst)
@@ -9880,6 +11868,7 @@ fn coordinator_loop(
                     let format = prev.format.clone();
                     let duration_ms = prev.duration_ms;
                     let pcm_rate = prev.pcm_rate;
+                    let prev_track_meta = prev.track_meta.clone();
                     let reused = prev.stop_and_join();
                     (
                         path,
@@ -9891,6 +11880,7 @@ fn coordinator_loop(
                         resume_pos_ms,
                         is_paused,
                         reused,
+                        prev_track_meta,
                     )
                 } else {
                     let rec = saved_recovery.take().unwrap();
@@ -9905,6 +11895,7 @@ fn coordinator_loop(
                         rec.resume_pos_ms,
                         is_paused,
                         None,
+                        rec.track_meta,
                     )
                 };
 
@@ -9940,6 +11931,7 @@ fn coordinator_loop(
                         path: path.clone(),
                         source_label: source_label.clone(),
                         origin: prev_origin.clone(),
+                        track_meta: prev_track_meta.clone(),
                         cancel_token: fresh_cancel,
                         format: format.clone(),
                         duration_ms,
@@ -9978,6 +11970,7 @@ fn coordinator_loop(
                                 resume_pos_ms,
                                 was_playing: !is_paused,
                                 from_suspend: false,
+                                track_meta: prev_track_meta,
                             });
                         }
                         record_playback_error(&inner, e.to_string());
@@ -10042,6 +12035,7 @@ fn coordinator_loop(
                                 path: rec.path.clone(),
                                 source_label: rec.source_label.clone(),
                                 origin: rec.origin.clone(),
+                                track_meta: rec.track_meta.clone(),
                                 cancel_token: fresh_cancel,
                                 format: rec.format.clone(),
                                 duration_ms: rec.duration_ms,
@@ -10085,8 +12079,9 @@ fn coordinator_loop(
             }
             PlayerCommand::Stop => {
                 saved_recovery = None;
+                inner.clear_latest_start();
                 if let Some(mut prev) = active.take() {
-                    let _ = prev.stop_and_join();
+                    prev.stop_retiring_decode(&inner, true);
                 }
                 if let Ok(mut af) = inner.active_fade.write() {
                     *af = None;
@@ -10110,6 +12105,7 @@ fn coordinator_loop(
                         sess.format = snap.format.clone();
                         sess.duration_ms = snap.duration_ms;
                         sess.pcm_rate = snap.pcm_rate;
+                        sess.track_meta = patched_track_meta(snap);
                         sess.eof_flag = Arc::clone(&inner.dual_deck.deck_eof_flags[cur_active]);
                     }
                     let decode_finished = inner.dual_deck.decode_entries[cur_active]
@@ -10150,6 +12146,7 @@ fn coordinator_loop(
                         let format = sess.format.clone();
                         let duration_ms = sess.duration_ms;
                         let pcm_rate = sess.pcm_rate;
+                        let track_meta = sess.track_meta.clone();
                         let src_channels = (format.channels as u16).max(1);
                         let default_out_channels = if src_channels == 1 { 2 } else { src_channels };
 
@@ -10188,6 +12185,7 @@ fn coordinator_loop(
                                         path,
                                         source_label,
                                         origin,
+                                        track_meta,
                                         cancel_token: fresh_cancel,
                                         format,
                                         duration_ms,
@@ -10240,7 +12238,9 @@ fn coordinator_loop(
                 deck_idx,
                 deck_gen: _,
             } => {
-                inner.dual_deck.retire_inactive_deck(deck_idx);
+                inner
+                    .dual_deck
+                    .retire_inactive_deck(deck_idx, &inner.reaper);
                 let cur_active = inner.dual_deck.active_idx();
                 if let Some(ref mut sess) = active {
                     if let Ok(mg) = inner.dual_deck.deck_meta[cur_active].read()
@@ -10253,6 +12253,7 @@ fn coordinator_loop(
                         sess.duration_ms = snap.duration_ms;
                         sess.pcm_rate = snap.pcm_rate;
                         sess.active_device_id = snap.active_device_id.clone();
+                        sess.track_meta = patched_track_meta(snap);
                         sess.eof_flag = Arc::clone(&inner.dual_deck.deck_eof_flags[cur_active]);
                     }
                     if let Ok(eg) = inner.dual_deck.decode_entries[cur_active].lock()
@@ -10283,9 +12284,11 @@ fn coordinator_loop(
                 let is_paused = inner.paused.load(Ordering::SeqCst);
                 if let Some(mut prev) = active.take() {
                     prev.fade_ctrl.mark_silent();
-                    let _ = prev.stop_and_join();
+                    prev.stop_retiring_decode(&inner, true);
                 }
-                let _ = inner.dual_deck.cancel_and_join_deck(from_i);
+                inner
+                    .dual_deck
+                    .cancel_and_retire_deck(from_i, &inner.reaper);
 
                 let resume_frame = if is_mismatch_recovery {
                     inner.dual_deck.mismatch_resume_frame.load(Ordering::Acquire)
@@ -10337,10 +12340,75 @@ fn coordinator_loop(
                     .read()
                     .ok()
                     .and_then(|g| g.clone());
+                let standby_track_meta_backup = inner.dual_deck.deck_track_meta[to_i]
+                    .read()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .or_else(|| standby_snap_backup.as_ref().and_then(|s| s.track_meta.clone()))
+                    .or_else(|| {
+                        if is_mismatch_recovery {
+                            inner.active_track_metadata.read().ok().and_then(|g| g.clone())
+                        } else {
+                            None
+                        }
+                    });
 
+                let mut reopen_succeeded = false;
                 match start_output_pipeline_from_standby(&inner, to_i, next_sid, is_paused) {
-                    Ok(sess) => {
+                    Ok(mut sess) => {
+                        let dec_dur = sess.duration_ms;
+                        let committed_meta = standby_track_meta_backup
+                            .clone()
+                            .or_else(|| sess.track_meta.clone())
+                            .map(|mut m| {
+                                if dec_dur > 0 {
+                                    m.duration_ms = dec_dur;
+                                }
+                                m
+                            });
+                        if !is_mismatch_recovery {
+                            inner
+                                .dual_deck
+                                .set_deck_track_meta(to_i, committed_meta.clone());
+                            if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                                *tm_lock = committed_meta.clone();
+                            }
+                            if let Ok(mut am_lock) = inner.active_meta.write()
+                                && let Some(ref mut am) = *am_lock
+                            {
+                                am.track_meta = committed_meta.clone();
+                            }
+                            if let Ok(mut mg) = inner.dual_deck.deck_meta[to_i].write()
+                                && let Some(ref mut snap) = *mg
+                            {
+                                snap.track_meta = committed_meta.clone();
+                            }
+                            sess.track_meta = committed_meta;
+                            if from_i != to_i {
+                                inner.dual_deck.set_deck_track_meta(from_i, None);
+                            }
+                        } else if sess.track_meta.is_none()
+                            && let Some(ref prev_tm) = committed_meta
+                        {
+                            inner
+                                .dual_deck
+                                .set_deck_track_meta(to_i, Some(prev_tm.clone()));
+                            if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                                *tm_lock = Some(prev_tm.clone());
+                            }
+                            if let Ok(mut am_lock) = inner.active_meta.write()
+                                && let Some(ref mut am) = *am_lock
+                            {
+                                am.track_meta = Some(prev_tm.clone());
+                            }
+                            sess.track_meta = Some(prev_tm.clone());
+                        }
+                        inner
+                            .dual_deck
+                            .committed_deck_gen
+                            .store(inner.dual_deck.deck_gen_for(to_i), Ordering::Release);
                         active = Some(sess);
+                        reopen_succeeded = true;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -10348,6 +12416,8 @@ fn coordinator_loop(
                         );
                         let mut fallback_ok = false;
                         if let Some(snap) = standby_snap_backup {
+                            let preserved_track_meta =
+                                snap.track_meta.clone().or(standby_track_meta_backup);
                             let reused = inner.dual_deck.cancel_and_join_deck(to_i);
                             if let Some(fresh_cancel) = install_fresh_cancel_token(&inner) {
                                 match reopen_origin_decoder(
@@ -10397,6 +12467,7 @@ fn coordinator_loop(
                                                 path: snap.path,
                                                 source_label: snap.source_label,
                                                 origin: snap.origin,
+                                                track_meta: preserved_track_meta,
                                                 cancel_token: fresh_cancel,
                                                 format: fmt,
                                                 duration_ms: dur_ms,
@@ -10405,8 +12476,14 @@ fn coordinator_loop(
                                             &cmd_tx,
                                         ) {
                                             Ok(sess) => {
+                                                if !is_mismatch_recovery && from_i != to_i {
+                                                    inner
+                                                        .dual_deck
+                                                        .set_deck_track_meta(from_i, None);
+                                                }
                                                 active = Some(sess);
                                                 fallback_ok = true;
+                                                reopen_succeeded = true;
                                             }
                                             Err(fb_err) => {
                                                 record_playback_error_with_code(
@@ -10441,6 +12518,13 @@ fn coordinator_loop(
                         }
                     }
                 }
+                if reopen_succeeded && !is_mismatch_recovery {
+                    inner
+                        .dual_deck
+                        .swap_generation
+                        .fetch_add(1, Ordering::Release);
+                    inner.playback_epoch.fetch_add(1, Ordering::Release);
+                }
                 inner.dual_deck.notify_flip_done();
             }
             PlayerCommand::TriggerAutoStandby => {
@@ -10457,7 +12541,7 @@ fn coordinator_loop(
                     .ok()
                     .and_then(|mut g| g.take());
                 inner.has_queued_next_spec.store(false, Ordering::SeqCst);
-                if let Some((spec, label)) = next_opt {
+                if let Some((spec, label, track_meta)) = next_opt {
                     if matches!(spec, StreamSourceSpec::ExternalBackend { .. }) {
                         continue;
                     }
@@ -10472,18 +12556,26 @@ fn coordinator_loop(
                         false,
                         None,
                         None,
+                        track_meta,
+                        true,
                     );
                 }
             }
             PlayerCommand::Shutdown => {
                 let _ = saved_recovery.take();
+                inner.clear_latest_start();
                 if let Some(mut prev) = active.take() {
                     prev.fade_ctrl.mark_silent();
-                    let _ = prev.stop_and_join();
+                    prev.stop_retiring_decode(&inner, true);
                 }
                 inner.dual_deck.cancel_standby();
                 let cur_active = inner.dual_deck.active_idx();
                 let _ = inner.dual_deck.cancel_and_join_deck(cur_active);
+                #[cfg(target_os = "windows")]
+                inner.set_active_wasapi_ctrl(None);
+                #[cfg(not(target_os = "windows"))]
+                inner.set_active_wasapi_ctrl();
+                inner.reaper.shutdown();
                 break;
             }
         }
@@ -10940,7 +13032,7 @@ fn decode_wire_loop(
             if inner.paused.load(Ordering::Relaxed) {
                 let buffered = producer.capacity().saturating_sub(producer.available_write());
                 if buffered >= watermark_bytes {
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(Duration::from_millis(2));
                     continue;
                 }
             }
@@ -11126,7 +13218,7 @@ fn decode_wire_loop(
                         }
                     }
                     if offset < wire_bytes.len() {
-                        thread::sleep(Duration::from_millis(4));
+                        thread::sleep(Duration::from_millis(1));
                     }
                 }
                 if let Some(ref mut gate) = standby_gate {
@@ -11168,7 +13260,7 @@ fn decode_wire_loop(
                     inner.queued_next.write().ok().and_then(|mut g| g.take())
                 {
                     let next_path = next_stream.display_path();
-                    let next_cancel = CancellationToken::new();
+                    let next_cancel = cancel_token.child_token();
                     if let Ok(next_dec) = open_decoder_for_stream_with_token(
                         &next_stream,
                         next_cancel.clone(),
@@ -11201,6 +13293,7 @@ fn decode_wire_loop(
                             inner.frames_rendered.store(0, Ordering::SeqCst);
                             inner.nonzero_output_frames.store(0, Ordering::SeqCst);
                             inner.seek_epoch.fetch_add(1, Ordering::SeqCst);
+                            inner.playback_epoch.fetch_add(1, Ordering::SeqCst);
                             verification.reset_streams();
                             inner.gapless_transitions.fetch_add(1, Ordering::SeqCst);
                             if let Ok(mut rg_lock) = inner.track_replay_gain.write() {
@@ -11214,6 +13307,10 @@ fn decode_wire_loop(
                                 meta.source_label = next_label.clone();
                                 meta.format = next_dec.format().clone();
                                 meta.duration_ms = next_dur;
+                                meta.track_meta = None;
+                            }
+                            if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                                *tm_lock = None;
                             }
                             if let Some(m) = next_dec.metadata() {
                                 verification.set_source_metadata(
@@ -11253,6 +13350,7 @@ fn decode_wire_loop(
                             path: next_path,
                             source_label: next_label,
                             origin: PlayerOrigin::Legacy(next_stream),
+                            track_meta: None,
                             cancel_token: next_cancel,
                             rg_tags: next_rg,
                         });
@@ -11264,6 +13362,7 @@ fn decode_wire_loop(
                     &inner,
                     decoder.as_mut(),
                     &cancel_flag,
+                    &cancel_token,
                     &eof_flag,
                     &mut paused_since,
                     &mut idle_reclaimed,
@@ -11503,7 +13602,7 @@ fn decode_loop(
             if inner.paused.load(Ordering::Relaxed) {
                 let buffered = producer.capacity().saturating_sub(producer.available_write());
                 if buffered >= watermark_samples {
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(Duration::from_millis(2));
                     continue;
                 }
             }
@@ -11650,7 +13749,7 @@ fn decode_loop(
                         }
                     }
                     if offset < f32_buf.len() {
-                        thread::sleep(Duration::from_millis(5));
+                        thread::sleep(Duration::from_millis(1));
                     }
                 }
                 if let Some(ref mut gate) = standby_gate {
@@ -11722,7 +13821,7 @@ fn decode_loop(
                             }
                         }
                         if offset < tail_f32.len() {
-                            thread::sleep(Duration::from_millis(5));
+                            thread::sleep(Duration::from_millis(1));
                         }
                     }
                 }
@@ -11744,7 +13843,7 @@ fn decode_loop(
                     inner.queued_next.write().ok().and_then(|mut g| g.take())
                 {
                     let next_path = next_stream.display_path();
-                    let next_cancel = CancellationToken::new();
+                    let next_cancel = cancel_token.child_token();
                     if let Ok(next_dec) = open_decoder_for_stream_with_token(
                         &next_stream,
                         next_cancel.clone(),
@@ -11777,6 +13876,7 @@ fn decode_loop(
                             inner.frames_rendered.store(0, Ordering::SeqCst);
                             inner.nonzero_output_frames.store(0, Ordering::SeqCst);
                             inner.seek_epoch.fetch_add(1, Ordering::SeqCst);
+                            inner.playback_epoch.fetch_add(1, Ordering::SeqCst);
                             if let Some(ref v) = verification {
                                 v.reset_streams();
                             }
@@ -11792,6 +13892,10 @@ fn decode_loop(
                                 meta.source_label = next_label;
                                 meta.format = next_dec.format().clone();
                                 meta.duration_ms = next_dur;
+                                meta.track_meta = None;
+                            }
+                            if let Ok(mut tm_lock) = inner.active_track_metadata.write() {
+                                *tm_lock = None;
                             }
                             if let Some(ref v) = verification
                                 && let Some(m) = next_dec.metadata()
@@ -11823,6 +13927,7 @@ fn decode_loop(
                             path: next_path,
                             source_label: next_label,
                             origin: PlayerOrigin::Legacy(next_stream),
+                            track_meta: None,
                             cancel_token: next_cancel,
                             rg_tags: next_rg,
                         });
@@ -11833,6 +13938,7 @@ fn decode_loop(
                     &inner,
                     decoder.as_mut(),
                     &cancel_flag,
+                    &cancel_token,
                     &eof_flag,
                     &mut paused_since,
                     &mut idle_reclaimed,
@@ -12094,8 +14200,8 @@ impl StreamingSincResampler {
                         acc[c] += self.history[base + c] * w;
                     }
                 }
-                for c in 0..ch {
-                    out.push(acc[c] * inv_w_sum);
+                for &v in acc.iter().take(ch) {
+                    out.push(v * inv_w_sum);
                 }
             } else {
                 let out_start = out.len();
@@ -12138,10 +14244,10 @@ fn spawn_virtual_wire_consumer(
     out_channels: u16,
     inner: Arc<PlayerInner>,
     output_kill_flag: Arc<AtomicBool>,
-    session_id: u64,
+    active_session_id: Arc<AtomicU64>,
     watermark_bytes: usize,
     fade_ctrl: Arc<AudioFadeControl>,
-    expected_format_stamp: u64,
+    expected_format_stamp: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     let ch = out_channels.max(1) as usize;
     let bpf = wire.bytes_per_sample().max(1) * ch;
@@ -12185,25 +14291,20 @@ fn spawn_virtual_wire_consumer(
                     break;
                 }
 
-                feeder.poll_inbox();
-
-                // RT Format-Mismatch Silence Guard: never output mismatched PCM bytes
-                let stamp_mismatch = expected_format_stamp != 0
-                    && inner.published_format_stamp.load(Ordering::Acquire)
-                        != expected_format_stamp;
-                if inner.format_mismatch_flag.load(Ordering::Acquire) || stamp_mismatch {
-                    if stamp_mismatch {
-                        inner.format_mismatch_flag.store(true, Ordering::Release);
-                    }
-                    scratch.fill(sil_byte);
-                    fade_ctrl.mark_silent();
-                    continue;
+                if let Some(new_wm) = feeder.poll_inbox() {
+                    buffering_gate = new_wm > 0;
+                    fade.reset_for_play_start();
+                    dop_phase = false;
                 }
 
                 let fade_target = fade_ctrl.target();
+                let in_skip_silence = fade_target == FadeTarget::SkipSilence;
                 if matches!(
                     fade_target,
-                    FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
+                    FadeTarget::PauseFadeOut
+                        | FadeTarget::StopFadeOut
+                        | FadeTarget::SeekFadeOut
+                        | FadeTarget::SkipSilence
                 ) {
                     if !fade.fade_out_enabled() || fade.gain() <= 0.0 {
                         fade.set_zero();
@@ -12247,8 +14348,23 @@ fn spawn_virtual_wire_consumer(
                     continue;
                 }
 
+                // RT Format-Mismatch Silence Guard: never output mismatched PCM bytes
+                let expected_stamp = expected_format_stamp.load(Ordering::Acquire);
+                let stamp_mismatch = expected_stamp != 0
+                    && inner.published_format_stamp.load(Ordering::Acquire) != expected_stamp;
+                if inner.format_mismatch_flag.load(Ordering::Acquire) || stamp_mismatch {
+                    if stamp_mismatch {
+                        inner.format_mismatch_flag.store(true, Ordering::Release);
+                    }
+                    scratch.fill(sil_byte);
+                    fade_ctrl.mark_silent();
+                    continue;
+                }
+
                 if inner.stopped.load(Ordering::Relaxed)
-                    || inner.current_session_id.load(Ordering::Relaxed) != session_id
+                    || (!in_skip_silence
+                        && inner.current_session_id.load(Ordering::Relaxed)
+                            != active_session_id.load(Ordering::Acquire))
                 {
                     break;
                 }
@@ -12295,6 +14411,15 @@ fn spawn_virtual_wire_consumer(
                         DualDeckWireOutcome::Rendered { .. }
                         | DualDeckWireOutcome::CrossRateDraining => {}
                         DualDeckWireOutcome::EofEmpty => {
+                            if let Some(new_wm) = feeder.poll_inbox() {
+                                buffering_gate = new_wm > 0;
+                                fade.reset_for_play_start();
+                                dop_phase = false;
+                                continue;
+                            }
+                            if fade_ctrl.target() == FadeTarget::SkipSilence {
+                                continue;
+                            }
                             fade_ctrl.mark_silent();
                             let _ = inner.state_code.compare_exchange(
                                 PlaybackLifecycleState::Playing as i32,
@@ -12325,7 +14450,7 @@ fn spawn_virtual_consumer(
     out_channels: u16,
     inner: Arc<PlayerInner>,
     output_kill_flag: Arc<AtomicBool>,
-    session_id: u64,
+    active_session_id: Arc<AtomicU64>,
     fade_ctrl: Arc<AudioFadeControl>,
 ) -> JoinHandle<()> {
     let ch = out_channels.max(1) as usize;
@@ -12351,8 +14476,11 @@ fn spawn_virtual_consumer(
                     break;
                 }
 
+                let in_skip_silence = fade_ctrl.target() == FadeTarget::SkipSilence;
                 if inner.stopped.load(Ordering::Relaxed)
-                    || inner.current_session_id.load(Ordering::Relaxed) != session_id
+                    || (!in_skip_silence
+                        && inner.current_session_id.load(Ordering::Relaxed)
+                            != active_session_id.load(Ordering::Acquire))
                 {
                     break;
                 }
@@ -12699,7 +14827,7 @@ fn open_cpal_output(
     output_kill_flag: &Arc<AtomicBool>,
     active_deck: usize,
     active_gen: u64,
-    session_id: u64,
+    active_session_id: Arc<AtomicU64>,
     fade_ctrl: &Arc<AudioFadeControl>,
 ) -> Result<
     (
@@ -12746,7 +14874,7 @@ fn open_cpal_output(
     let feeder = DualDeckPcmFeeder::new(
         Arc::clone(&inner.dual_deck),
         Arc::clone(inner),
-        session_id,
+        active_session_id,
         active_deck,
         payload,
         fade_ctrl,
@@ -12781,7 +14909,7 @@ fn open_cpal_output_with_payload(
     payload: RtPcmInboxPayload,
     inner: &Arc<PlayerInner>,
     output_kill_flag: &Arc<AtomicBool>,
-    session_id: u64,
+    active_session_id: Arc<AtomicU64>,
     fade_ctrl: &Arc<AudioFadeControl>,
 ) -> Result<(cpal::Stream, u32, u16, SampleFormat, OutputBackendKind, String), CoreAudioError> {
     let (sel_id, sel_backend) = inner
@@ -12806,7 +14934,7 @@ fn open_cpal_output_with_payload(
     let feeder = DualDeckPcmFeeder::new(
         Arc::clone(&inner.dual_deck),
         Arc::clone(inner),
-        session_id,
+        active_session_id,
         active_deck,
         payload,
         fade_ctrl,
@@ -12997,10 +15125,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{is_fatal_seek_io_error, AudioPlayer};
+    use super::{is_fatal_seek_io_error, AudioPlayer, PlaybackLifecycleState};
     use crate::error::DecoderError;
     use crate::stream::StreamSource;
-    use core_types::{DeckId, DeckState, StreamKey, StreamSourceSpec};
+    use core_types::{DeckId, DeckState, DeckTrackMetadata, StreamKey, StreamSourceSpec};
     use std::io::{Error, ErrorKind, Write};
     use std::time::{Duration, Instant};
 
@@ -13659,7 +15787,7 @@ mod tests {
         let mut feeder = DualDeckPcmFeeder::new(
             Arc::clone(&inner.dual_deck),
             Arc::clone(&inner),
-            1,
+            Arc::new(std::sync::atomic::AtomicU64::new(1)),
             0,
             payload,
             &fade_ctrl,
@@ -13727,11 +15855,86 @@ mod tests {
             f32_bytes.extend_from_slice(&v.to_le_bytes());
         }
         fade_out_wire_tail(&mut f32_bytes, WireSampleFormat::Float32Le, 1, 8);
-        for chunk in f32_bytes.chunks_exact(4) {
-            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for chunk in f32_bytes.as_chunks::<4>().0 {
+            let v = f32::from_le_bytes(*chunk);
             assert!(v.is_finite());
         }
         let last_f = f32::from_le_bytes([f32_bytes[28], f32_bytes[29], f32_bytes[30], f32_bytes[31]]);
         assert_eq!(last_f, 0.0);
+    }
+
+    #[test]
+    fn test_hardware_non_dual_feeder_eof_promotes_standby_and_bumps_swap_generation() {
+        let player = AudioPlayer::new_headless();
+        let meta_a = DeckTrackMetadata {
+            track_id: "hw-a".to_string(),
+            provider_id: "local".to_string(),
+            title: "HW Track A".to_string(),
+            artist: "Artist A".to_string(),
+            album: "Album A".to_string(),
+            cover_url: Some("https://cdn.example.com/hw-a.jpg".to_string()),
+            duration_ms: 4_000,
+        };
+        let meta_b = DeckTrackMetadata {
+            track_id: "hw-b".to_string(),
+            provider_id: "qobuz".to_string(),
+            title: "HW Track B".to_string(),
+            artist: "Artist B".to_string(),
+            album: "Album B".to_string(),
+            cover_url: Some("https://cdn.example.com/hw-b.jpg".to_string()),
+            duration_ms: 3_000,
+        };
+
+        player
+            .play_stream_with_metadata(
+                make_synth_stream("hw-a", "HW Track A", 4_000, 48_000, 2),
+                "HW A",
+                Some(meta_a),
+            )
+            .expect("play hw-a");
+        player
+            .prepare_standby_with_metadata(
+                make_synth_stream("hw-b", "HW Track B", 3_000, 48_000, 2),
+                "HW B",
+                Some(meta_b),
+            )
+            .expect("prepare standby hw-b");
+        assert!(wait_for_standby_ready(&player, Duration::from_secs(2)));
+        assert_eq!(player.swap_generation(), 0);
+
+        // Simulate hardware WASAPI Exclusive / ASIO profile (uses_dual_feeder = false) reaching EOF
+        if let Ok(mut pg) = player.inner.dual_deck.active_profile.write()
+            && let Some(ref mut prof) = *pg
+        {
+            prof.uses_dual_feeder = false;
+        }
+        player.inner.state_code.store(
+            PlaybackLifecycleState::Ended as i32,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        player.inner.dual_deck.unpark_relay();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while (player.swap_generation() < 1 || player.active_deck() != DeckId::DeckB)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+
+        let status = player.dual_deck_status();
+        assert_eq!(status.active_deck, DeckId::DeckB);
+        assert_eq!(status.deck_b_state, DeckState::Playing);
+        assert_eq!(status.swap_generation, 1);
+        let active_tm = status
+            .active_track
+            .expect("active_track populated after hardware EOF promotion");
+        assert_eq!(active_tm.track_id, "hw-b");
+        assert_eq!(active_tm.provider_id, "qobuz");
+        assert_eq!(active_tm.title, "HW Track B");
+        assert_eq!(
+            active_tm.cover_url.as_deref(),
+            Some("https://cdn.example.com/hw-b.jpg")
+        );
+        player.shutdown();
     }
 }

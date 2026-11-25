@@ -43,9 +43,19 @@ void main() {
     await tester.pump();
     expect(service.currentState.isMuted, isTrue);
 
-    // Tap Quality Badge opens SignalPathModal
+    // Tap Quality Badge opens AudioInfoPopover, and action opens SignalPathModal
     await tester.tap(find.byKey(const Key('quality_badge_button')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('audio_info_popover')), findsOneWidget);
+    expect(find.text('等級'), findsOneWidget);
+    expect(find.text('格式'), findsOneWidget);
+    expect(find.text('取樣規格'), findsOneWidget);
+    expect(find.text('即時串流率'), findsOneWidget);
+    expect(find.text('當前輸出裝置'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('btn_open_signal_path_from_popover')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('audio_info_popover')), findsNothing);
     expect(find.text('音訊訊號路徑'), findsOneWidget);
     expect(find.text('一鍵旁通 DSP（直出模式）'), findsOneWidget);
   });

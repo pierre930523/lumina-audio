@@ -47,9 +47,7 @@ pub extern "C" fn lumina_signal_path_get() -> *mut c_char {
         let engine = get_engine();
         let bypassed = engine.dsp_bypassed.load(Ordering::Relaxed);
 
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        if let Some(player) = engine.player_clone() {
             let path = player.current_signal_path();
             let effective_bypass = player.is_dsp_bypassed();
             engine
@@ -100,9 +98,7 @@ pub extern "C" fn lumina_signal_path_get() -> *mut c_char {
 pub extern "C" fn lumina_signal_path_get_quality() -> c_int {
     catch_unwind_ffi(-1, "lumina_signal_path_get_quality", || {
         let engine = get_engine();
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        if let Some(player) = engine.player_clone() {
             let q = match player.current_signal_path().overall {
                 SignalQuality::Lossless => 0,
                 SignalQuality::Enhanced => 1,
@@ -127,9 +123,7 @@ pub extern "C" fn lumina_signal_path_toggle_dsp_bypass() -> c_int {
         "lumina_signal_path_toggle_dsp_bypass",
         || {
             let engine = get_engine();
-            if let Ok(player_guard) = engine.player.read()
-                && let Some(ref player) = *player_guard
-            {
+            if let Some(player) = engine.player_clone() {
                 let effective = player.toggle_dsp_bypass();
                 engine.dsp_bypassed.store(effective, Ordering::SeqCst);
                 return Ok(LUMINA_OK);
@@ -206,9 +200,7 @@ pub extern "C" fn lumina_signal_path_inspect(
 pub extern "C" fn lumina_dsp_get_config() -> *mut c_char {
     catch_unwind_ffi(std::ptr::null_mut(), "lumina_dsp_get_config", || {
         let engine = get_engine();
-        let cfg = if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        let cfg = if let Some(p) = engine.player_clone() {
             p.get_dsp_config()
         } else {
             SharedDspConfig {
@@ -233,9 +225,7 @@ pub extern "C" fn lumina_dsp_set_config(config_json: *const c_char) -> c_int {
         let engine = get_engine();
         engine.dsp_bypassed.store(cfg.bypass, Ordering::SeqCst);
 
-        if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        if let Some(p) = engine.player_clone() {
             p.set_dsp_config(cfg)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             engine
@@ -259,9 +249,7 @@ pub extern "C" fn lumina_dsp_import_autoeq(autoeq_txt: *const c_char) -> *mut c_
         let bands = parse_autoeq_txt(raw).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
         let engine = get_engine();
-        if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        if let Some(p) = engine.player_clone() {
             let mut cfg = p.get_dsp_config();
             cfg.peq_bands = bands.clone();
             cfg.bypass = false;

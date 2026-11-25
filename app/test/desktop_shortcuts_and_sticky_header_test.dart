@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
 import 'package:lumina_app/models/nav_entry.dart';
+import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/library_index_cache.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
@@ -434,7 +435,7 @@ void main() {
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
 
-      final service = MockAudioService();
+      final service = _ScrollableArtistMockAudioService();
       addTearDown(service.dispose);
 
       final cache = LibraryIndexCache();
@@ -480,4 +481,20 @@ void main() {
       expect(textWidget.data, 'Pink Floyd');
     });
   });
+}
+
+class _ScrollableArtistMockAudioService extends MockAudioService {
+  late final List<TrackInfo> _extraSeeded = <TrackInfo>[
+    ...super.queue,
+    for (var i = 1; i <= 10; i++)
+      super.queue.first.copyWith(
+        id: 'pf-sticky-extra-$i',
+        title: 'Pink Floyd Anthology Track $i',
+        artist: 'Pink Floyd',
+        album: i <= 5 ? 'Wish You Were Here' : 'Animals',
+      ),
+  ];
+
+  @override
+  List<TrackInfo> get queue => _extraSeeded;
 }

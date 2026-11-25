@@ -178,17 +178,16 @@ class _DspControlPanelState extends State<DspControlPanel> {
                     ),
                   ),
                   selected: !_config.bypass && !strictBypassed,
-                  selectedColor: LuminaTokens.accentBlueStrong.withValues(
-                    alpha: 0.28,
-                  ),
-                  backgroundColor: LuminaTokens.cardElevatedBg,
-                  checkmarkColor: LuminaTokens.accentBlue,
+                  surfaceTintColor: Colors.transparent,
+                  selectedColor: LuminaTokens.glassSegmentSelectedBg,
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  checkmarkColor: Colors.white,
                   side: BorderSide(
                     color: strictBypassed
-                        ? LuminaTokens.borderSubtle
+                        ? LuminaTokens.glassCardDivider
                         : (!_config.bypass
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.borderControl),
+                              ? LuminaTokens.glassSegmentSelectedBorder
+                              : LuminaTokens.glassPillBorder),
                   ),
                   onSelected: strictBypassed
                       ? null
@@ -237,10 +236,10 @@ class _DspControlPanelState extends State<DspControlPanel> {
                 vertical: LuminaTokens.spaceXs,
               ),
               decoration: BoxDecoration(
-                color: LuminaTokens.accentPurple.withValues(alpha: 0.14),
+                color: LuminaTokens.hiResGoldBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
                 border: Border.all(
-                  color: LuminaTokens.accentPurple.withValues(alpha: 0.6),
+                  color: LuminaTokens.hiResGoldBorder.withValues(alpha: 0.6),
                 ),
               ),
               child: const Row(
@@ -248,14 +247,14 @@ class _DspControlPanelState extends State<DspControlPanel> {
                   Icon(
                     Icons.lock_outline_rounded,
                     size: 16,
-                    color: LuminaTokens.accentPurpleText,
+                    color: LuminaTokens.hiResGoldText,
                   ),
                   SizedBox(width: LuminaTokens.spaceXs),
                   Expanded(
                     child: Text(
                       'Strict Bit-Perfect Mode 作用中：EQ / Crossfeed / ReplayGain / Limiter 已強制旁通；關閉嚴格模式可恢復即時 DSP。',
                       style: TextStyle(
-                        color: LuminaTokens.accentPurpleText,
+                        color: LuminaTokens.hiResGoldText,
                         fontSize: 12,
                         height: 1.4,
                       ),
@@ -269,9 +268,9 @@ class _DspControlPanelState extends State<DspControlPanel> {
           Container(
             padding: const EdgeInsets.all(LuminaTokens.spaceMd),
             decoration: BoxDecoration(
-              color: LuminaTokens.cardBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-              border: Border.all(color: LuminaTokens.borderSubtle),
+              color: LuminaTokens.glassCardBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+              border: Border.all(color: LuminaTokens.glassCardBorder),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -288,14 +287,14 @@ class _DspControlPanelState extends State<DspControlPanel> {
                 SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     activeTrackColor: strictBypassed
-                        ? LuminaTokens.borderSubtle
-                        : LuminaTokens.accentBlue,
+                        ? LuminaTokens.glassCardDivider
+                        : LuminaTokens.glassTextPrimary,
                     inactiveTrackColor: strictBypassed
-                        ? LuminaTokens.borderSubtle
-                        : LuminaTokens.borderControl,
+                        ? LuminaTokens.glassCardDivider
+                        : LuminaTokens.glassTrackUnplayed,
                     thumbColor: strictBypassed
                         ? LuminaTokens.textDisabled
-                        : LuminaTokens.textPrimary,
+                        : Colors.white,
                     overlayColor: LuminaTokens.focusRing.withValues(alpha: 0.2),
                   ),
                   child: Column(
@@ -355,9 +354,9 @@ class _DspControlPanelState extends State<DspControlPanel> {
           Container(
             padding: const EdgeInsets.all(LuminaTokens.spaceMd),
             decoration: BoxDecoration(
-              color: LuminaTokens.cardBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-              border: Border.all(color: LuminaTokens.borderSubtle),
+              color: LuminaTokens.glassCardBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+              border: Border.all(color: LuminaTokens.glassCardBorder),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -367,15 +366,7 @@ class _DspControlPanelState extends State<DspControlPanel> {
                   child: SwitchListTile(
                     key: const Key('switch_crossfeed'),
                     contentPadding: EdgeInsets.zero,
-                    hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.45),
-                    activeTrackColor: LuminaTokens.accentBlueStrong,
-                    activeThumbColor: LuminaTokens.textPrimary,
-                    inactiveTrackColor: LuminaTokens.cardElevatedBg,
-                    inactiveThumbColor: strictBypassed
-                        ? LuminaTokens.textDisabled
-                        : LuminaTokens.textSecondary,
-                    trackOutlineColor:
-                        LuminaSettingsStyles.switchTrackOutlineColor,
+                    hoverColor: LuminaTokens.glassRowHoverBg,
                     title: Text(
                       'Bauer 聲學交叉饋送（耳機音場自然化）',
                       style: TextStyle(
@@ -425,21 +416,21 @@ class _DspControlPanelState extends State<DspControlPanel> {
                           horizontal: LuminaTokens.spaceSm,
                         ),
                         decoration: BoxDecoration(
-                          color: LuminaTokens.cardElevatedBg,
+                          color: LuminaTokens.glassPillBg,
                           borderRadius: BorderRadius.circular(
                             LuminaTokens.radiusSm,
                           ),
                           border: Border.all(
                             color: strictBypassed
-                                ? LuminaTokens.borderSubtle
-                                : LuminaTokens.borderControl,
+                                ? LuminaTokens.glassCardDivider
+                                : LuminaTokens.glassPillBorder,
                           ),
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<ReplayGainModeOption>(
                             key: const Key('dropdown_replaygain_mode'),
                             value: _config.replayGainMode,
-                            dropdownColor: LuminaTokens.cardElevatedBg,
+                            dropdownColor: LuminaTokens.glassMenuBg,
                             focusColor: LuminaTokens.focusRing.withValues(
                               alpha: 0.18,
                             ),
@@ -482,9 +473,9 @@ class _DspControlPanelState extends State<DspControlPanel> {
           Container(
             padding: const EdgeInsets.all(LuminaTokens.spaceMd),
             decoration: BoxDecoration(
-              color: LuminaTokens.cardBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-              border: Border.all(color: LuminaTokens.borderSubtle),
+              color: LuminaTokens.glassCardBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+              border: Border.all(color: LuminaTokens.glassCardBorder),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

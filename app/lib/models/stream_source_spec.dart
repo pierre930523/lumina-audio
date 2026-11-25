@@ -54,6 +54,9 @@ class ProviderCapabilities {
   final bool requiresRangeChunking;
   final bool needsNetworkEpochReset;
   final int defaultL1SafetyMarginSec;
+  final bool supportsTrackRadio;
+  final bool supportsPersonalFeed;
+  final bool supportsIsrcLookup;
 
   const ProviderCapabilities({
     this.supportsL1UrlCache = false,
@@ -61,6 +64,9 @@ class ProviderCapabilities {
     this.requiresRangeChunking = false,
     this.needsNetworkEpochReset = false,
     this.defaultL1SafetyMarginSec = 0,
+    this.supportsTrackRadio = false,
+    this.supportsPersonalFeed = false,
+    this.supportsIsrcLookup = false,
   });
 
   static const ProviderCapabilities youtubeMusic = ProviderCapabilities(
@@ -69,6 +75,9 @@ class ProviderCapabilities {
     requiresRangeChunking: true,
     needsNetworkEpochReset: true,
     defaultL1SafetyMarginSec: 1800,
+    supportsTrackRadio: true,
+    supportsPersonalFeed: true,
+    supportsIsrcLookup: false,
   );
 
   static const ProviderCapabilities qobuz = ProviderCapabilities(
@@ -77,6 +86,9 @@ class ProviderCapabilities {
     requiresRangeChunking: true,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 60,
+    supportsTrackRadio: true,
+    supportsPersonalFeed: true,
+    supportsIsrcLookup: true,
   );
 
   static const ProviderCapabilities tidal = ProviderCapabilities(
@@ -85,6 +97,9 @@ class ProviderCapabilities {
     requiresRangeChunking: true,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 60,
+    supportsTrackRadio: true,
+    supportsPersonalFeed: true,
+    supportsIsrcLookup: true,
   );
 
   static const ProviderCapabilities deezer = ProviderCapabilities(
@@ -93,6 +108,9 @@ class ProviderCapabilities {
     requiresRangeChunking: true,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 120,
+    supportsTrackRadio: true,
+    supportsPersonalFeed: true,
+    supportsIsrcLookup: true,
   );
 
   static const ProviderCapabilities appleMusic = ProviderCapabilities(
@@ -101,6 +119,9 @@ class ProviderCapabilities {
     requiresRangeChunking: false,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 0,
+    supportsTrackRadio: true,
+    supportsPersonalFeed: true,
+    supportsIsrcLookup: true,
   );
 
   static const ProviderCapabilities local = ProviderCapabilities(
@@ -109,6 +130,9 @@ class ProviderCapabilities {
     requiresRangeChunking: false,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 0,
+    supportsTrackRadio: false,
+    supportsPersonalFeed: false,
+    supportsIsrcLookup: false,
   );
 
   static const ProviderCapabilities podcastRss = ProviderCapabilities(
@@ -117,6 +141,9 @@ class ProviderCapabilities {
     requiresRangeChunking: true,
     needsNetworkEpochReset: false,
     defaultL1SafetyMarginSec: 0,
+    supportsTrackRadio: false,
+    supportsPersonalFeed: false,
+    supportsIsrcLookup: false,
   );
 
   factory ProviderCapabilities.fromJson(Map<String, dynamic> json) {
@@ -127,6 +154,9 @@ class ProviderCapabilities {
       needsNetworkEpochReset: json['needs_network_epoch_reset'] == true,
       defaultL1SafetyMarginSec:
           (json['default_l1_safety_margin_sec'] as num?)?.toInt() ?? 0,
+      supportsTrackRadio: json['supports_track_radio'] == true,
+      supportsPersonalFeed: json['supports_personal_feed'] == true,
+      supportsIsrcLookup: json['supports_isrc_lookup'] == true,
     );
   }
 
@@ -136,6 +166,9 @@ class ProviderCapabilities {
     'requires_range_chunking': requiresRangeChunking,
     'needs_network_epoch_reset': needsNetworkEpochReset,
     'default_l1_safety_margin_sec': defaultL1SafetyMarginSec,
+    'supports_track_radio': supportsTrackRadio,
+    'supports_personal_feed': supportsPersonalFeed,
+    'supports_isrc_lookup': supportsIsrcLookup,
   };
 
   @override
@@ -146,7 +179,10 @@ class ProviderCapabilities {
             other.supportsL2HeadCache == supportsL2HeadCache &&
             other.requiresRangeChunking == requiresRangeChunking &&
             other.needsNetworkEpochReset == needsNetworkEpochReset &&
-            other.defaultL1SafetyMarginSec == defaultL1SafetyMarginSec);
+            other.defaultL1SafetyMarginSec == defaultL1SafetyMarginSec &&
+            other.supportsTrackRadio == supportsTrackRadio &&
+            other.supportsPersonalFeed == supportsPersonalFeed &&
+            other.supportsIsrcLookup == supportsIsrcLookup);
   }
 
   @override
@@ -156,6 +192,9 @@ class ProviderCapabilities {
     requiresRangeChunking,
     needsNetworkEpochReset,
     defaultL1SafetyMarginSec,
+    supportsTrackRadio,
+    supportsPersonalFeed,
+    supportsIsrcLookup,
   );
 }
 

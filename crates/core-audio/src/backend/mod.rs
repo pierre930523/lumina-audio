@@ -123,7 +123,8 @@ impl DeviceEventDebouncer {
         let due_added: Vec<String> = self
             .pending_added
             .iter()
-            .filter_map(|(id, &dl)| (now >= dl).then(|| id.clone()))
+            .filter(|&(_, &dl)| now >= dl)
+            .map(|(id, _)| id.clone())
             .collect();
         for id in due_added {
             self.pending_added.remove(&id);

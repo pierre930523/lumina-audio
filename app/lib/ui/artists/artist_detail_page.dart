@@ -54,7 +54,6 @@ class ArtistDetailPage extends StatefulWidget {
 
 class _ArtistDetailPageState extends State<ArtistDetailPage> {
   static const int previewTrackLimit = 6;
-  static const _accentBlue = LuminaTokens.accentBlue;
 
   late final ScrollController _scrollController;
   String _displayName = '';
@@ -499,7 +498,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                       child: Center(
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: _accentBlue,
+                          color: LuminaTokens.glassTextPrimary,
                         ),
                       ),
                     ),
@@ -629,18 +628,9 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
     return Container(
       padding: EdgeInsets.all(isWide ? 24 : 16),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF1F222D),
-            Color(0xFF171920),
-          ],
-        ),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.07),
-        ),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -748,14 +738,14 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
           decoration: BoxDecoration(
-            color: _accentBlue.withValues(alpha: 0.14),
+            color: LuminaTokens.glassPillBg,
             borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: _accentBlue.withValues(alpha: 0.3)),
+            border: Border.all(color: LuminaTokens.glassPillBorder),
           ),
           child: const Text(
             '藝術家',
             style: TextStyle(
-              color: _accentBlue,
+              color: LuminaTokens.glassTextSecondary,
               fontSize: 11,
               fontWeight: FontWeight.w600,
               letterSpacing: 0.5,
@@ -822,7 +812,7 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                 ),
               ),
               style: FilledButton.styleFrom(
-                backgroundColor: _accentBlue,
+                backgroundColor: LuminaTokens.glassSwitchOnTrack,
                 foregroundColor: LuminaTokens.onAccentDark,
                 disabledBackgroundColor: Colors.white12,
                 disabledForegroundColor: LuminaTokens.textDisabled,
@@ -846,8 +836,9 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                   ),
                 ),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: LuminaTokens.textPrimary,
-                  side: const BorderSide(color: LuminaTokens.borderControl),
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                  side: const BorderSide(color: LuminaTokens.glassPillBorder),
                   shape: const StadiumBorder(),
                   padding: const EdgeInsets.symmetric(
                     horizontal: 18,
@@ -886,13 +877,13 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: _showAllTracks
-                  ? _accentBlue.withValues(alpha: 0.16)
-                  : Colors.white.withValues(alpha: 0.06),
+                  ? LuminaTokens.glassSegmentSelectedBg
+                  : LuminaTokens.glassPillBg,
               borderRadius: BorderRadius.circular(999),
               border: Border.all(
                 color: _showAllTracks
-                    ? _accentBlue.withValues(alpha: 0.55)
-                    : LuminaTokens.borderControl,
+                    ? LuminaTokens.glassSegmentSelectedBorder
+                    : LuminaTokens.glassPillBorder,
               ),
             ),
             child: Row(
@@ -902,8 +893,8 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                   '全部 ${_tracks.length} 首',
                   style: TextStyle(
                     color: _showAllTracks
-                        ? _accentBlue
-                        : LuminaTokens.textSecondary,
+                        ? Colors.white
+                        : LuminaTokens.glassTextSecondary,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -915,8 +906,8 @@ class _ArtistDetailPageState extends State<ArtistDetailPage> {
                       : Icons.expand_more_rounded,
                   size: 16,
                   color: _showAllTracks
-                      ? _accentBlue
-                      : LuminaTokens.textSecondary,
+                      ? Colors.white
+                      : LuminaTokens.glassTextSecondary,
                 ),
               ],
             ),
@@ -1035,8 +1026,6 @@ class _ArtistTrackRow extends StatefulWidget {
 }
 
 class _ArtistTrackRowState extends State<_ArtistTrackRow> {
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   bool _rowHovered = false;
   bool _albumHovered = false;
 
@@ -1049,10 +1038,8 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
         : (widget.resolvedAlbum?.title ?? '');
 
     final bgColor = isPlaying
-        ? _accentBlue.withValues(alpha: 0.14)
-        : (_rowHovered
-              ? Colors.white.withValues(alpha: 0.06)
-              : Colors.transparent);
+        ? LuminaTokens.glassNavActiveBg
+        : (_rowHovered ? LuminaTokens.glassRowHoverBg : Colors.transparent);
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -1083,7 +1070,7 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: isPlaying
-                    ? _accentBlue.withValues(alpha: 0.42)
+                    ? LuminaTokens.glassCoverRim
                     : Colors.transparent,
               ),
             ),
@@ -1110,14 +1097,14 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
                                   Icons.equalizer_rounded,
                                   key: Key('artist_track_playing_indicator'),
                                   size: 16,
-                                  color: _accentBlue,
+                                  color: Colors.white,
                                 )
                               : (_rowHovered
                                   ? const Icon(
                                       Icons.play_arrow_rounded,
                                       key: Key('artist_track_hover_play'),
                                       size: 16,
-                                      color: _accentBlue,
+                                      color: Colors.white,
                                     )
                                   : Text(
                                       '${widget.index + 1}',
@@ -1162,8 +1149,8 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: isPlaying
-                                  ? _accentBlue
-                                  : LuminaTokens.textPrimary,
+                                  ? Colors.white
+                                  : LuminaTokens.glassTextPrimary,
                               fontSize: 13.5,
                               fontWeight: isPlaying
                                   ? FontWeight.w700
@@ -1221,7 +1208,7 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     color: _albumHovered
-                                        ? _accentBlue
+                                        ? Colors.white
                                         : LuminaTokens.textSecondary,
                                     fontSize: 12.5,
                                     fontWeight: _albumHovered
@@ -1230,7 +1217,7 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
                                     decoration: _albumHovered
                                         ? TextDecoration.underline
                                         : TextDecoration.none,
-                                    decorationColor: _accentBlue,
+                                    decorationColor: Colors.white,
                                   ),
                                 ),
                               ),
@@ -1268,7 +1255,7 @@ class _ArtistTrackRowState extends State<_ArtistTrackRow> {
                             : Icons.play_arrow_rounded,
                         size: 17,
                         color: isPlaying || _rowHovered
-                            ? _accentBlue
+                            ? Colors.white
                             : LuminaTokens.textMuted,
                       ),
                     ),
@@ -1310,7 +1297,6 @@ class _ArtistAlbumCard extends StatefulWidget {
 }
 
 class _ArtistAlbumCardState extends State<_ArtistAlbumCard> {
-  static const _accentBlue = LuminaTokens.accentBlue;
   bool _hovered = false;
 
   @override
@@ -1338,12 +1324,14 @@ class _ArtistAlbumCardState extends State<_ArtistAlbumCard> {
             curve: LuminaTokens.motionCurve,
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: _hovered ? LuminaTokens.cardHoverBg : LuminaTokens.cardBg,
-              borderRadius: BorderRadius.circular(12),
+              color: _hovered
+                  ? LuminaTokens.glassPillHoverBg
+                  : LuminaTokens.glassCardBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
               border: Border.all(
                 color: _hovered
-                    ? _accentBlue.withValues(alpha: 0.65)
-                    : LuminaTokens.borderSubtle,
+                    ? LuminaTokens.glassCoverRim
+                    : LuminaTokens.glassCardBorder,
               ),
             ),
             child: Column(
@@ -1376,7 +1364,7 @@ class _ArtistAlbumCardState extends State<_ArtistAlbumCard> {
                                     width: 34,
                                     height: 34,
                                     decoration: const BoxDecoration(
-                                      color: _accentBlue,
+                                      color: LuminaTokens.glassSwitchOnTrack,
                                       shape: BoxShape.circle,
                                       boxShadow: [
                                         BoxShadow(
@@ -1420,7 +1408,9 @@ class _ArtistAlbumCardState extends State<_ArtistAlbumCard> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: _hovered ? _accentBlue : LuminaTokens.textPrimary,
+                    color: _hovered
+                        ? Colors.white
+                        : LuminaTokens.glassTextPrimary,
                     fontSize: 13,
                     fontWeight: FontWeight.w700,
                     height: 1.2,

@@ -450,7 +450,7 @@ fn test_spsc_clear_races_sync_epoch_and_push_slice() {
             producer.sync_epoch();
             let _ = producer.push_slice(&chunk);
             count += 1;
-            if count % 64 == 0 {
+            if count.is_multiple_of(64) {
                 thread::yield_now();
             }
         }
@@ -468,7 +468,7 @@ fn test_spsc_clear_races_sync_epoch_and_push_slice() {
             clears += 1;
             // Interleave with reading to ensure consumer monotonic invariant holds
             let _ = consumer.pop_slice(&mut out);
-            if clears % 128 == 0 {
+            if clears.is_multiple_of(128) {
                 thread::yield_now();
             }
         }

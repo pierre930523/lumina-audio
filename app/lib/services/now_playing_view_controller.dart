@@ -19,6 +19,7 @@ class NowPlayingViewController extends ChangeNotifier {
   NowPlayingViewMode _mode = NowPlayingViewMode.split;
   double _lyricsFontScale = _defaultLyricsFontScale;
   bool _lyricsSettingsExpanded = false;
+  bool _queueDrawerOpen = false;
   final Map<String, Duration> _lyricsDisplayOffsets = <String, Duration>{};
   final Map<String, double> _lyricsScrollOffsets = <String, double>{};
   double _queueScrollOffset = 0.0;
@@ -37,6 +38,8 @@ class NowPlayingViewController extends ChangeNotifier {
   double get lyricsFontScale => _lyricsFontScale;
 
   bool get lyricsSettingsExpanded => _lyricsSettingsExpanded;
+
+  bool get queueDrawerOpen => _queueDrawerOpen;
 
   double get queueScrollOffset => _queueScrollOffset;
 
@@ -196,6 +199,18 @@ class NowPlayingViewController extends ChangeNotifier {
     if (!_disposed) {
       notifyListeners();
     }
+  }
+
+  void setQueueDrawerOpen(bool open) {
+    if (_queueDrawerOpen == open) return;
+    _queueDrawerOpen = open;
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
+
+  void toggleQueueDrawer() {
+    setQueueDrawerOpen(!_queueDrawerOpen);
   }
 
   void setLyricsDisplayOffset(String? trackId, Duration offset) {

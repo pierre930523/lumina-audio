@@ -91,6 +91,101 @@ abstract final class LuminaTokens {
   static const double floatingPlayerClearance = 104.0;
 
   // ---------------------------------------------------------------------------
+  // Minimalist Dark Frosted Glass + Ambient + Gold Hi-Res Tokens
+  // ---------------------------------------------------------------------------
+  static const Color ambientScrimColor = Color(0x850E1014);
+  static const double ambientBlurSigma = 80.0;
+  static const double ambientCoverScale = 1.2;
+  static const double ambientCoverSaturation = 1.35;
+  static const double ambientNoiseOpacity = 0.035;
+  static const Duration ambientTransitionDuration = Duration(milliseconds: 800);
+
+  static const Color glassSidebarBg = Color(0x7A101216);
+  static const double glassSidebarBlur = 28.0;
+  static const Color glassSidebarBorder = Color(0x14FFFFFF);
+
+  static const Color glassPillBg = Color(0x12FFFFFF);
+  static const Color glassPillHoverBg = Color(0x24FFFFFF);
+  static const double glassPillBlur = 16.0;
+  static const Color glassPillBorder = Color(0x1FFFFFFF);
+
+  static const Color glassPlayerBarBg = Color(0x94121418);
+  static const double glassPlayerBarBlur = 32.0;
+  static const Color glassPlayerBarBorder = Color(0x1AFFFFFF);
+
+  static const Color glassNavActiveBg = Color(0x1FFFFFFF);
+  static const Color glassRowHoverBg = Color(0x0FFFFFFF);
+  static const Color glassDrawerBg = Color(0xA8101216);
+  static const Color glassCoverRim = Color(0x29FFFFFF);
+  static const Color glassTrackUnplayed = Color(0x38FFFFFF);
+
+  static const Color hiResGoldBorder = Color(0xC7D4AF37);
+  static const Color hiResGoldText = Color(0xFFE5C158);
+  static const Color hiResGoldGlow = Color(0x40D4AF37);
+  static const Color hiResGoldBg = Color(0x14D4AF37);
+
+  // 4-tier dynamic <AudioQualityBadge /> & <AudioInfoPopover /> tokens
+  static const Color badgeHiResBorder = Color.fromRGBO(229, 193, 88, 0.78);
+  static const Color badgeHiResText = Color(0xFFE5C158);
+  static const Color badgeHiResGlow = Color.fromRGBO(229, 193, 88, 0.22);
+  static const Color badgeHiResBg = Color.fromRGBO(229, 193, 88, 0.08);
+  static const double badgeHiResGlowBlur = 10.0;
+
+  static const Color badgeLosslessBorder = Color.fromRGBO(255, 255, 255, 0.45);
+  static const Color badgeLosslessText = Color(0xFFFFFFFF);
+  static const Color badgeLosslessGlow = Color.fromRGBO(255, 255, 255, 0.15);
+  static const Color badgeLosslessBg = Color.fromRGBO(255, 255, 255, 0.10);
+  static const double badgeLosslessGlowBlur = 8.0;
+
+  static const Color badgeHqBorder = Color.fromRGBO(255, 255, 255, 0.22);
+  static const Color badgeHqText = Color.fromRGBO(255, 255, 255, 0.85);
+  static const Color badgeHqBg = Color.fromRGBO(255, 255, 255, 0.06);
+
+  static const Color badgeStandardBorder = Color.fromRGBO(255, 255, 255, 0.12);
+  static const Color badgeStandardText = Color.fromRGBO(255, 255, 255, 0.50);
+  static const Color badgeStandardBg = Colors.transparent;
+
+  static const double qualityBadgeRadius = 4.0;
+  static const Duration qualityBadgeTransitionDuration =
+      Duration(milliseconds: 200);
+
+  static const Color audioInfoPopoverBg = Color.fromRGBO(20, 22, 28, 0.85);
+  static const Color audioInfoPopoverBorder =
+      Color.fromRGBO(255, 255, 255, 0.12);
+  static const double audioInfoPopoverBlur = 20.0;
+  static const double audioInfoPopoverRadius = 10.0;
+
+  static const Color glassTextPrimary = Color(0xF2FFFFFF);
+  static const Color glassTextSecondary = Color(0xB8FFFFFF);
+  static const Color glassTextTertiary = Color(0x80FFFFFF);
+
+  static const Color glassSettingsRailBg = Color(0x3D101216);
+  static const double glassSettingsRailBlur = 20.0;
+  static const Color glassSettingsRailBorder = Color(0x14FFFFFF);
+
+  static const Color glassCardBg = Color(0x0DFFFFFF);
+  static const Color glassCardActiveBg = Color(0x1FFFFFFF);
+  static const double glassCardBlur = 20.0;
+  static const Color glassCardBorder = Color(0x1AFFFFFF);
+  static const double glassCardRadius = 14.0;
+  static const Color glassCardDivider = Color(0x0FFFFFFF);
+
+  static const Color glassDialogBg = Color(0xCC14161B);
+  static const double glassDialogBlur = 24.0;
+  static const Color glassMenuBg = Color(0xE0121418);
+
+  static const Color glassSwitchOffTrack = Color(0x24FFFFFF);
+  static const Color glassSwitchOffBorder = Color(0x47FFFFFF);
+  static const Color glassSwitchOffThumb = Color(0xF2FFFFFF);
+  static const Color glassSwitchOnTrack = Color(0xE0FFFFFF);
+  static const Color glassSwitchOnThumb = Color(0xFF141518);
+
+  static const Color glassSegmentTrackBg = Color(0x0DFFFFFF);
+  static const Color glassSegmentTrackBorder = Color(0x1AFFFFFF);
+  static const Color glassSegmentSelectedBg = Color(0x29FFFFFF);
+  static const Color glassSegmentSelectedBorder = Color(0x33FFFFFF);
+
+  // ---------------------------------------------------------------------------
   // Radii & Motion
   // ---------------------------------------------------------------------------
   static const double radiusSm = 8.0;
@@ -190,9 +285,80 @@ abstract final class LuminaTokens {
         ),
         behavior: SnackBarBehavior.floating,
       ),
+      scrollbarTheme: ScrollbarThemeData(
+        thickness: WidgetStateProperty.resolveWith<double?>((states) {
+          if (states.contains(WidgetState.hovered) ||
+              states.contains(WidgetState.dragged)) {
+            return 6.5;
+          }
+          return 5.0;
+        }),
+        radius: const Radius.circular(999),
+        thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
+          if (states.contains(WidgetState.hovered) ||
+              states.contains(WidgetState.dragged)) {
+            return const Color(0x5CFFFFFF);
+          }
+          return const Color(0x2EFFFFFF);
+        }),
+        trackColor: const WidgetStatePropertyAll<Color?>(Colors.transparent),
+        trackBorderColor: const WidgetStatePropertyAll<Color?>(
+          Colors.transparent,
+        ),
+      ),
       textTheme: base.textTheme.apply(
         bodyColor: textPrimary,
         displayColor: textPrimary,
+      ),
+      switchTheme: SwitchThemeData(
+        trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return glassPillBg;
+          }
+          if (states.contains(WidgetState.selected)) {
+            return glassSwitchOnTrack;
+          }
+          return glassSwitchOffTrack;
+        }),
+        thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return textDisabled;
+          }
+          if (states.contains(WidgetState.selected)) {
+            return glassSwitchOnThumb;
+          }
+          return glassSwitchOffThumb;
+        }),
+        trackOutlineColor: WidgetStateProperty.resolveWith<Color?>((states) {
+          if (states.contains(WidgetState.disabled)) {
+            return glassSidebarBorder;
+          }
+          if (states.contains(WidgetState.focused)) {
+            return focusRing;
+          }
+          if (states.contains(WidgetState.selected)) {
+            return Colors.transparent;
+          }
+          return glassSwitchOffBorder;
+        }),
+        trackOutlineWidth: WidgetStateProperty.resolveWith<double?>((states) {
+          if (states.contains(WidgetState.focused)) {
+            return 1.5;
+          }
+          if (states.contains(WidgetState.selected)) {
+            return 0.0;
+          }
+          return 1.0;
+        }),
+        overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
+          if (states.contains(WidgetState.focused)) {
+            return focusRing.withValues(alpha: 0.22);
+          }
+          if (states.contains(WidgetState.hovered)) {
+            return glassRowHoverBg;
+          }
+          return null;
+        }),
       ),
     );
   }

@@ -22,6 +22,12 @@ pub struct ProviderCapabilities {
     pub supports_stream_resolution: bool,
     pub supports_favorites_sync: bool,
     #[serde(default)]
+    pub supports_track_radio: bool,
+    #[serde(default)]
+    pub supports_personal_feed: bool,
+    #[serde(default)]
+    pub supports_isrc_lookup: bool,
+    #[serde(default)]
     pub streaming: StreamProviderCapabilities,
 }
 
@@ -36,6 +42,9 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            supports_track_radio: false,
+            supports_personal_feed: false,
+            supports_isrc_lookup: false,
             streaming: StreamProviderCapabilities::local(),
         }
     }
@@ -50,6 +59,9 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            supports_track_radio: false,
+            supports_personal_feed: false,
+            supports_isrc_lookup: false,
             streaming: StreamProviderCapabilities::default(),
         }
     }
@@ -64,6 +76,9 @@ impl ProviderCapabilities {
             supports_catalog_search: false,
             supports_stream_resolution: true,
             supports_favorites_sync: false,
+            supports_track_radio: false,
+            supports_personal_feed: false,
+            supports_isrc_lookup: false,
             streaming: StreamProviderCapabilities::default(),
         }
     }
@@ -78,6 +93,9 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            supports_track_radio: true,
+            supports_personal_feed: true,
+            supports_isrc_lookup: true,
             streaming: StreamProviderCapabilities::qobuz(),
         }
     }
@@ -92,6 +110,9 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            supports_track_radio: true,
+            supports_personal_feed: true,
+            supports_isrc_lookup: true,
             streaming: StreamProviderCapabilities::tidal(),
         }
     }
@@ -106,6 +127,9 @@ impl ProviderCapabilities {
             supports_catalog_search: true,
             supports_stream_resolution: true,
             supports_favorites_sync: true,
+            supports_track_radio: true,
+            supports_personal_feed: true,
+            supports_isrc_lookup: true,
             streaming: StreamProviderCapabilities::deezer(),
         }
     }

@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/audio_format.dart';
 import '../../models/audio_output_info.dart';
 import '../../services/audio_service.dart';
+import '../common/frosted_glass_container.dart';
 import '../settings/settings_widgets.dart';
 import '../theme/lumina_tokens.dart';
 
@@ -56,11 +57,7 @@ class DeviceSettingsDialog extends StatefulWidget {
 }
 
 class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
-  static const _dialogBg = LuminaTokens.cardElevatedBg;
-  static const _sectionBg = LuminaTokens.cardBg;
-  static const _borderColor = LuminaTokens.borderSubtle;
-  static const _purpleAccent = Color(0xFF7C4DFF);
-  static const _purpleLight = LuminaTokens.accentPurpleText;
+  static const _borderColor = LuminaTokens.glassCardDivider;
 
   late AudioDeviceCapabilitiesModel _cap;
   AudioEngineOutputInfoModel _outputInfo = const AudioEngineOutputInfoModel();
@@ -251,15 +248,17 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
 
     return Dialog(
       key: const Key('device_settings_dialog'),
-      backgroundColor: _dialogBg,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-        side: const BorderSide(color: LuminaTokens.borderControl),
-      ),
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
       insetPadding: const EdgeInsets.all(LuminaTokens.spaceLg),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560, maxHeight: 680),
-        child: Padding(
+        child: FrostedGlassContainer(
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
           padding: const EdgeInsets.all(LuminaTokens.spaceLg),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -271,9 +270,9 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                     width: 40,
                     height: 40,
                     decoration: BoxDecoration(
-                      color: LuminaTokens.cardBg,
+                      color: LuminaTokens.glassPillBg,
                       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                      border: Border.all(color: _borderColor),
+                      border: Border.all(color: LuminaTokens.glassCardBorder),
                     ),
                     child: Icon(
                       widget.deviceIcon,
@@ -330,11 +329,13 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                   child: Container(
                     padding: const EdgeInsets.all(LuminaTokens.spaceSm),
                     decoration: BoxDecoration(
-                      color: LuminaTokens.statusErrorBg,
+                      color: LuminaTokens.statusError.withValues(alpha: 0.14),
                       borderRadius: BorderRadius.circular(
                         LuminaTokens.radiusSm,
                       ),
-                      border: Border.all(color: LuminaTokens.statusError),
+                      border: Border.all(
+                        color: LuminaTokens.statusError.withValues(alpha: 0.55),
+                      ),
                     ),
                     child: Row(
                       children: [
@@ -433,28 +434,6 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                                   child: Switch(
                                     key: const Key('switch_device_exclusive_mode'),
                                     value: isAsio || !isShared,
-                                    activeTrackColor: _purpleAccent,
-                                    activeThumbColor: LuminaTokens.textPrimary,
-                                    inactiveTrackColor: _dialogBg,
-                                    inactiveThumbColor: canToggleExclusive
-                                        ? LuminaTokens.textSecondary
-                                        : LuminaTokens.textDisabled,
-                                    trackOutlineColor:
-                                        WidgetStateProperty.resolveWith((
-                                          states,
-                                        ) {
-                                          if (states.contains(
-                                            WidgetState.disabled,
-                                          )) {
-                                            return LuminaTokens.borderSubtle;
-                                          }
-                                          if (states.contains(
-                                            WidgetState.selected,
-                                          )) {
-                                            return _purpleLight;
-                                          }
-                                          return LuminaTokens.borderControl;
-                                        }),
                                     mouseCursor: LuminaSettingsStyles
                                         .switchMouseCursor(
                                           enabled: !_busy && canToggleExclusive,
@@ -494,22 +473,35 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                                         style: TextStyle(
                                           fontSize: 12,
                                           color: selected
-                                              ? LuminaTokens.textPrimary
+                                              ? Colors.white
                                               : (_busy
                                                     ? LuminaTokens.textDisabled
-                                                    : LuminaTokens.textSecondary),
+                                                    : LuminaTokens
+                                                          .glassTextSecondary),
                                         ),
                                       ),
                                       selected: selected,
                                       showCheckmark: false,
-                                      selectedColor: _purpleAccent,
-                                      backgroundColor: _sectionBg,
+                                      selectedColor:
+                                          LuminaTokens.glassSegmentSelectedBg,
+                                      backgroundColor:
+                                          LuminaTokens.glassSegmentTrackBg,
+                                      disabledColor:
+                                          LuminaTokens.glassSegmentTrackBg,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(
+                                          LuminaTokens.radiusSm,
+                                        ),
+                                      ),
                                       side: BorderSide(
                                         color: selected
-                                            ? _purpleLight
+                                            ? LuminaTokens
+                                                  .glassSegmentSelectedBorder
                                             : (_busy
-                                                  ? LuminaTokens.borderSubtle
-                                                  : LuminaTokens.borderControl),
+                                                  ? LuminaTokens
+                                                        .glassCardDivider
+                                                  : LuminaTokens
+                                                        .glassSegmentTrackBorder),
                                       ),
                                       onSelected: _busy
                                           ? null
@@ -609,23 +601,35 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                                         style: TextStyle(
                                           fontSize: 12,
                                           color: selected
-                                              ? LuminaTokens.textPrimary
+                                              ? Colors.white
                                               : (disabled
                                                     ? LuminaTokens.textDisabled
                                                     : LuminaTokens
-                                                          .textSecondary),
+                                                          .glassTextSecondary),
                                         ),
                                       ),
                                       selected: selected,
                                       showCheckmark: false,
-                                      selectedColor: _purpleAccent,
-                                      backgroundColor: _sectionBg,
+                                      selectedColor:
+                                          LuminaTokens.glassSegmentSelectedBg,
+                                      backgroundColor:
+                                          LuminaTokens.glassSegmentTrackBg,
+                                      disabledColor:
+                                          LuminaTokens.glassSegmentTrackBg,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(
+                                          LuminaTokens.radiusSm,
+                                        ),
+                                      ),
                                       side: BorderSide(
                                         color: selected
-                                            ? _purpleLight
+                                            ? LuminaTokens
+                                                  .glassSegmentSelectedBorder
                                             : (disabled
-                                                  ? LuminaTokens.borderSubtle
-                                                  : LuminaTokens.borderControl),
+                                                  ? LuminaTokens
+                                                        .glassCardDivider
+                                                  : LuminaTokens
+                                                        .glassSegmentTrackBorder),
                                       ),
                                       onSelected: disabled
                                           ? null
@@ -725,28 +729,6 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                                         'switch_device_strict_bit_perfect',
                                       ),
                                       value: strictOn,
-                                      activeTrackColor: _purpleAccent,
-                                      activeThumbColor:
-                                          LuminaTokens.textPrimary,
-                                      inactiveTrackColor: _dialogBg,
-                                      inactiveThumbColor:
-                                          LuminaTokens.textSecondary,
-                                      trackOutlineColor:
-                                          WidgetStateProperty.resolveWith((
-                                            states,
-                                          ) {
-                                            if (states.contains(
-                                              WidgetState.disabled,
-                                            )) {
-                                              return LuminaTokens.borderSubtle;
-                                            }
-                                            if (states.contains(
-                                              WidgetState.selected,
-                                            )) {
-                                              return _purpleLight;
-                                            }
-                                            return LuminaTokens.borderControl;
-                                          }),
                                       mouseCursor: LuminaSettingsStyles
                                           .switchMouseCursor(enabled: !_busy),
                                       onChanged: _busy ? null : _setStrictMode,
@@ -799,9 +781,9 @@ class _SectionBox extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(LuminaTokens.spaceMd),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -809,7 +791,7 @@ class _SectionBox extends StatelessWidget {
           Text(
             title,
             style: const TextStyle(
-              color: LuminaTokens.accentPurpleText,
+              color: LuminaTokens.glassTextSecondary,
               fontSize: 12.5,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.3,
@@ -874,9 +856,9 @@ class _SpecChip extends StatelessWidget {
         vertical: LuminaTokens.space2xs,
       ),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        border: Border.all(color: LuminaTokens.glassPillBorder),
       ),
       child: Text(
         label,

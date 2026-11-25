@@ -3,16 +3,19 @@ import 'dart:math' as math;
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/playback_state.dart';
+import '../../models/smart_playlist.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/frosted_glass_container.dart';
 import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
 class HomeDashboardView extends StatefulWidget {
   final AudioService audioService;
   final LibraryIndexCache? libraryCache;
+  final List<SmartPlaylist> smartPlaylists;
   final VoidCallback onOpenAlbums;
   final VoidCallback onOpenLibrary;
   final VoidCallback onOpenCredits;
@@ -22,6 +25,8 @@ class HomeDashboardView extends StatefulWidget {
   final VoidCallback? onOpenLibrarySettings;
   final VoidCallback? onOpenProviderSettings;
   final void Function(String albumId)? onOpenAlbumDetail;
+  final void Function(String playlistId)? onOpenSmartPlaylist;
+  final VoidCallback? onOpenSmartPlaylists;
   final double initialScrollOffset;
   final ValueChanged<double>? onScrollOffsetChanged;
 
@@ -29,6 +34,7 @@ class HomeDashboardView extends StatefulWidget {
     super.key,
     required this.audioService,
     this.libraryCache,
+    this.smartPlaylists = const [],
     required this.onOpenAlbums,
     required this.onOpenLibrary,
     required this.onOpenCredits,
@@ -38,6 +44,8 @@ class HomeDashboardView extends StatefulWidget {
     this.onOpenLibrarySettings,
     this.onOpenProviderSettings,
     this.onOpenAlbumDetail,
+    this.onOpenSmartPlaylist,
+    this.onOpenSmartPlaylists,
     this.initialScrollOffset = 0.0,
     this.onScrollOffsetChanged,
   });
@@ -99,12 +107,55 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
   }
 
   static const _coverPalettes = <List<Color>>[
-    [Color(0xFF1D4ED8), Color(0xFF0EA5E9)],
-    [Color(0xFF6D28D9), Color(0xFFEC4899)],
-    [Color(0xFF0F766E), Color(0xFF34D399)],
-    [Color(0xFFB45309), Color(0xFFF59E0B)],
-    [Color(0xFF4338CA), Color(0xFF8B5CF6)],
+    [Color(0xFF1E293B), Color(0xFF0F172A)],
+    [Color(0xFF2E1F47), Color(0xFF171329)],
+    [Color(0xFF132A2E), Color(0xFF0D1B1E)],
+    [Color(0xFF2D211A), Color(0xFF16110E)],
+    [Color(0xFF1F243D), Color(0xFF111322)],
   ];
+
+  static const _curatedSets = <({
+    String title,
+    String subtitle,
+    List<Color> colors,
+    IconData icon,
+    List<String> keywords,
+  })>[
+    (
+      title: '深夜舒緩旋律',
+      subtitle: '沉靜空間感與細膩夜曲精選',
+      colors: [Color(0xFF1B243B), Color(0xFF0F1322)],
+      icon: Icons.nightlight_round,
+      keywords: ['moon', 'night', 'blue', 'kind', 'jazz', 'piano', 'chill'],
+    ),
+    (
+      title: 'J-Pop 流行速遞',
+      subtitle: '日系都會律動與高解析人聲',
+      colors: [Color(0xFF331D3E), Color(0xFF181124)],
+      icon: Icons.graphic_eq_rounded,
+      keywords: ['j-pop', 'pop', 'tokyo', 'yoasobi', 'kenshi', 'ado'],
+    ),
+    (
+      title: '動漫原聲特輯',
+      subtitle: '經典配樂與劇伴無損母帶',
+      colors: [Color(0xFF142E2E), Color(0xFF0E181B)],
+      icon: Icons.movie_filter_rounded,
+      keywords: ['ost', 'anime', 'castle', 'ghibli', 'hisaishi', 'soundtrack'],
+    ),
+  ];
+
+  IconData _connectionIcon(ConnectionMode mode) => switch (mode) {
+    ConnectionMode.localOrUsbDac => Icons.usb_rounded,
+    ConnectionMode.lanRemote => Icons.wifi_rounded,
+    ConnectionMode.wanRemote => Icons.public_rounded,
+  };
+
+  String _formatDuration(Duration duration) {
+    final totalSeconds = math.max(0, duration.inSeconds);
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -128,11 +179,11 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
     return LayoutBuilder(
       builder: (context, outerConstraints) {
         final availW = outerConstraints.maxWidth;
-        final hPad = (availW * 0.032).clamp(14.0, 42.0).toDouble();
-        final vPad = availW >= 900 ? 18.0 : 12.0;
-        final greetingSize = availW >= 1400
-            ? 34.0
-            : (availW >= 680 ? 29.0 : 23.0);
+        final hPad = (availW * 0.032).clamp(16.0, 42.0).toDouble();
+        final vPad = availW >= 900 ? 20.0 : 14.0;
+        final greetingSize = availW >= 1200
+            ? 32.0
+            : (availW >= 680 ? 28.0 : 24.0);
 
         return SingleChildScrollView(
           key: const Key('home_dashboard_view'),
@@ -148,202 +199,98 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 2200),
               child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Adaptive Greeting Header
-                Padding(
-                  padding: const EdgeInsets.only(bottom: LuminaTokens.spaceMd),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '哈囉！$_profileName',
-                          key: const Key('home_greeting_title'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: LuminaTokens.textPrimary,
-                            fontSize: greetingSize,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0.4,
-                          ),
-                        ),
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Minimalist Greeting Header
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Text(
+                      '哈囉！$_profileName',
+                      key: const Key('home_greeting_title'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: LuminaTokens.glassTextPrimary,
+                        fontSize: greetingSize,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.3,
                       ),
-                      const SizedBox(width: LuminaTokens.spaceSm),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: LuminaTokens.spaceSm,
-                          vertical: LuminaTokens.space2xs,
-                        ),
-                        decoration: BoxDecoration(
-                          color: LuminaTokens.cardElevatedBg,
-                          borderRadius: BorderRadius.circular(
-                            LuminaTokens.radiusPill,
-                          ),
-                          border: Border.all(
-                            color: LuminaTokens.borderControl,
-                          ),
-                        ),
-                        child: Text(
-                          widget.audioService.connectionMode.label,
-                          style: const TextStyle(
-                            color: LuminaTokens.textMuted,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // Adaptive 2/4-Column Stat Summary Cards
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final cols = constraints.maxWidth >= 680 ? 4 : 2;
-                    const gap = LuminaTokens.spaceSm;
-                    final cardWidth =
-                        (constraints.maxWidth - gap * (cols - 1)) / cols;
-                    final stats = [
-                      (
-                        key: 'stat_card_artists',
-                        icon: Icons.person_outline_rounded,
-                        count: '${uniqueArtists.length}',
-                        label: '藝術家',
-                        onTap: widget.onOpenCredits,
-                      ),
-                      (
-                        key: 'stat_card_albums',
-                        icon: Icons.album_outlined,
-                        count: '$albumCount',
-                        label: '專輯',
-                        onTap: widget.onOpenAlbums,
-                      ),
-                      (
-                        key: 'stat_card_tracks',
-                        icon: Icons.music_note_rounded,
-                        count: '$trackCount',
-                        label: '曲目',
-                        onTap: widget.onOpenLibrary,
-                      ),
-                      (
-                        key: 'stat_card_zones',
-                        icon: Icons.speaker_group_outlined,
-                        count: '$zoneCount',
-                        label: '輸出音區',
-                        onTap: widget.onOpenZones,
-                      ),
-                    ];
-
-                    return Wrap(
-                      spacing: gap,
-                      runSpacing: gap,
-                      children: stats.map((s) {
-                        return SizedBox(
-                          width: cardWidth,
-                          child: Material(
-                            color: LuminaTokens.cardBg,
-                            borderRadius: BorderRadius.circular(
-                              LuminaTokens.radiusSm,
-                            ),
-                            child: InkWell(
-                              key: Key(s.key),
-                              onTap: s.onTap,
-                              hoverColor: LuminaTokens.cardHoverBg.withValues(
-                                alpha: 0.7,
-                              ),
-                              borderRadius: BorderRadius.circular(
-                                LuminaTokens.radiusSm,
-                              ),
-                              child: Container(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal:
-                                      constraints.maxWidth >= 520 ? 18 : 12,
-                                  vertical: LuminaTokens.spaceMd,
-                                ),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(
-                                    LuminaTokens.radiusSm,
-                                  ),
-                                  border: Border.all(
-                                    color: LuminaTokens.borderSubtle,
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      s.icon,
-                                      size: 26,
-                                      color: LuminaTokens.textSecondary,
-                                    ),
-                                    const SizedBox(width: LuminaTokens.spaceSm),
-                                    Flexible(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            s.count,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              color: LuminaTokens.textPrimary,
-                                              fontSize: 22,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                          Text(
-                                            s.label,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              color: LuminaTokens.textMuted,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    );
-                  },
-                ),
-                const SizedBox(height: LuminaTokens.spaceMd),
-
-                // Adaptive Indigo-Slate Gradient Recent Activity Section
-                Container(
-                  key: const Key('home_recent_activity_card'),
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(10),
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color(0xFF353E6E),
-                        Color(0xFF252C52),
-                      ],
                     ),
                   ),
-                  child: LayoutBuilder(
+
+                  // Single-Row 5-Column Frosted Glass Stat Pills (responsive wrap on narrow widths)
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final cols = constraints.maxWidth >= 780
+                          ? 5
+                          : (constraints.maxWidth >= 520 ? 3 : 2);
+                      const gap = 10.0;
+                      final pillWidth =
+                          (constraints.maxWidth - gap * (cols - 1)) / cols;
+                      final stats = [
+                        (
+                          key: 'stat_card_artists',
+                          icon: Icons.person_outline_rounded,
+                          label: '${uniqueArtists.length} 藝術家',
+                          onTap: widget.onOpenCredits,
+                        ),
+                        (
+                          key: 'stat_card_albums',
+                          icon: Icons.album_outlined,
+                          label: '$albumCount 專輯',
+                          onTap: widget.onOpenAlbums,
+                        ),
+                        (
+                          key: 'stat_card_tracks',
+                          icon: Icons.music_note_rounded,
+                          label: '$trackCount 曲目',
+                          onTap: widget.onOpenLibrary,
+                        ),
+                        (
+                          key: 'stat_card_zones',
+                          icon: Icons.speaker_group_outlined,
+                          label: '$zoneCount 輸出設備',
+                          onTap: widget.onOpenZones,
+                        ),
+                        (
+                          key: 'stat_card_connection',
+                          icon: _connectionIcon(
+                            widget.audioService.connectionMode,
+                          ),
+                          label: widget.audioService.connectionMode.label,
+                          onTap:
+                              widget.onOpenProviderSettings ?? widget.onOpenZones,
+                        ),
+                      ];
+
+                      return Wrap(
+                        spacing: gap,
+                        runSpacing: gap,
+                        children: [
+                          for (final s in stats)
+                            _StatPillButton(
+                              key: Key(s.key),
+                              width: pillWidth,
+                              icon: s.icon,
+                              label: s.label,
+                              onTap: s.onTap,
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 28),
+
+                  // Frameless Recent Activity 5-Column Grid
+                  LayoutBuilder(
+                    key: const Key('home_recent_activity_card'),
                     builder: (context, panelConstraints) {
                       final innerW = panelConstraints.maxWidth;
-                      final maxCols = innerW >= 1420
-                          ? 6
-                          : (innerW >= 1060
-                              ? 5
-                              : (innerW >= 760
-                                  ? 4
-                                  : (innerW >= 480 ? 3 : 2)));
+                      final maxCols = innerW >= 1020
+                          ? 5
+                          : (innerW >= 740
+                              ? 4
+                              : (innerW >= 480 ? 3 : 2));
                       final maxOffset = math.max(0, recentCards.length - maxCols);
                       final safeOffset = _carouselOffset.clamp(0, maxOffset);
                       if (safeOffset != _carouselOffset) {
@@ -365,7 +312,7 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                         1,
                         math.min(maxCols, displayedTotal),
                       );
-                      const spacing = 14.0;
+                      const spacing = 16.0;
                       final itemWidth =
                           (innerW - spacing * (effectiveCols - 1)) /
                               effectiveCols;
@@ -385,9 +332,10 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                                   const Text(
                                     '近期活動',
                                     style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 16,
+                                      color: LuminaTokens.glassTextPrimary,
+                                      fontSize: 18,
                                       fontWeight: FontWeight.w700,
+                                      letterSpacing: -0.2,
                                     ),
                                   ),
                                   const SizedBox(width: 20),
@@ -425,7 +373,7 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                                     icon: Icon(
                                       Icons.chevron_left_rounded,
                                       color: safeOffset > 0
-                                          ? LuminaTokens.textPrimary
+                                          ? LuminaTokens.glassTextPrimary
                                           : LuminaTokens.textDisabled,
                                     ),
                                   ),
@@ -443,27 +391,14 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                                       Icons.chevron_right_rounded,
                                       color: safeOffset + maxCols <
                                               recentCards.length
-                                          ? LuminaTokens.textPrimary
+                                          ? LuminaTokens.glassTextPrimary
                                           : LuminaTokens.textDisabled,
                                     ),
                                   ),
                                   const SizedBox(width: 6),
-                                  TextButton(
-                                    onPressed: widget.onOpenAlbums,
-                                    style: TextButton.styleFrom(
-                                      backgroundColor:
-                                          Colors.white.withValues(alpha: 0.14),
-                                      foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 4,
-                                      ),
-                                      minimumSize: const Size(0, 28),
-                                    ),
-                                    child: const Text(
-                                      '更多',
-                                      style: TextStyle(fontSize: 12),
-                                    ),
+                                  _GlassSectionActionLink(
+                                    label: '更多',
+                                    onTap: widget.onOpenAlbums,
                                   ),
                                 ],
                               ),
@@ -476,7 +411,9 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                               child: Center(
                                 child: Text(
                                   '尚未掃描任何音樂專輯，點擊「曲目庫」或「專輯」開始建立曲庫。',
-                                  style: TextStyle(color: Colors.white70),
+                                  style: TextStyle(
+                                    color: LuminaTokens.glassTextSecondary,
+                                  ),
                                 ),
                               ),
                             )
@@ -512,32 +449,32 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                       );
                     },
                   ),
-                ),
-                const SizedBox(height: 16),
+                  const SizedBox(height: 30),
 
-                // Adaptive Bottom Studio Workspace: Single Column (< 920) or Balanced Two Columns (>= 920)
-                if (availW >= 920)
-                  IntrinsicHeight(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                  // Lower Asymmetric Dual-Column (62% : 38% >= 900px, stacked below)
+                  if (availW >= 900)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(flex: 7, child: _buildStudioBanner()),
-                        const SizedBox(width: 16),
                         Expanded(
-                          flex: 5,
+                          flex: 62,
+                          child: _buildRecommendedSection(tracks),
+                        ),
+                        const SizedBox(width: 28),
+                        Expanded(
+                          flex: 38,
                           child: _buildQuickQueueCard(tracks),
                         ),
                       ],
-                    ),
-                  )
-                else ...[
-                  _buildStudioBanner(),
-                  const SizedBox(height: 12),
-                  _buildQuickQueueCard(tracks),
+                    )
+                  else ...[
+                    _buildRecommendedSection(tracks),
+                    const SizedBox(height: 24),
+                    _buildQuickQueueCard(tracks),
+                  ],
                 ],
-              ],
+              ),
             ),
-          ),
           ),
         );
       },
@@ -583,28 +520,28 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
   Widget _buildImportGuideCard() {
     return InkWell(
       key: const Key('home_import_guide_card'),
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(12),
       onTap: widget.onOpenLibrary,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           AspectRatio(
             aspectRatio: 1,
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                color: Colors.white.withValues(alpha: 0.06),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.14),
-                ),
+            child: FrostedGlassContainer(
+              blurSigma: LuminaTokens.glassPillBlur,
+              enableBackdropBlur: false,
+              borderRadius: BorderRadius.circular(12),
+              color: LuminaTokens.glassPillBg,
+              border: Border.all(
+                color: LuminaTokens.glassPillBorder,
               ),
               child: const Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
                     Icons.create_new_folder_outlined,
-                    size: 40,
-                    color: Colors.white70,
+                    size: 38,
+                    color: LuminaTokens.glassTextSecondary,
                   ),
                   SizedBox(height: 10),
                   Padding(
@@ -613,7 +550,7 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
                       '掃描新增音樂資料夾',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: Colors.white,
+                        color: LuminaTokens.glassTextPrimary,
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
                       ),
@@ -623,218 +560,297 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
               ),
             ),
           ),
-          const SizedBox(height: 8),
-          const Text(
-            '擴充無損曲庫',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: Color(0xFFB8C2EB), fontSize: 10.5),
-          ),
-          const SizedBox(height: 2),
+          const SizedBox(height: 10),
           const Text(
             '匯入本機無損專輯',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: Colors.white,
-              fontSize: 13,
+              color: LuminaTokens.glassTextPrimary,
+              fontSize: 13.5,
               fontWeight: FontWeight.w600,
             ),
           ),
+          const SizedBox(height: 2),
           const Text(
             'FLAC / WAV / DSD / ALAC',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: Color(0xFFD1D9F0), fontSize: 12),
+            style: TextStyle(
+              color: LuminaTokens.glassTextSecondary,
+              fontSize: 12,
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildStudioBanner() {
-    return Container(
-      key: const Key('home_explore_banner'),
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10),
-        gradient: const LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            Color(0xFF343066),
-            Color(0xFF562524),
+  Widget _buildRecommendedSection(List<TrackInfo> tracks) {
+    final playlists = widget.smartPlaylists;
+    final items = <({
+      String? playlistId,
+      String title,
+      String subtitle,
+      List<Color> colors,
+      IconData icon,
+      TrackInfo? coverTrack,
+      TrackInfo? playTrack,
+    })>[];
+
+    if (playlists.isNotEmpty) {
+      for (var i = 0; i < math.min(3, playlists.length); i++) {
+        final sp = playlists[i];
+        final matched = sp.evaluate(tracks);
+        final curated = _curatedSets[i % _curatedSets.length];
+        items.add((
+          playlistId: sp.id,
+          title: sp.name,
+          subtitle: sp.description.isNotEmpty
+              ? sp.description
+              : '${matched.length} 首收錄曲目',
+          colors: curated.colors,
+          icon: curated.icon,
+          coverTrack: matched.firstOrNull,
+          playTrack: matched.firstOrNull,
+        ));
+      }
+    } else {
+      for (var i = 0; i < _curatedSets.length; i++) {
+        final preset = _curatedSets[i];
+        TrackInfo? matched;
+        for (final t in tracks) {
+          final hay = '${t.title} ${t.artist} ${t.album} ${t.genre ?? ''}'
+              .toLowerCase();
+          if (preset.keywords.any(hay.contains)) {
+            matched = t;
+            break;
+          }
+        }
+        matched ??= tracks.isNotEmpty ? tracks[i % tracks.length] : null;
+        items.add((
+          playlistId: null,
+          title: preset.title,
+          subtitle: preset.subtitle,
+          colors: preset.colors,
+          icon: preset.icon,
+          coverTrack: matched,
+          playTrack: matched,
+        ));
+      }
+    }
+
+    return Column(
+      key: const Key('home_recommended_section'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              '為你推薦',
+              style: TextStyle(
+                color: LuminaTokens.glassTextPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+              ),
+            ),
+            _GlassSectionActionLink(
+              label: '探索更多 >',
+              onTap: widget.onOpenSmartPlaylists ?? widget.onOpenAlbums,
+            ),
           ],
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          const Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                '高解析音響工作室',
-                style: TextStyle(
-                  color: LuminaTokens.textSecondary,
-                  fontSize: 11,
-                  letterSpacing: 1.4,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              SizedBox(height: 4),
-              Text(
-                '64-bit DSP 與多房間音區',
-                style: TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              SizedBox(height: 4),
-              Text(
-                '調整 10 段 PEQ / AutoEQ 曲線，或透過 DLNA / AirPlay 同步輸出至多台設備',
-                style: TextStyle(color: LuminaTokens.textSecondary, fontSize: 13),
-              ),
-            ],
-          ),
-          const SizedBox(height: LuminaTokens.spaceMd),
-          Wrap(
-            spacing: 10,
-            runSpacing: 8,
-            children: [
-              FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: LuminaTokens.accentBlue,
-                  foregroundColor: LuminaTokens.onAccentDark,
-                ),
-                onPressed: widget.onOpenDsp,
-                icon: const Icon(Icons.graphic_eq_rounded, size: 18),
-                label: const Text('開啟 DSP 引擎'),
-              ),
-              OutlinedButton.icon(
-                onPressed: widget.onOpenLibrarySettings ?? widget.onOpenLibrary,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: LuminaTokens.textPrimary,
-                  side: const BorderSide(color: LuminaTokens.textMuted),
-                ),
-                icon: const Icon(Icons.folder_open_rounded, size: 18),
-                label: const Text('掃描音樂資料夾'),
-              ),
-              if (widget.onOpenAppearance != null)
-                OutlinedButton.icon(
-                  onPressed: widget.onOpenAppearance,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: LuminaTokens.textPrimary,
-                    side: const BorderSide(color: LuminaTokens.textMuted),
+        const SizedBox(height: 14),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final w = constraints.maxWidth;
+            final cols = w >= 460 ? 3 : (w >= 280 ? 2 : 1);
+            const gap = 14.0;
+            final cardWidth = (w - gap * (cols - 1)) / cols;
+            return Wrap(
+              spacing: gap,
+              runSpacing: gap,
+              children: [
+                for (var i = 0; i < items.length; i++)
+                  SizedBox(
+                    width: cardWidth,
+                    child: _RecommendedPlaylistCard(
+                      key: Key('home_recommended_card_$i'),
+                      title: items[i].title,
+                      subtitle: items[i].subtitle,
+                      colors: items[i].colors,
+                      icon: items[i].icon,
+                      coverTrack: items[i].coverTrack,
+                      audioService: widget.audioService,
+                      libraryCache: widget.libraryCache,
+                      onOpen: () {
+                        final pid = items[i].playlistId;
+                        if (pid != null && widget.onOpenSmartPlaylist != null) {
+                          widget.onOpenSmartPlaylist!(pid);
+                        } else if (items[i].playTrack != null) {
+                          widget.audioService.play(track: items[i].playTrack);
+                        } else {
+                          (widget.onOpenSmartPlaylists ?? widget.onOpenAlbums)();
+                        }
+                      },
+                      onPlay: () {
+                        if (items[i].playTrack != null) {
+                          widget.audioService.play(track: items[i].playTrack);
+                        } else {
+                          final pid = items[i].playlistId;
+                          if (pid != null &&
+                              widget.onOpenSmartPlaylist != null) {
+                            widget.onOpenSmartPlaylist!(pid);
+                          } else {
+                            (widget.onOpenSmartPlaylists ??
+                                widget.onOpenAlbums)();
+                          }
+                        }
+                      },
+                    ),
                   ),
-                  icon: const Icon(Icons.aspect_ratio_rounded, size: 17),
-                  label: const Text('介面縮放設定'),
-                ),
-            ],
-          ),
-        ],
-      ),
+              ],
+            );
+          },
+        ),
+      ],
     );
   }
 
   Widget _buildQuickQueueCard(List<TrackInfo> tracks) {
-    return Container(
+    final recentTracks = tracks.take(5).toList(growable: false);
+    return Column(
       key: const Key('home_quick_queue_card'),
-      padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
-      decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: LuminaTokens.borderSubtle),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Text(
-                  '待播佇列（${tracks.length} 首）',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: LuminaTokens.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              TextButton(
-                onPressed: widget.onOpenLibrary,
-                style: TextButton.styleFrom(
-                  foregroundColor: LuminaTokens.accentBlue,
-                  minimumSize: const Size(0, 28),
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                ),
-                child: const Text('管理曲目庫 >', style: TextStyle(fontSize: 12)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          for (final t in tracks.take(3))
-            TrackHoverPrefetch(
-              track: t,
-              child: Material(
-                type: MaterialType.transparency,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(6),
-                  hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
-                  onTap: () => widget.audioService.play(track: t),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 7,
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.play_circle_outline_rounded,
-                          color: LuminaTokens.textSecondary,
-                          size: 20,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                t.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: LuminaTokens.textPrimary,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              Text(
-                                '${t.artist} • ${t.format.label}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: LuminaTokens.textMuted,
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Expanded(
+              child: Text(
+                '最近播放',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: LuminaTokens.glassTextPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.2,
                 ),
               ),
             ),
-        ],
+            _GlassSectionActionLink(
+              label: '查看全部 >',
+              onTap: widget.onOpenLibrary,
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (recentTracks.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Text(
+              '尚無最近播放曲目',
+              style: TextStyle(
+                color: LuminaTokens.glassTextSecondary,
+                fontSize: 13,
+              ),
+            ),
+          )
+        else
+          for (var i = 0; i < recentTracks.length; i++)
+            _buildRecentTrackRow(
+              index: i + 1,
+              track: recentTracks[i],
+            ),
+      ],
+    );
+  }
+
+  Widget _buildRecentTrackRow({
+    required int index,
+    required TrackInfo track,
+  }) {
+    return TrackHoverPrefetch(
+      track: track,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          key: Key('home_recent_track_${track.id}'),
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () => widget.audioService.play(track: track),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 22,
+                  child: Text(
+                    '$index',
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextTertiary,
+                      fontSize: 12,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                AlbumArtworkView(
+                  track: track,
+                  size: 40,
+                  fullResolution: false,
+                  audioService: widget.audioService,
+                  libraryCache: widget.libraryCache,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: LuminaTokens.glassPillBorder,
+                    width: 0.8,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        track.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: LuminaTokens.glassTextPrimary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        track.artist,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: LuminaTokens.glassTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _formatDuration(track.duration),
+                  style: const TextStyle(
+                    color: LuminaTokens.glassTextTertiary,
+                    fontSize: 12,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -857,7 +873,6 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
           _RecentItem(
             title: active.album,
             subtitle: active.artist,
-            badgeLabel: '正在播放 • ${active.format.label}',
             track: active,
             album: _findAlbumForTrack(active),
           ),
@@ -869,7 +884,6 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
           _RecentItem(
             title: t.title,
             subtitle: t.artist,
-            badgeLabel: '${t.album} • ${t.format.label}',
             track: t,
             album: _findAlbumForTrack(t),
           ),
@@ -889,7 +903,6 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
         _RecentItem(
           title: a.title,
           subtitle: a.artist,
-          badgeLabel: a.year != null ? '發行年份 ${a.year}' : '已收錄專輯',
           track: matchTrack,
           album: a,
         ),
@@ -901,7 +914,6 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
           _RecentItem(
             title: t.album,
             subtitle: t.artist,
-            badgeLabel: t.format.label,
             track: t,
           ),
         );
@@ -914,14 +926,12 @@ class _HomeDashboardViewState extends State<HomeDashboardView> {
 class _RecentItem {
   final String title;
   final String subtitle;
-  final String badgeLabel;
   final TrackInfo? track;
   final CanonicalAlbumSummary? album;
 
   const _RecentItem({
     required this.title,
     required this.subtitle,
-    required this.badgeLabel,
     required this.track,
     this.album,
   });
@@ -948,7 +958,7 @@ class _ActivityTabButton extends StatelessWidget {
         decoration: BoxDecoration(
           border: Border(
             bottom: BorderSide(
-              color: selected ? Colors.white : Colors.transparent,
+              color: selected ? LuminaTokens.glassTextPrimary : Colors.transparent,
               width: 2,
             ),
           ),
@@ -957,10 +967,344 @@ class _ActivityTabButton extends StatelessWidget {
           label,
           style: TextStyle(
             color: selected
-                ? LuminaTokens.textPrimary
-                : LuminaTokens.textSecondary,
+                ? LuminaTokens.glassTextPrimary
+                : LuminaTokens.glassTextSecondary,
             fontSize: 13,
             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatPillButton extends StatefulWidget {
+  final double width;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _StatPillButton({
+    super.key,
+    required this.width,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  State<_StatPillButton> createState() => _StatPillButtonState();
+}
+
+class _StatPillButtonState extends State<_StatPillButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(12);
+    return SizedBox(
+      width: widget.width,
+      height: 44,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) {
+          if (!_hovered) setState(() => _hovered = true);
+        },
+        onExit: (_) {
+          if (_hovered) setState(() => _hovered = false);
+        },
+        child: FrostedGlassContainer(
+          height: 44,
+          blurSigma: LuminaTokens.glassPillBlur,
+          enableBackdropBlur: false,
+          color: _hovered
+              ? LuminaTokens.glassPillHoverBg
+              : LuminaTokens.glassPillBg,
+          borderRadius: radius,
+          border: Border.all(
+            color: _hovered
+                ? LuminaTokens.glassCoverRim
+                : LuminaTokens.glassPillBorder,
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              onTap: widget.onTap,
+              hoverColor: LuminaTokens.glassPillHoverBg,
+              borderRadius: radius,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: Row(
+                  children: [
+                    Icon(
+                      widget.icon,
+                      size: 17,
+                      color: LuminaTokens.glassTextSecondary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        widget.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: LuminaTokens.glassTextPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlassSectionActionLink extends StatefulWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _GlassSectionActionLink({
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  State<_GlassSectionActionLink> createState() =>
+      _GlassSectionActionLinkState();
+}
+
+class _GlassSectionActionLinkState extends State<_GlassSectionActionLink> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) {
+        if (!_hovered) setState(() => _hovered = true);
+      },
+      onExit: (_) {
+        if (_hovered) setState(() => _hovered = false);
+      },
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+        hoverColor: LuminaTokens.glassPillBg,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: _hovered
+                  ? LuminaTokens.glassTextPrimary
+                  : LuminaTokens.glassTextSecondary,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RecommendedPlaylistCard extends StatefulWidget {
+  final String title;
+  final String subtitle;
+  final List<Color> colors;
+  final IconData icon;
+  final TrackInfo? coverTrack;
+  final AudioService audioService;
+  final LibraryIndexCache? libraryCache;
+  final VoidCallback onOpen;
+  final VoidCallback onPlay;
+
+  const _RecommendedPlaylistCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.colors,
+    required this.icon,
+    required this.coverTrack,
+    required this.audioService,
+    required this.libraryCache,
+    required this.onOpen,
+    required this.onPlay,
+  });
+
+  @override
+  State<_RecommendedPlaylistCard> createState() =>
+      _RecommendedPlaylistCardState();
+}
+
+class _RecommendedPlaylistCardState extends State<_RecommendedPlaylistCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(12);
+    return RepaintBoundary(
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) {
+          if (!_hovered) setState(() => _hovered = true);
+        },
+        onExit: (_) {
+          if (_hovered) setState(() => _hovered = false);
+        },
+        child: Semantics(
+          button: true,
+          label: '${widget.title} ${widget.subtitle}',
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onOpen,
+            child: AnimatedContainer(
+              duration: LuminaTokens.hoverDuration,
+              curve: LuminaTokens.motionCurve,
+              transform: Matrix4.translationValues(
+                0.0,
+                _hovered ? -3.0 : 0.0,
+                0.0,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AspectRatio(
+                    aspectRatio: 16 / 10,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: radius,
+                        boxShadow: [
+                          BoxShadow(
+                            color: _hovered
+                                ? const Color(0x73000000)
+                                : const Color(0x59000000),
+                            blurRadius: _hovered ? 24 : 18,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: radius,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            AlbumArtworkView(
+                              track: widget.coverTrack,
+                              size: 240,
+                              fullResolution: false,
+                              audioService: widget.audioService,
+                              libraryCache: widget.libraryCache,
+                              borderRadius: radius,
+                              border: Border.all(
+                                color: _hovered
+                                    ? LuminaTokens.glassCoverRim
+                                    : LuminaTokens.glassPillBorder,
+                              ),
+                              boxShadow: const [],
+                              placeholder: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  borderRadius: radius,
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: widget.colors,
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Icon(
+                                    widget.icon,
+                                    size: 36,
+                                    color: Colors.white.withValues(alpha: 0.36),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Colors.transparent,
+                                      Colors.black.withValues(alpha: 0.45),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              right: 8,
+                              bottom: 8,
+                              child: Tooltip(
+                                message: '播放 ${widget.title}',
+                                child: Semantics(
+                                  button: true,
+                                  label: '播放 ${widget.title}',
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: widget.onPlay,
+                                    child: AnimatedContainer(
+                                      duration: LuminaTokens.focusDuration,
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withValues(
+                                          alpha: _hovered ? 0.68 : 0.48,
+                                        ),
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: _hovered
+                                              ? LuminaTokens.glassCoverRim
+                                              : LuminaTokens.glassPillBorder,
+                                        ),
+                                      ),
+                                      child: const Icon(
+                                        Icons.play_arrow_rounded,
+                                        size: 19,
+                                        color: LuminaTokens.glassTextPrimary,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    widget.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    widget.subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -1001,12 +1345,17 @@ class _RecentAlbumCardState extends State<_RecentAlbumCard> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final album = widget.album;
+    final coverRadius = BorderRadius.circular(12);
 
     return RepaintBoundary(
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
+        onEnter: (_) {
+          if (!_hovered) setState(() => _hovered = true);
+        },
+        onExit: (_) {
+          if (_hovered) setState(() => _hovered = false);
+        },
         child: Semantics(
           button: true,
           label: '${item.title} ${item.subtitle}',
@@ -1014,161 +1363,161 @@ class _RecentAlbumCardState extends State<_RecentAlbumCard> {
             behavior: HitTestBehavior.opaque,
             onTap: widget.onOpenAlbum,
             child: AnimatedContainer(
-              duration: LuminaTokens.focusDuration,
+              duration: LuminaTokens.hoverDuration,
               curve: LuminaTokens.motionCurve,
-              padding: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(10),
-                color: _hovered
-                    ? Colors.white.withValues(alpha: 0.08)
-                    : Colors.transparent,
+              transform: Matrix4.translationValues(
+                0.0,
+                _hovered ? -4.0 : 0.0,
+                0.0,
               ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                AspectRatio(
-                  aspectRatio: 1,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: LayoutBuilder(
-                      builder: (context, artConstraints) {
-                        final side = math.min(
-                          artConstraints.maxWidth,
-                          artConstraints.maxHeight,
-                        );
-                        final artSize =
-                            (side.isFinite && side > 0) ? side : 180.0;
-                        return Container(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: _hovered
-                                    ? const Color(0x77000000)
-                                    : const Color(0x44000000),
-                                blurRadius: _hovered ? 18 : 12,
-                                offset: const Offset(0, 6),
-                              ),
-                            ],
-                          ),
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              AlbumArtworkView(
-                                track: widget.showTrackArtwork
-                                    ? item.track
-                                    : null,
-                                album: album,
-                                size: artSize,
-                                audioService: widget.audioService,
-                                libraryCache: widget.libraryCache,
-                                fullResolution: false,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AspectRatio(
+                    aspectRatio: 1,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: LayoutBuilder(
+                        builder: (context, artConstraints) {
+                          final side = math.min(
+                            artConstraints.maxWidth,
+                            artConstraints.maxHeight,
+                          );
+                          final artSize =
+                              (side.isFinite && side > 0) ? side : 180.0;
+                          return Container(
+                            decoration: BoxDecoration(
+                              borderRadius: coverRadius,
+                              boxShadow: [
+                                BoxShadow(
                                   color: _hovered
-                                      ? Colors.white.withValues(alpha: 0.24)
-                                      : Colors.white.withValues(alpha: 0.08),
+                                      ? const Color(0x73000000)
+                                      : const Color(0x59000000),
+                                  blurRadius: _hovered ? 28 : 24,
+                                  offset: const Offset(0, 8),
                                 ),
-                                boxShadow: const [],
-                                placeholder: Container(
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(8),
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                      colors: widget.palette,
+                              ],
+                            ),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                AlbumArtworkView(
+                                  track: widget.showTrackArtwork
+                                      ? item.track
+                                      : null,
+                                  album: album,
+                                  size: artSize,
+                                  audioService: widget.audioService,
+                                  libraryCache: widget.libraryCache,
+                                  fullResolution: false,
+                                  borderRadius: coverRadius,
+                                  border: Border.all(
+                                    color: _hovered
+                                        ? LuminaTokens.glassCoverRim
+                                        : LuminaTokens.glassPillBorder,
+                                  ),
+                                  boxShadow: const [],
+                                  placeholder: Container(
+                                    decoration: BoxDecoration(
+                                      borderRadius: coverRadius,
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                        colors: widget.palette,
+                                      ),
+                                    ),
+                                    child: Center(
+                                      child: Icon(
+                                        Icons.album_rounded,
+                                        size: 56,
+                                        color: Colors.white.withValues(
+                                          alpha: 0.34,
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                  child: Center(
-                                    child: Icon(
-                                      Icons.album_rounded,
-                                      size: 56,
-                                      color: Colors.white.withValues(alpha: 0.38),
-                                    ),
-                                  ),
                                 ),
-                              ),
-                              Positioned(
-                                right: 8,
-                                bottom: 8,
-                                child: Tooltip(
-                                  message: '播放 ${item.title}',
-                                  child: Semantics(
-                                    button: true,
-                                    label: '播放 ${item.title}',
-                                    child: MouseRegion(
-                                      cursor: SystemMouseCursors.click,
-                                      child: GestureDetector(
-                                        behavior: HitTestBehavior.opaque,
-                                        onTap: widget.onPlayTrack ??
-                                            widget.onOpenAlbum,
-                                        child: Container(
-                                          width: 28,
-                                          height: 28,
-                                          decoration: BoxDecoration(
-                                            color: _hovered
-                                                ? LuminaTokens.accentBlue
-                                                : Colors.black.withValues(
-                                                    alpha: 0.55,
-                                                  ),
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: Icon(
-                                            Icons.play_arrow_rounded,
-                                            size: 18,
-                                            color: _hovered
-                                                ? LuminaTokens.onAccentDark
-                                                : LuminaTokens.textPrimary,
+                                Positioned(
+                                  right: 8,
+                                  bottom: 8,
+                                  child: Tooltip(
+                                    message: '播放 ${item.title}',
+                                    child: Semantics(
+                                      button: true,
+                                      label: '播放 ${item.title}',
+                                      child: MouseRegion(
+                                        cursor: SystemMouseCursors.click,
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: widget.onPlayTrack ??
+                                              widget.onOpenAlbum,
+                                          child: AnimatedOpacity(
+                                            duration:
+                                                LuminaTokens.focusDuration,
+                                            opacity: _hovered ? 1.0 : 0.78,
+                                            child: Container(
+                                              width: 32,
+                                              height: 32,
+                                              decoration: BoxDecoration(
+                                                color: Colors.black.withValues(
+                                                  alpha: _hovered ? 0.68 : 0.48,
+                                                ),
+                                                shape: BoxShape.circle,
+                                                border: Border.all(
+                                                  color: _hovered
+                                                      ? LuminaTokens
+                                                          .glassCoverRim
+                                                      : LuminaTokens
+                                                          .glassPillBorder,
+                                                ),
+                                              ),
+                                              child: const Icon(
+                                                Icons.play_arrow_rounded,
+                                                size: 19,
+                                                color: LuminaTokens
+                                                    .glassTextPrimary,
+                                              ),
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
+                              ],
+                            ),
+                          );
+                        },
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  item.badgeLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFB8C2EB),
-                    fontSize: 10.5,
+                  const SizedBox(height: 10),
+                  Text(
+                    item.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  item.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: LuminaTokens.textPrimary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                  const SizedBox(height: 2),
+                  Text(
+                    item.subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextSecondary,
+                      fontSize: 12,
+                    ),
                   ),
-                ),
-                Text(
-                  item.subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFD1D9F0),
-                    fontSize: 12,
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
+    );
   }
 }

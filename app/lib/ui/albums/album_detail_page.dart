@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/audio_format.dart';
+import '../../models/ingestion_models.dart';
 import '../../models/playback_state.dart';
 import '../../models/streaming_models.dart';
 import '../../models/streaming_provider_meta.dart';
@@ -12,6 +13,7 @@ import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/frosted_glass_container.dart';
 import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
@@ -161,17 +163,150 @@ class _ActivePlaybackSnapshot {
   int get hashCode => Object.hash(trackId, trackTitle, albumTitle, status);
 }
 
-class _AlbumDetailPageState extends State<AlbumDetailPage> {
-  static const _cardBg = LuminaTokens.cardBg;
-  static const _dividerColor = LuminaTokens.borderSubtle;
-  static const _accentBlue = LuminaTokens.accentBlue;
+class _EditAlbumMetadataDialog extends StatefulWidget {
+  final String initialTitle;
+  final String initialArtist;
 
+  const _EditAlbumMetadataDialog({
+    required this.initialTitle,
+    required this.initialArtist,
+  });
+
+  @override
+  State<_EditAlbumMetadataDialog> createState() =>
+      _EditAlbumMetadataDialogState();
+}
+
+class _EditAlbumMetadataDialogState extends State<_EditAlbumMetadataDialog> {
+  late final TextEditingController _titleCtrl;
+  late final TextEditingController _artistCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleCtrl = TextEditingController(text: widget.initialTitle);
+    _artistCtrl = TextEditingController(text: widget.initialArtist);
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _artistCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: FrostedGlassContainer(
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+          padding: const EdgeInsets.all(LuminaTokens.spaceLg),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '編輯專輯詮釋資料（非破壞性覆寫）',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  '使用者覆寫優先於檔案標籤與雲端補全，重新掃描時不會被覆蓋。',
+                  style: TextStyle(
+                    color: LuminaTokens.textMuted,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: LuminaTokens.spaceMd),
+                TextField(
+                  key: const Key('input_override_album_title'),
+                  controller: _titleCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: const InputDecoration(
+                    labelText: '專輯名稱',
+                    labelStyle: TextStyle(color: LuminaTokens.textSecondary),
+                  ),
+                ),
+                const SizedBox(height: LuminaTokens.spaceSm),
+                TextField(
+                  key: const Key('input_override_album_artist'),
+                  controller: _artistCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: const InputDecoration(
+                    labelText: '藝術家名稱',
+                    labelStyle: TextStyle(color: LuminaTokens.textSecondary),
+                  ),
+                ),
+                const SizedBox(height: LuminaTokens.spaceMd),
+                Row(
+                  children: [
+                    TextButton(
+                      key: const Key('btn_clear_album_metadata'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: LuminaTokens.textMuted,
+                      ),
+                      onPressed: () => Navigator.of(context).pop((
+                        action: 'clear',
+                        title: '',
+                        artist: '',
+                      )),
+                      child: const Text('清除覆寫'),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: LuminaTokens.glassTextSecondary,
+                      ),
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('取消'),
+                    ),
+                    const SizedBox(width: LuminaTokens.spaceXs),
+                    FilledButton(
+                      key: const Key('btn_save_album_metadata'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                        foregroundColor: LuminaTokens.onAccentDark,
+                      ),
+                      onPressed: () => Navigator.of(context).pop((
+                        action: 'save',
+                        title: _titleCtrl.text.trim(),
+                        artist: _artistCtrl.text.trim(),
+                      )),
+                      child: const Text('儲存'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AlbumDetailPageState extends State<AlbumDetailPage> {
   late final ScrollController _scrollController;
   late final ValueNotifier<_ActivePlaybackSnapshot> _playbackNotifier;
   StreamSubscription<PlaybackState>? _playbackSub;
 
   CanonicalAlbumDetail? _detail;
   CanonicalAlbumSummary? _summaryFallback;
+  List<MetadataOverrideRecord> _overrides = const <MetadataOverrideRecord>[];
   int _selectedVersionIndex = 0;
   int _coverRevision = 0;
   bool _loading = true;
@@ -310,6 +445,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
             : await widget.audioService.getAlbumDetail(widget.albumId);
       }
       if (!mounted || epoch != _loadEpoch) return;
+      List<MetadataOverrideRecord> overrides = const <MetadataOverrideRecord>[];
+      try {
+        overrides = await widget.audioService.getMetadataOverrides(
+          'album',
+          widget.albumId,
+        );
+      } catch (_) {}
+      if (!mounted || epoch != _loadEpoch) return;
       if (detail != null && cache != null) {
         cache.putAlbumDetailSync(detail);
       }
@@ -317,6 +460,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         if (detail != null || _detail == null) {
           _detail = detail;
         }
+        _overrides = overrides;
         _loading = false;
       });
       _notifyTitleChanged();
@@ -353,38 +497,111 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     final txt = TextEditingController();
     final path = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: LuminaTokens.cardElevatedBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-          side: const BorderSide(color: LuminaTokens.borderControl),
-        ),
-        title: const Text(
-          '設定專輯外部封面',
-          style: TextStyle(color: LuminaTokens.textPrimary, fontSize: 15),
-        ),
-        content: TextField(
-          controller: txt,
-          key: const Key('input_album_cover_path'),
-          style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 13),
-          decoration: const InputDecoration(
-            hintText: 'C:\\Music\\cover.jpg',
-            hintStyle: TextStyle(color: LuminaTokens.textMuted),
-            enabledBorder: UnderlineInputBorder(
-              borderSide: BorderSide(color: LuminaTokens.borderControl),
+      barrierColor: LuminaTokens.scrimBg,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassDialogBlur,
+            color: LuminaTokens.glassDialogBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x88000000),
+                blurRadius: 32,
+                offset: Offset(0, 14),
+              ),
+            ],
+            padding: const EdgeInsets.all(LuminaTokens.spaceLg),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    '設定專輯外部封面',
+                    style: TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceMd),
+                  TextField(
+                    controller: txt,
+                    key: const Key('input_album_cover_path'),
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 13,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: 'C:\\Music\\cover.jpg',
+                      hintStyle: const TextStyle(color: LuminaTokens.textMuted),
+                      filled: true,
+                      fillColor: LuminaTokens.glassPillBg,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusSm,
+                        ),
+                        borderSide: const BorderSide(
+                          color: LuminaTokens.glassPillBorder,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusSm,
+                        ),
+                        borderSide: const BorderSide(
+                          color: LuminaTokens.glassPillBorder,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusSm,
+                        ),
+                        borderSide: const BorderSide(
+                          color: LuminaTokens.focusRing,
+                          width: 1.5,
+                        ),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: LuminaTokens.spaceSm,
+                        vertical: LuminaTokens.spaceSm,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceLg),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: LuminaTokens.glassTextSecondary,
+                        ),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: LuminaTokens.spaceXs),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                          foregroundColor: LuminaTokens.onAccentDark,
+                        ),
+                        onPressed: () => Navigator.of(ctx).pop(txt.text.trim()),
+                        child: const Text('設定'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(txt.text.trim()),
-            child: const Text('設定'),
-          ),
-        ],
       ),
     );
     if (path != null && path.isNotEmpty) {
@@ -405,6 +622,65 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     if (mounted) {
       setState(() => _coverRevision++);
     }
+  }
+
+  Future<void> _promptEditMetadata(CanonicalAlbumDetail detail) async {
+    final result = await showDialog<({String action, String title, String artist})>(
+      context: context,
+      barrierColor: LuminaTokens.scrimBg,
+      builder: (_) => _EditAlbumMetadataDialog(
+        initialTitle: detail.title,
+        initialArtist: detail.artistName,
+      ),
+    );
+    if (result == null || !mounted) return;
+
+    if (result.action == 'clear') {
+      await widget.audioService.clearMetadataOverride(
+        'album',
+        detail.id,
+        'title',
+      );
+      await widget.audioService.clearMetadataOverride(
+        'album',
+        detail.id,
+        'artist_name',
+      );
+    } else if (result.action == 'save') {
+      if (result.title.isNotEmpty) {
+        await widget.audioService.setMetadataOverride(
+          'album',
+          detail.id,
+          'title',
+          result.title,
+        );
+      }
+      if (result.artist.isNotEmpty) {
+        await widget.audioService.setMetadataOverride(
+          'album',
+          detail.id,
+          'artist_name',
+          result.artist,
+        );
+      }
+    }
+
+    final refreshed = await widget.audioService.getAlbumDetail(widget.albumId);
+    final overrides = await widget.audioService.getMetadataOverrides(
+      'album',
+      widget.albumId,
+    );
+    if (!mounted) return;
+    if (refreshed != null) {
+      widget.libraryCache?.putAlbumDetailSync(refreshed);
+    }
+    setState(() {
+      if (refreshed != null) {
+        _detail = refreshed;
+      }
+      _overrides = overrides;
+    });
+    _notifyTitleChanged();
   }
 
   TrackInfo _toTrackInfo(
@@ -608,7 +884,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         ? const Center(
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: _accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           )
         : _error != null && _detail == null
@@ -747,7 +1023,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         Text(
                           '目前採用版本：${selectedVersion.editionLabel}',
                           style: const TextStyle(
-                            color: _accentBlue,
+                            color: LuminaTokens.glassTextSecondary,
                             fontSize: 12,
                           ),
                         ),
@@ -794,7 +1070,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                         padding: const EdgeInsets.only(bottom: 8),
                         decoration: const BoxDecoration(
                           border: Border(
-                            bottom: BorderSide(color: _dividerColor),
+                            bottom: BorderSide(
+                              color: LuminaTokens.glassCardDivider,
+                            ),
                           ),
                         ),
                         child: Row(
@@ -942,11 +1220,13 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                             width: double.infinity,
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
-                              color: _cardBg,
+                              color: LuminaTokens.glassCardBg,
                               borderRadius: BorderRadius.circular(
-                                LuminaTokens.radiusSm,
+                                LuminaTokens.glassCardRadius,
                               ),
-                              border: Border.all(color: _dividerColor),
+                              border: Border.all(
+                                color: LuminaTokens.glassCardBorder,
+                              ),
                             ),
                             child: Text(
                               detail.editorialBio!,
@@ -999,14 +1279,14 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
             artistName: detail.artistName,
             fontSize: 15,
             fontWeight: FontWeight.w600,
-            defaultColor: const Color(0xFFD5D9E6),
-            hoverColor: _accentBlue,
+            defaultColor: LuminaTokens.glassTextSecondary,
+            hoverColor: Colors.white,
             onTap: () => _handleOpenArtist(detail.artistName, detail),
           ),
         ),
 
-        // Release Year & Audio Format Badge
-        if (detail.releaseYear != null || ver != null) ...[
+        // Release Year, Audio Format & User Override Badge
+        if (detail.releaseYear != null || ver != null || _overrides.isNotEmpty) ...[
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
@@ -1029,17 +1309,40 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                     vertical: 3,
                   ),
                   decoration: BoxDecoration(
-                    color: _accentBlue.withValues(alpha: 0.12),
+                    color: LuminaTokens.glassPillBg,
                     borderRadius: BorderRadius.circular(5),
                     border: Border.all(
-                      color: _accentBlue.withValues(alpha: 0.4),
+                      color: LuminaTokens.glassPillBorder,
                     ),
                   ),
                   child: Text(
                     ver.formatSummary,
                     style: const TextStyle(
-                      color: _accentBlue,
+                      color: LuminaTokens.glassTextPrimary,
                       fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              if (_overrides.isNotEmpty)
+                Container(
+                  key: const Key('album_override_badge'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: LuminaTokens.statusSuccess.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(
+                      color: LuminaTokens.statusSuccess.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: const Text(
+                    '已自訂',
+                    style: TextStyle(
+                      color: LuminaTokens.statusSuccess,
+                      fontSize: 11,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -1084,7 +1387,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 ),
               ),
               style: FilledButton.styleFrom(
-                backgroundColor: _accentBlue,
+                backgroundColor: LuminaTokens.glassSwitchOnTrack,
                 foregroundColor: LuminaTokens.onAccentDark,
                 shape: const StadiumBorder(),
                 padding: const EdgeInsets.symmetric(
@@ -1099,8 +1402,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
               onPressed: () => _addAlbumToQueue(detail, ver),
               icon: const Icon(Icons.playlist_add_rounded, size: 19),
               style: OutlinedButton.styleFrom(
-                foregroundColor: LuminaTokens.textPrimary,
-                side: const BorderSide(color: LuminaTokens.borderControl),
+                backgroundColor: LuminaTokens.glassPillBg,
+                foregroundColor: LuminaTokens.glassTextPrimary,
+                side: const BorderSide(color: LuminaTokens.glassPillBorder),
               ),
             ),
             OutlinedButton.icon(
@@ -1109,8 +1413,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
               icon: const Icon(Icons.image_outlined, size: 16),
               label: const Text('設定外部封面', style: TextStyle(fontSize: 12)),
               style: OutlinedButton.styleFrom(
-                foregroundColor: LuminaTokens.textPrimary,
-                side: const BorderSide(color: LuminaTokens.borderControl),
+                backgroundColor: LuminaTokens.glassPillBg,
+                foregroundColor: LuminaTokens.glassTextPrimary,
+                side: const BorderSide(color: LuminaTokens.glassPillBorder),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
                   vertical: 8,
@@ -1127,10 +1432,29 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
               ),
             ),
+            OutlinedButton.icon(
+              key: const Key('btn_edit_album_metadata'),
+              onPressed: () => _promptEditMetadata(detail),
+              icon: const Icon(Icons.edit_outlined, size: 15),
+              label: const Text('編輯詮釋資料', style: TextStyle(fontSize: 12)),
+              style: OutlinedButton.styleFrom(
+                backgroundColor: LuminaTokens.glassPillBg,
+                foregroundColor: LuminaTokens.glassTextPrimary,
+                side: const BorderSide(color: LuminaTokens.glassPillBorder),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+              ),
+            ),
             PopupMenuButton<String>(
               key: const Key('btn_album_more_options'),
               tooltip: '更多專輯選項',
-              color: LuminaTokens.cardElevatedBg,
+              color: LuminaTokens.glassMenuBg,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+                side: const BorderSide(color: LuminaTokens.glassCardBorder),
+              ),
               icon: const Icon(
                 Icons.more_horiz_rounded,
                 size: 19,
@@ -1278,7 +1602,6 @@ class _AlbumTrackRow extends StatefulWidget {
 }
 
 class _AlbumTrackRowState extends State<_AlbumTrackRow> {
-  static const _accentBlue = LuminaTokens.accentBlue;
   bool _isHovered = false;
 
   @override
@@ -1293,10 +1616,10 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
         final isPlaying = isMatched && snapshot.isActivelyPlaying;
 
         final rowBg = isPlaying
-            ? _accentBlue.withValues(alpha: _isHovered ? 0.20 : 0.14)
-            : (_isHovered
-                  ? Colors.white.withValues(alpha: 0.06)
-                  : Colors.transparent);
+            ? (_isHovered
+                  ? LuminaTokens.glassPillHoverBg
+                  : LuminaTokens.glassNavActiveBg)
+            : (_isHovered ? LuminaTokens.glassRowHoverBg : Colors.transparent);
 
         return MouseRegion(
           cursor: SystemMouseCursors.click,
@@ -1318,7 +1641,7 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
                   color: isPlaying
-                      ? _accentBlue.withValues(alpha: 0.42)
+                      ? LuminaTokens.glassCoverRim
                       : Colors.transparent,
                 ),
               ),
@@ -1341,14 +1664,14 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                                   'track_playing_icon_${widget.track.id}',
                                 ),
                                 size: 18,
-                                color: _accentBlue,
+                                color: Colors.white,
                               )
                             : (_isHovered
                                 ? Icon(
                                     Icons.play_arrow_rounded,
                                     key: Key('track_hover_play_${widget.index}'),
                                     size: 18,
-                                    color: _accentBlue,
+                                    color: Colors.white,
                                   )
                                 : Text(
                                     widget.displayNumber,
@@ -1377,8 +1700,8 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: isPlaying
-                                ? _accentBlue
-                                : LuminaTokens.textPrimary,
+                                ? Colors.white
+                                : LuminaTokens.glassTextPrimary,
                             fontSize: 13.5,
                             fontWeight: isPlaying
                                 ? FontWeight.w700
@@ -1396,7 +1719,7 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                                 fontSize: 11.5,
                                 fontWeight: FontWeight.w400,
                                 defaultColor: LuminaTokens.textSecondary,
-                                hoverColor: _accentBlue,
+                                hoverColor: Colors.white,
                                 onTap: widget.onOpenArtist,
                               ),
                             ),
@@ -1411,7 +1734,9 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                   Text(
                     _fmtMs(widget.track.durationMs),
                     style: TextStyle(
-                      color: isPlaying ? _accentBlue : LuminaTokens.textMuted,
+                      color: isPlaying
+                          ? Colors.white
+                          : LuminaTokens.textMuted,
                       fontSize: 12.5,
                       fontWeight: isPlaying
                           ? FontWeight.w600
@@ -1435,7 +1760,7 @@ class _AlbumTrackRowState extends State<_AlbumTrackRow> {
                       Icons.play_arrow_rounded,
                       size: 18,
                       color: isPlaying || _isHovered
-                          ? _accentBlue
+                          ? Colors.white
                           : LuminaTokens.textMuted,
                     ),
                   ),
@@ -1481,8 +1806,6 @@ class _VersionChip extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   const _VersionChip({
     super.key,
     required this.version,
@@ -1506,11 +1829,13 @@ class _VersionChip extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: isSelected
-                  ? _accentBlue.withValues(alpha: 0.15)
-                  : LuminaTokens.cardElevatedBg,
+                  ? LuminaTokens.glassSegmentSelectedBg
+                  : LuminaTokens.glassPillBg,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: isSelected ? _accentBlue : LuminaTokens.borderControl,
+                color: isSelected
+                    ? LuminaTokens.glassSegmentSelectedBorder
+                    : LuminaTokens.glassPillBorder,
               ),
             ),
             child: Column(
@@ -1520,15 +1845,19 @@ class _VersionChip extends StatelessWidget {
                 Text(
                   version.editionLabel,
                   style: TextStyle(
-                    color: isSelected ? _accentBlue : LuminaTokens.textPrimary,
+                    color: isSelected
+                        ? Colors.white
+                        : LuminaTokens.glassTextPrimary,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
                 Text(
                   '${_providerLabel(version.provider)} · ${version.formatSummary}',
-                  style: const TextStyle(
-                    color: LuminaTokens.textMuted,
+                  style: TextStyle(
+                    color: isSelected
+                        ? LuminaTokens.glassTextSecondary
+                        : LuminaTokens.textMuted,
                     fontSize: 11,
                   ),
                 ),
@@ -1557,8 +1886,6 @@ class _CreditChip extends StatelessWidget {
   final AlbumCreditInfo credit;
   final VoidCallback? onTap;
 
-  static const _accentBlue = Color(0xFF7B92F8);
-
   const _CreditChip({required this.credit, this.onTap});
 
   @override
@@ -1570,9 +1897,9 @@ class _CreditChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: LuminaTokens.cardBg,
+          color: LuminaTokens.glassPillBg,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: LuminaTokens.borderControl),
+          border: Border.all(color: LuminaTokens.glassPillBorder),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1581,14 +1908,17 @@ class _CreditChip extends StatelessWidget {
             Text(
               credit.artistName,
               style: const TextStyle(
-                color: LuminaTokens.textPrimary,
+                color: LuminaTokens.glassTextPrimary,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
             ),
             Text(
               credit.role,
-              style: const TextStyle(color: _accentBlue, fontSize: 11),
+              style: const TextStyle(
+                color: LuminaTokens.glassTextSecondary,
+                fontSize: 11,
+              ),
             ),
           ],
         ),

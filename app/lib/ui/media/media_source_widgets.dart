@@ -4,10 +4,8 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../services/audio_service.dart';
 import '../../services/media_sources_controller.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
-
-const _accentBlue = LuminaTokens.accentBlue;
-const _cardBg = LuminaTokens.cardBg;
 
 Future<String?> _pickAudioFileNative() async {
   if (!Platform.isWindows || Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -47,14 +45,14 @@ Future<void> showAddMediaSourceDialog(
     hintText: hint,
     hintStyle: const TextStyle(color: LuminaTokens.textMuted, fontSize: 12),
     filled: true,
-    fillColor: LuminaTokens.cardElevatedBg,
+    fillColor: LuminaTokens.glassPillBg,
     border: OutlineInputBorder(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-      borderSide: const BorderSide(color: LuminaTokens.borderControl),
+      borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
     ),
     enabledBorder: OutlineInputBorder(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-      borderSide: const BorderSide(color: LuminaTokens.borderControl),
+      borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
     ),
     focusedBorder: OutlineInputBorder(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
@@ -67,90 +65,130 @@ Future<void> showAddMediaSourceDialog(
   );
   await showDialog<void>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: _cardBg,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        side: const BorderSide(color: LuminaTokens.borderControl),
-      ),
-      title: Text(
-        dialogTitle,
-        style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 16),
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            key: const Key('media_source_name_field'),
-            controller: nameCtrl,
-            style: const TextStyle(color: LuminaTokens.textPrimary, fontSize: 13),
-            decoration: deco(nameHint),
-          ),
-          const SizedBox(height: LuminaTokens.spaceSm),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  key: const Key('media_source_url_field'),
-                  controller: urlCtrl,
+    barrierColor: LuminaTokens.scrimBg,
+    builder: (ctx) => Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: FrostedGlassContainer(
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x88000000),
+              blurRadius: 32,
+              offset: Offset(0, 14),
+            ),
+          ],
+          padding: const EdgeInsets.all(LuminaTokens.spaceLg),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  dialogTitle,
                   style: const TextStyle(
-                    color: LuminaTokens.textPrimary,
+                    color: LuminaTokens.glassTextPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: LuminaTokens.spaceMd),
+                TextField(
+                  key: const Key('media_source_name_field'),
+                  controller: nameCtrl,
+                  style: const TextStyle(
+                    color: LuminaTokens.glassTextPrimary,
                     fontSize: 13,
                   ),
-                  decoration: deco(urlHint),
+                  decoration: deco(nameHint),
                 ),
-              ),
-              if (allowFilePicker) ...[
-                const SizedBox(width: LuminaTokens.spaceXs),
-                IconButton(
-                  key: const Key('media_source_pick_file_btn'),
-                  tooltip: '瀏覽本機檔案',
-                  icon: const Icon(Icons.folder_open_rounded, color: _accentBlue),
-                  onPressed: () async {
-                    final chosen = await _pickAudioFileNative();
-                    if (chosen != null) {
-                      urlCtrl.text = chosen;
-                      if (nameCtrl.text.trim().isEmpty) {
-                        final seg = chosen.split(Platform.pathSeparator).last;
-                        nameCtrl.text = seg.replaceFirst(RegExp(r'\.[^.]+$'), '');
-                      }
-                    }
-                  },
+                const SizedBox(height: LuminaTokens.spaceSm),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: const Key('media_source_url_field'),
+                        controller: urlCtrl,
+                        style: const TextStyle(
+                          color: LuminaTokens.glassTextPrimary,
+                          fontSize: 13,
+                        ),
+                        decoration: deco(urlHint),
+                      ),
+                    ),
+                    if (allowFilePicker) ...[
+                      const SizedBox(width: LuminaTokens.spaceXs),
+                      IconButton(
+                        key: const Key('media_source_pick_file_btn'),
+                        tooltip: '瀏覽本機檔案',
+                        icon: const Icon(
+                          Icons.folder_open_rounded,
+                          color: LuminaTokens.glassTextPrimary,
+                        ),
+                        onPressed: () async {
+                          final chosen = await _pickAudioFileNative();
+                          if (chosen != null) {
+                            urlCtrl.text = chosen;
+                            if (nameCtrl.text.trim().isEmpty) {
+                              final seg = chosen
+                                  .split(Platform.pathSeparator)
+                                  .last;
+                              nameCtrl.text = seg.replaceFirst(
+                                RegExp(r'\.[^.]+$'),
+                                '',
+                              );
+                            }
+                          }
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: LuminaTokens.spaceLg),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text(
+                        '取消',
+                        style: TextStyle(color: LuminaTokens.glassTextSecondary),
+                      ),
+                    ),
+                    const SizedBox(width: LuminaTokens.spaceXs),
+                    FilledButton(
+                      key: const Key('media_source_confirm_btn'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                        foregroundColor: LuminaTokens.onAccentDark,
+                      ),
+                      onPressed: () async {
+                        final name = nameCtrl.text.trim();
+                        final url = urlCtrl.text.trim();
+                        if (name.isEmpty || url.isEmpty) return;
+                        await MediaSourcesController.instance.add(
+                          kind: kind,
+                          title: name,
+                          url: url,
+                        );
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                      child: Text(confirmLabel),
+                    ),
+                  ],
                 ),
               ],
-            ],
+            ),
           ),
-        ],
+        ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text(
-            '取消',
-            style: TextStyle(color: LuminaTokens.textSecondary),
-          ),
-        ),
-        FilledButton(
-          key: const Key('media_source_confirm_btn'),
-          style: FilledButton.styleFrom(
-            backgroundColor: _accentBlue,
-            foregroundColor: LuminaTokens.onAccentDark,
-          ),
-          onPressed: () async {
-            final name = nameCtrl.text.trim();
-            final url = urlCtrl.text.trim();
-            if (name.isEmpty || url.isEmpty) return;
-            await MediaSourcesController.instance.add(
-              kind: kind,
-              title: name,
-              url: url,
-            );
-            if (ctx.mounted) Navigator.of(ctx).pop();
-          },
-          child: Text(confirmLabel),
-        ),
-      ],
     ),
   );
 }
@@ -188,7 +226,7 @@ class CustomSourceTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-      hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
+      hoverColor: LuminaTokens.glassRowHoverBg,
       onTap: () => playMediaSource(context, audioService, entry),
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -201,11 +239,11 @@ class CustomSourceTile extends StatelessWidget {
               width: 48,
               height: 48,
               decoration: BoxDecoration(
-                color: LuminaTokens.cardElevatedBg,
+                color: LuminaTokens.glassPillBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                border: Border.all(color: LuminaTokens.borderSubtle),
+                border: Border.all(color: LuminaTokens.glassPillBorder),
               ),
-              child: Icon(icon, size: 24, color: _accentBlue),
+              child: Icon(icon, size: 24, color: LuminaTokens.glassTextPrimary),
             ),
             const SizedBox(width: LuminaTokens.spaceSm),
             Expanded(
@@ -239,7 +277,7 @@ class CustomSourceTile extends StatelessWidget {
               icon: const Icon(
                 Icons.play_circle_outline_rounded,
                 size: 26,
-                color: _accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
               onPressed: () => playMediaSource(context, audioService, entry),
             ),

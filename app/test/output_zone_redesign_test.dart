@@ -6,6 +6,7 @@ import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/ffi_audio_service.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/ui/theme/lumina_tokens.dart';
 import 'package:lumina_app/ui/zones/output_zone_panel.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -381,12 +382,12 @@ void main() {
       expect(find.byIcon(Icons.speaker_rounded), findsOneWidget);
       expect(find.byIcon(Icons.tune_rounded), findsOneWidget);
 
-      // Active card shows brighter solid grey background + gear button (no '啟用')
+      // Active card shows brighter translucent glass background + gear button (no '啟用')
       final activeCardContainer = tester.widget<Container>(
         find.byKey(const Key('output_card_usb-dac-1__windows_wasapi_exclusive')),
       );
       final activeDec = activeCardContainer.decoration as BoxDecoration;
-      expect(activeDec.color, const Color(0xFF2E323C));
+      expect(activeDec.color, LuminaTokens.glassCardActiveBg);
       expect(
         find.byKey(
           const Key('btn_device_settings_usb-dac-1__windows_wasapi_exclusive'),
@@ -400,14 +401,14 @@ void main() {
         findsNothing,
       );
 
-      // Inactive card shows dark background + subtle grey border + purple '啟用' button
+      // Inactive card shows translucent glass background + subtle border + soft-white '啟用' button
       final inactiveCardContainer = tester.widget<Container>(
         find.byKey(
           const Key('output_card_wasapi-shared::usb-dac-1__windows_wasapi_shared'),
         ),
       );
       final inactiveDec = inactiveCardContainer.decoration as BoxDecoration;
-      expect(inactiveDec.color, const Color(0xFF191B21));
+      expect(inactiveDec.color, LuminaTokens.glassCardBg);
       expect(
         find.byKey(
           const Key(

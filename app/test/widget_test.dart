@@ -26,10 +26,15 @@ void main() {
     expect(find.byKey(const Key('nav_tab_zones')), findsNothing);
     expect(find.byKey(const Key('nav_tab_settings')), findsNothing);
 
-    // Click bottom-left track area to expand immersive Now Playing & Lyrics overlay
+    // Click bottom-left track area to expand Focus View Now Playing overlay
     await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
+    expect(find.byKey(const Key('lyrics_list_view')), findsNothing);
+
+    // Switch to Split Lyrics inside Now Playing
+    await tester.tap(find.byKey(const Key('btn_now_playing_mode_split')));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('lyrics_list_view')), findsOneWidget);
 
     // Collapse back to workspace via overlay collapse button
@@ -38,12 +43,20 @@ void main() {
     expect(find.byKey(const Key('now_playing_overlay')), findsNothing);
     expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
 
-    // Toggle overlay via mini-player lyrics button
+    // Toggle overlay via mini-player lyrics button (opens Split Lyrics directly,
+    // second tap returns to Cover Focus View, collapse closes back to Home)
     await tester.tap(find.byKey(const Key('btn_toggle_lyrics')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
     expect(find.byKey(const Key('lyrics_list_view')), findsOneWidget);
     await tester.tap(find.byKey(const Key('btn_toggle_lyrics')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
+    expect(find.byKey(const Key('lyrics_list_view')), findsNothing);
+    await tester.tap(find.byKey(const Key('btn_collapse_now_playing')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('now_playing_overlay')), findsNothing);
+    expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
 
     // Open bottom-right Quick Output Popover (ASIO / WASAPI + Restore Toggle)
     await tester.tap(find.byKey(const Key('btn_quick_output_popover')));

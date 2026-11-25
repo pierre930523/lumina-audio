@@ -663,6 +663,7 @@ async fn process_image_file(
     process_image_bytes(&bytes, source_kind, max_dim, cache_dir, pool, &cache_key, track_id, album_id).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_image_bytes(
     bytes: &[u8],
     source_kind: ArtworkSourceKind,

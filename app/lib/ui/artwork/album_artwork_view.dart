@@ -166,6 +166,7 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
     final trk = widget.track;
     final alb = widget.album;
     return trk?.artworkCacheKey ??
+        trk?.responsiveArtworkKey ??
         trk?.coverUrl ??
         trk?.albumArtUrl ??
         trk?.filePath ??
@@ -178,11 +179,14 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
   String _resolveSignature(AlbumArtworkView w) {
     final trk = w.track;
     final alb = w.album;
-    return '${trk?.artworkCacheKey ?? ''}|'
+    return '${trk?.responsiveArtworkKey ?? ''}|'
+        '${trk?.artworkCacheKey ?? ''}|'
         '${trk?.coverUrl ?? ''}|'
         '${trk?.albumArtUrl ?? ''}|'
         '${trk?.filePath ?? ''}|'
         '${trk?.id ?? ''}|'
+        '${trk?.providerName ?? ''}|'
+        '${trk?.title ?? ''}|'
         '${alb?.coverUrl ?? ''}|'
         '${alb?.id ?? ''}|'
         '${w.audioService?.hashCode ?? 0}|'
@@ -623,6 +627,9 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
         ? null
         : (widget.size * dpr * effectiveScale).ceil().clamp(128, 2048);
 
+    final artworkTrackKey =
+        widget.track?.responsiveArtworkKey ?? widget.album?.id ?? 'none';
+
     Widget imageContent;
     if (_resolvedCachePath != null && _resolvedCachePath!.isNotEmpty) {
       imageContent = Image.file(
@@ -713,7 +720,7 @@ class _AlbumArtworkViewState extends State<AlbumArtworkView> {
       ),
       child: KeyedSubtree(
         key: ValueKey(
-          'art_img_${_resolvedCachePath ?? _resolvedCoverUrl ?? "placeholder"}',
+          'art_img_${artworkTrackKey}_${_resolvedCachePath ?? _resolvedCoverUrl ?? "placeholder"}',
         ),
         child: imageContent,
       ),

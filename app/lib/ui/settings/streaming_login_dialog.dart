@@ -9,6 +9,7 @@ import '../../services/streaming/providers/qobuz_provider.dart';
 import '../../services/streaming/providers/tidal_provider.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../../services/streaming/streaming_provider.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 import 'settings_widgets.dart';
 
@@ -470,14 +471,16 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       },
       child: Dialog(
         key: Key('streaming_login_dialog_$_kind'),
-        backgroundColor: LuminaTokens.cardElevatedBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-          side: const BorderSide(color: LuminaTokens.borderControl),
-        ),
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 540, maxHeight: 720),
-          child: Padding(
+          child: FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassDialogBlur,
+            color: LuminaTokens.glassDialogBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
             padding: const EdgeInsets.all(LuminaTokens.spaceLg),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -693,40 +696,30 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
   }
 
   Widget _buildTabBar(List<String> labels) {
-    return Wrap(
-      spacing: LuminaTokens.spaceXs,
-      runSpacing: LuminaTokens.spaceXs,
-      children: [
-        for (var i = 0; i < labels.length; i++)
-          ChoiceChip(
-            key: Key('login_tab_${_kind}_$i'),
-            selected: _selectedTab == i,
-            onSelected: _submitting
-                ? null
-                : (_) => setState(() {
-                      _selectedTab = i;
-                      _errorMessage = null;
-                    }),
-            backgroundColor: LuminaTokens.cardBg,
-            selectedColor: LuminaTokens.accentBlue.withValues(alpha: 0.2),
-            side: BorderSide(
-              color: _selectedTab == i
-                  ? LuminaTokens.accentBlue
-                  : LuminaTokens.borderControl,
-            ),
-            label: Text(
-              labels[i],
-              style: TextStyle(
-                color: _selectedTab == i
-                    ? LuminaTokens.accentBlue
-                    : LuminaTokens.textSecondary,
-                fontSize: 12.5,
-                fontWeight:
-                    _selectedTab == i ? FontWeight.w600 : FontWeight.w500,
+    return DecoratedBox(
+      decoration: LuminaSettingsStyles.segmentedCapsuleDecoration(),
+      child: Padding(
+        padding: const EdgeInsets.all(3),
+        child: Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            for (var i = 0; i < labels.length; i++)
+              LuminaSettingsStyles.frostedSegmentChip(
+                key: Key('login_tab_${_kind}_$i'),
+                label: labels[i],
+                selected: _selectedTab == i,
+                disabled: _submitting,
+                onSelected: _submitting
+                    ? null
+                    : (_) => setState(() {
+                          _selectedTab = i;
+                          _errorMessage = null;
+                        }),
               ),
-            ),
-          ),
-      ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -896,10 +889,10 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
               vertical: LuminaTokens.spaceXs,
             ),
             decoration: BoxDecoration(
-              color: LuminaTokens.accentBlue.withValues(alpha: 0.1),
+              color: LuminaTokens.glassPillBg,
               borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
               border: Border.all(
-                color: LuminaTokens.accentBlue.withValues(alpha: 0.35),
+                color: LuminaTokens.glassPillBorder,
               ),
             ),
             child: Row(
@@ -907,7 +900,7 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                 const Icon(
                   Icons.key_outlined,
                   size: 16,
-                  color: LuminaTokens.accentBlue,
+                  color: LuminaTokens.glassTextPrimary,
                 ),
                 const SizedBox(width: LuminaTokens.spaceXs),
                 Expanded(
@@ -1203,11 +1196,9 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
     return Container(
       padding: const EdgeInsets.all(LuminaTokens.spaceMd),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        border: Border.all(
-          color: LuminaTokens.accentBlue.withValues(alpha: 0.38),
-        ),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1247,11 +1238,9 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       key: const Key('non_chromium_assisted_banner'),
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: LuminaTokens.accentBlue.withValues(alpha: 0.12),
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(
-          color: LuminaTokens.accentBlue.withValues(alpha: 0.5),
-        ),
+        border: Border.all(color: LuminaTokens.glassCoverRim),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1259,7 +1248,7 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
           const Icon(
             Icons.info_outline_rounded,
             size: 18,
-            color: LuminaTokens.accentBlue,
+            color: LuminaTokens.glassTextPrimary,
           ),
           const SizedBox(width: LuminaTokens.spaceXs),
           Expanded(
@@ -1282,10 +1271,10 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       key: const Key('qobuz_missing_secret_notice'),
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: const Color(0xFF2B2112),
+        color: LuminaTokens.statusWarning.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
-          color: LuminaTokens.statusWarning.withValues(alpha: 0.65),
+          color: LuminaTokens.statusWarning.withValues(alpha: 0.55),
         ),
       ),
       child: const Row(
@@ -1317,10 +1306,10 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       key: const Key('apple_music_drm_notice'),
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: const Color(0xFF2B2112),
+        color: LuminaTokens.statusWarning.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
-          color: LuminaTokens.statusWarning.withValues(alpha: 0.65),
+          color: LuminaTokens.statusWarning.withValues(alpha: 0.55),
         ),
       ),
       child: const Row(
@@ -1434,14 +1423,14 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                   ? Icons.keyboard_arrow_down_rounded
                   : Icons.keyboard_arrow_right_rounded,
               size: 18,
-              color: LuminaTokens.accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
             const SizedBox(width: 4),
             Expanded(
               child: Text(
                 title,
                 style: const TextStyle(
-                  color: LuminaTokens.accentBlue,
+                  color: LuminaTokens.glassTextPrimary,
                   fontSize: 12.5,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1457,9 +1446,9 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
     return Container(
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
+        color: LuminaTokens.glassCardBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Text(
         text,
@@ -1478,11 +1467,9 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       key: const Key('login_dialog_progress'),
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
+        color: LuminaTokens.glassCardBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(
-          color: LuminaTokens.accentBlue.withValues(alpha: 0.55),
-        ),
+        border: Border.all(color: LuminaTokens.glassCoverRim),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1494,7 +1481,7 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                 height: 14,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  color: LuminaTokens.accentBlue,
+                  color: LuminaTokens.glassTextPrimary,
                 ),
               ),
               const SizedBox(width: LuminaTokens.spaceXs),
@@ -1523,15 +1510,15 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
                       vertical: 4,
                     ),
                     decoration: BoxDecoration(
-                      color: LuminaTokens.cardElevatedBg,
+                      color: LuminaTokens.glassPillBg,
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: LuminaTokens.borderControl),
+                      border: Border.all(color: LuminaTokens.glassPillBorder),
                     ),
                     child: SelectableText(
                       parsed.code!,
                       key: const Key('login_dialog_device_code'),
                       style: const TextStyle(
-                        color: LuminaTokens.accentBlue,
+                        color: Colors.white,
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
                         letterSpacing: 1.1,
@@ -1573,7 +1560,7 @@ class _StreamingLoginDialogState extends State<StreamingLoginDialog> {
       key: const Key('login_dialog_error'),
       padding: const EdgeInsets.all(LuminaTokens.spaceSm),
       decoration: BoxDecoration(
-        color: LuminaTokens.statusErrorBg,
+        color: LuminaTokens.statusError.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(color: LuminaTokens.statusError),
       ),

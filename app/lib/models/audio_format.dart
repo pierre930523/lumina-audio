@@ -47,6 +47,7 @@ enum AudioCodec {
     'aac' => 'AAC',
     'mp3' => 'MP3',
     'opus' => 'Opus',
+    'ogg' || 'vorbis' => 'Ogg',
     'dsf' => 'DSF',
     'dsdiff' || 'dff' => 'DSDIFF',
     null || '' => 'FLAC',
@@ -60,6 +61,7 @@ class AudioFormat {
   final int bitDepth;
   final int channels;
   final bool isDsd;
+  final int? bitrateKbps;
 
   const AudioFormat({
     required this.codec,
@@ -67,6 +69,7 @@ class AudioFormat {
     required this.bitDepth,
     required this.channels,
     this.isDsd = false,
+    this.bitrateKbps,
   });
 
   static String formatSampleRateKhz(int sampleRateHz) {

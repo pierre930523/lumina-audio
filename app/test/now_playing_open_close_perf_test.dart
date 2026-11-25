@@ -56,8 +56,8 @@ void main() {
           find.byType(FloatingCapsuleMiniPlayer),
         );
 
-        // 1. Trigger open -> frame 1 + 150ms (mid-open of 300ms transition)
-        await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
+        // 1. Trigger open in Split Lyrics mode -> frame 1 + 150ms (mid-open of 300ms transition)
+        await tester.tap(find.byKey(const Key('btn_toggle_lyrics')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 150));
 

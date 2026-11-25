@@ -240,7 +240,7 @@ void main() {
           ),
         );
         expect(heroArtistText.style?.decoration, TextDecoration.underline);
-        expect(heroArtistText.style?.color, const Color(0xFF7B92F8));
+        expect(heroArtistText.style?.color, Colors.white);
 
         // Tap Hero artist name -> triggers onOpenArtist
         await tester.tap(heroArtistFinder);

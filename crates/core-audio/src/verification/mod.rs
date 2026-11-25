@@ -366,8 +366,10 @@ pub fn unpack_wire_bytes_to_chunk(
     match wire {
         WireSampleFormat::Int16Le => {
             let samples = raw
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_le_bytes(*c))
                 .collect();
             Ok(AudioChunk::PcmI16 {
                 samples,
@@ -377,7 +379,9 @@ pub fn unpack_wire_bytes_to_chunk(
         }
         WireSampleFormat::Int24PackedLe => {
             let samples = raw
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| {
                     let sign_byte = if c[2] & 0x80 != 0 { 0xFF } else { 0x00 };
                     i32::from_le_bytes([c[0], c[1], c[2], sign_byte])
@@ -391,8 +395,10 @@ pub fn unpack_wire_bytes_to_chunk(
         }
         WireSampleFormat::Int24In32MsbLe => {
             let samples = raw
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) >> 8)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c) >> 8)
                 .collect();
             Ok(AudioChunk::PcmI24In32 {
                 samples,
@@ -402,8 +408,10 @@ pub fn unpack_wire_bytes_to_chunk(
         }
         WireSampleFormat::Int32Le => {
             let samples = raw
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c))
                 .collect();
             Ok(AudioChunk::PcmI32 {
                 samples,
@@ -413,8 +421,10 @@ pub fn unpack_wire_bytes_to_chunk(
         }
         WireSampleFormat::Float32Le => {
             let samples = raw
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect();
             Ok(AudioChunk::PcmF32 {
                 samples,
@@ -424,8 +434,10 @@ pub fn unpack_wire_bytes_to_chunk(
         }
         WireSampleFormat::Float64Le => {
             let samples = raw
-                .chunks_exact(8)
-                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_le_bytes(*c))
                 .collect();
             Ok(AudioChunk::PcmF64 {
                 samples,
@@ -692,6 +704,7 @@ fn drain_rt_tap_locked(g: &mut VerificationInner) {
 
 /// Real-time verification engine measuring equality & SHA-256 digests between:
 /// 1) Decoder Output -> 2) Pre-Backend Processing Output -> 3) Output Backend Input.
+///
 /// Explicitly distinguishes software pipeline verification from hardware DAC pin-out.
 #[derive(Clone)]
 pub struct AudioVerificationEngine {

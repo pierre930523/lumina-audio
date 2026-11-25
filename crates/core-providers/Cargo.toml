@@ -11,6 +11,7 @@ core-db = { path = "../core-db" }
 core-types = { path = "../core-types" }
 encoding_rs = { workspace = true }
 image = { workspace = true }
+notify = { workspace = true }
 quick-xml = { workspace = true }
 rand = "0.8"
 reqwest = { workspace = true }

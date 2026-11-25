@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
 
+import '../models/ingestion_models.dart';
+
 class MusicFolderEntry {
   final String path;
   final int lastTrackCount;
@@ -31,6 +33,20 @@ class MusicFolderEntry {
 }
 
 class LibrarySettingsController extends ChangeNotifier {
+  /// Infers default [WatchMode] from a directory root path (UNC/SMB/WebDAV
+  /// paths use `nasPolling`, local filesystem paths use `nativeOs`).
+  static WatchMode inferWatchModeForPath(String rawPath) {
+    final trimmed = rawPath.trim();
+    final lower = trimmed.toLowerCase();
+    if (trimmed.startsWith(r'\\') ||
+        lower.startsWith('smb://') ||
+        lower.startsWith('dav://') ||
+        lower.startsWith('davs://')) {
+      return WatchMode.nasPolling;
+    }
+    return WatchMode.nativeOs;
+  }
+
   static const List<String> allAudioExtensions = [
     '.flac',
     '.mp3',

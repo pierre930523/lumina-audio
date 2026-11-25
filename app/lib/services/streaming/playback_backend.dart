@@ -66,6 +66,8 @@ class DualDeckStatus {
   final int formatMismatchRecoveries;
   final StreamKey? deckAKey;
   final StreamKey? deckBKey;
+  final int swapGeneration;
+  final Map<String, dynamic>? activeTrackJson;
 
   const DualDeckStatus({
     this.activeDeck = 'deck_a',
@@ -77,6 +79,8 @@ class DualDeckStatus {
     this.formatMismatchRecoveries = 0,
     this.deckAKey,
     this.deckBKey,
+    this.swapGeneration = 0,
+    this.activeTrackJson,
   });
 
   static bool _isDeckB(String deck) {
@@ -110,6 +114,20 @@ class DualDeckStatus {
     return null;
   }
 
+  static Map<String, dynamic>? _parseTrackMap(dynamic raw) {
+    if (raw is Map) {
+      return Map<String, dynamic>.from(raw);
+    }
+    return null;
+  }
+
+  static int _mapHash(Map<String, dynamic>? map) {
+    if (map == null) return 0;
+    return Object.hashAllUnordered(
+      map.entries.map((e) => Object.hash(e.key, e.value)),
+    );
+  }
+
   factory DualDeckStatus.fromJson(Map<String, dynamic> json) {
     final nested = json['dual_deck'];
     final source = nested is Map
@@ -128,6 +146,18 @@ class DualDeckStatus {
           (source['format_mismatch_recoveries'] as num?)?.toInt() ?? 0,
       deckAKey: _parseStreamKey(source['deck_a_key']),
       deckBKey: _parseStreamKey(source['deck_b_key']),
+      swapGeneration:
+          (source['swap_generation'] as num?)?.toInt() ??
+          (source['swapGeneration'] as num?)?.toInt() ??
+          (json['swap_generation'] as num?)?.toInt() ??
+          (json['swapGeneration'] as num?)?.toInt() ??
+          0,
+      activeTrackJson: _parseTrackMap(
+        source['active_track'] ??
+            source['current_track'] ??
+            json['active_track'] ??
+            json['current_track'],
+      ),
     );
   }
 
@@ -141,6 +171,8 @@ class DualDeckStatus {
     'format_mismatch_recoveries': formatMismatchRecoveries,
     if (deckAKey != null) 'deck_a_key': deckAKey!.toJson(),
     if (deckBKey != null) 'deck_b_key': deckBKey!.toJson(),
+    'swap_generation': swapGeneration,
+    if (activeTrackJson != null) 'active_track': activeTrackJson,
   };
 
   DeckState get activeDeckState =>
@@ -161,6 +193,9 @@ class DualDeckStatus {
     int? formatMismatchRecoveries,
     StreamKey? deckAKey,
     StreamKey? deckBKey,
+    int? swapGeneration,
+    Map<String, dynamic>? activeTrackJson,
+    bool clearActiveTrackJson = false,
   }) {
     return DualDeckStatus(
       activeDeck: activeDeck ?? this.activeDeck,
@@ -174,6 +209,10 @@ class DualDeckStatus {
           formatMismatchRecoveries ?? this.formatMismatchRecoveries,
       deckAKey: deckAKey ?? this.deckAKey,
       deckBKey: deckBKey ?? this.deckBKey,
+      swapGeneration: swapGeneration ?? this.swapGeneration,
+      activeTrackJson: clearActiveTrackJson
+          ? null
+          : (activeTrackJson ?? this.activeTrackJson),
     );
   }
 
@@ -189,7 +228,9 @@ class DualDeckStatus {
             other.manualZeroLatencySwitches == manualZeroLatencySwitches &&
             other.formatMismatchRecoveries == formatMismatchRecoveries &&
             other.deckAKey == deckAKey &&
-            other.deckBKey == deckBKey);
+            other.deckBKey == deckBKey &&
+            other.swapGeneration == swapGeneration &&
+            mapEquals(other.activeTrackJson, activeTrackJson));
   }
 
   @override
@@ -203,11 +244,13 @@ class DualDeckStatus {
     formatMismatchRecoveries,
     deckAKey,
     deckBKey,
+    swapGeneration,
+    _mapHash(activeTrackJson),
   );
 
   @override
   String toString() =>
-      'DualDeckStatus(active=$activeDeck, a=${deckAState.wireValue}, b=${deckBState.wireValue}, standbyMs=$standbyBufferedMs)';
+      'DualDeckStatus(active=$activeDeck, a=${deckAState.wireValue}, b=${deckBState.wireValue}, standbyMs=$standbyBufferedMs, swapGen=$swapGeneration)';
 }
 
 /// Unified playback backend abstraction isolating native Rust/AudioService
@@ -277,10 +320,32 @@ extension PlaybackBackendDualDeckExt on PlaybackBackend {
   }
 }
 
+/// Safe debounced-play extension forwarding [debounced] metadata when supported
+/// without breaking `implements PlaybackBackend` fakes.
+extension PlaybackBackendDebouncedExt on PlaybackBackend {
+  Future<void> playWithDebounced(
+    StreamSourceSpec spec,
+    TrackInfo track, {
+    required int epoch,
+    bool debounced = false,
+  }) {
+    if (this is NativePlaybackBackend) {
+      return (this as NativePlaybackBackend).playWithDebounced(
+        spec,
+        track,
+        epoch: epoch,
+        debounced: debounced,
+      );
+    }
+    return play(spec, track, epoch: epoch);
+  }
+}
+
 /// Native Rust audio engine backend backed by [AudioService].
 class NativePlaybackBackend extends PlaybackBackend
     implements DualDeckPlaybackBackend {
   final AudioService audioService;
+  bool _nextPlayDebounced = false;
 
   NativePlaybackBackend(this.audioService);
 
@@ -289,6 +354,20 @@ class NativePlaybackBackend extends PlaybackBackend
 
   @override
   PlaybackState get currentState => audioService.currentState;
+
+  Future<void> playWithDebounced(
+    StreamSourceSpec spec,
+    TrackInfo track, {
+    required int epoch,
+    required bool debounced,
+  }) async {
+    _nextPlayDebounced = debounced;
+    try {
+      await play(spec, track, epoch: epoch);
+    } finally {
+      _nextPlayDebounced = false;
+    }
+  }
 
   @override
   Future<void> play(
@@ -302,7 +381,14 @@ class NativePlaybackBackend extends PlaybackBackend
         '(${spec.providerId})',
       );
     }
-    return audioService.playStreamSpecAsync(track, spec, epoch: epoch);
+    final debounced = _nextPlayDebounced;
+    _nextPlayDebounced = false;
+    return audioService.playStreamSpecWithOptions(
+      track,
+      spec,
+      epoch: epoch,
+      debounced: debounced,
+    );
   }
 
   @override

@@ -7,8 +7,10 @@ import 'package:flutter/foundation.dart';
 
 import '../models/audio_format.dart';
 import '../models/audio_output_info.dart';
+import '../models/ingestion_models.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
+import '../models/recommendation_models.dart';
 import '../models/signal_path.dart';
 import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
@@ -193,6 +195,62 @@ typedef _LuminaL2TotalBytesNative = ffi.Int32 Function(
 );
 typedef _LuminaL2TotalBytesDart = int Function(ffi.Pointer<ffi.Uint64>);
 
+// Layer 1 Ingestion C-ABI typedefs
+typedef _LuminaScanProgressCbNative = ffi.Void Function(ffi.Pointer<ffi.Uint8>);
+typedef _LuminaSetScanProgressCbNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaScanProgressCbNative>>,
+);
+typedef _LuminaSetScanProgressCbDart = int Function(
+  ffi.Pointer<ffi.NativeFunction<_LuminaScanProgressCbNative>>,
+);
+
+typedef _LuminaWatchAddNative = ffi.Pointer<ffi.Uint8> Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Uint32,
+);
+typedef _LuminaWatchAddDart = ffi.Pointer<ffi.Uint8> Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  int,
+);
+
+typedef _LuminaIntToPtrNative = ffi.Pointer<ffi.Uint8> Function(ffi.Int32);
+typedef _LuminaIntToPtrDart = ffi.Pointer<ffi.Uint8> Function(int);
+
+typedef _LuminaStr4IntNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+typedef _LuminaStr4IntDart = int Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+
+typedef _LuminaStr3IntNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+typedef _LuminaStr3IntDart = int Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+
+typedef _LuminaStr2PtrNative = ffi.Pointer<ffi.Uint8> Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+typedef _LuminaStr2PtrDart = ffi.Pointer<ffi.Uint8> Function(
+  ffi.Pointer<ffi.Uint8>,
+  ffi.Pointer<ffi.Uint8>,
+);
+
 class FfiAudioService implements AudioService, DualDeckAudioService {
   final MockAudioService _delegate;
   final PerDevicePlaybackTracker _tracker = PerDevicePlaybackTracker();
@@ -202,6 +260,8 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       StreamController<SignalPath>.broadcast();
   final StreamController<Duration> _positionController =
       StreamController<Duration>.broadcast();
+  final StreamController<ScanProgressEvent> _scanProgressController =
+      StreamController<ScanProgressEvent>.broadcast();
 
   ffi.DynamicLibrary? _dylib;
   final Completer<void> _dbReadyCompleter = Completer<void>();
@@ -300,6 +360,25 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   _LuminaVoidIntDart? _l2CacheFlushAccessFn;
   _LuminaVoidIntDart? _l2CacheRunOrphanSweepFn;
 
+  // Layer 1 Ingestion optional FFI handles
+  _LuminaSetScanProgressCbDart? _libSetScanProgressCbFn;
+  _LuminaLibraryRescanTagsDart? _libScanStartFn;
+  _LuminaWatchAddDart? _libWatchAddFn;
+  _LuminaStrIntDart? _libWatchRemoveFn;
+  _LuminaVoidPtrDart? _libWatchListFn;
+  _LuminaIntToPtrDart? _libGetSkippedFilesFn;
+  _LuminaStrIntDart? _libDismissSkippedFileFn;
+  _LuminaStrPtrDart? _libRetrySkippedFileFn;
+  _LuminaStr4IntDart? _libSetMetadataOverrideFn;
+  _LuminaStr3IntDart? _libClearMetadataOverrideFn;
+  _LuminaStr2PtrDart? _libGetMetadataOverridesFn;
+  _LuminaStrPtrDart? _libIngestExternalCatalogFn;
+  _LuminaVoidPtrDart? _providerListFn;
+
+  ffi.NativeCallable<_LuminaScanProgressCbNative>? _scanProgressCallable;
+  StreamSubscription<ScanProgressEvent>? _delegateScanProgressSub;
+  StreamSubscription<ScanProgressEvent>? _remoteScanProgressSub;
+
   StreamingManager? _attachedStreamingManager;
   ProviderAuthRequiredCallback? _authRequiredListener;
   ffi.NativeCallable<_LuminaStreamRefreshCbNative>? _streamRefreshCallable;
@@ -307,6 +386,17 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   String? _lastDispatchedAuthErrorKey;
   DualDeckStatus? _lastDualDeckSnapshot;
   TrackInfo? _pendingStandbyTrack;
+  int _lastObservedSwapGeneration = 0;
+  final Map<String, TrackInfo> _standbyTracksById = <String, TrackInfo>{};
+
+  void _rememberStandbyTrack(TrackInfo track) {
+    if (track.id.isEmpty) return;
+    _standbyTracksById.remove(track.id);
+    while (_standbyTracksById.length >= 8) {
+      _standbyTracksById.remove(_standbyTracksById.keys.first);
+    }
+    _standbyTracksById[track.id] = track;
+  }
 
   /// Latest Dual-Deck status snapshot parsed from `lumina_playback_get_state_json`.
   DualDeckStatus? get lastDualDeckSnapshot => _lastDualDeckSnapshot;
@@ -346,6 +436,11 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     detachStreamingManager();
 
     _attachedStreamingManager = manager;
+    manager.onCatalogSynced = (providerId, catalog) async {
+      await ingestExternalCatalog(
+        ExternalCatalogIngestBatch.fromStreamingCatalog(providerId, catalog),
+      );
+    };
     _authRequiredListener = (String providerId, String reason) {
       cancelStreamingProvider(providerId);
     };
@@ -396,8 +491,11 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   void detachStreamingManager() {
     final manager = _attachedStreamingManager;
     final listener = _authRequiredListener;
-    if (manager != null && listener != null) {
-      manager.removeAuthRequiredListener(listener);
+    if (manager != null) {
+      if (listener != null) {
+        manager.removeAuthRequiredListener(listener);
+      }
+      manager.onCatalogSynced = null;
     }
     _attachedStreamingManager = null;
     _authRequiredListener = null;
@@ -491,6 +589,58 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   void _onNativeNetworkEpochChanged(int epoch) {
     if (_disposed) return;
     _attachedStreamingManager?.handleNetworkEpochChanged(epoch);
+  }
+
+  void _onNativeScanProgress(ffi.Pointer<ffi.Uint8> jsonPtr) {
+    // Ownership contract: ALWAYS free jsonPtr via lumina_string_free inside
+    // _takeRustString before any early return.
+    String? rawJson;
+    try {
+      rawJson = _takeRustString(jsonPtr);
+    } catch (_) {
+      rawJson = null;
+    }
+    if (_disposed || rawJson == null || rawJson.trim().isEmpty) return;
+    try {
+      final decoded = jsonDecode(rawJson);
+      if (decoded is Map) {
+        final ev = ScanProgressEvent.fromJson(
+          Map<String, dynamic>.from(decoded),
+        );
+        if (!_scanProgressController.isClosed) {
+          _scanProgressController.add(ev);
+        }
+        if (ev.state == ScanLifecycleState.completed) {
+          _reloadTracksFromNative();
+          _emitState(_state);
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _registerNativeScanProgressCallback() {
+    final setCb = _libSetScanProgressCbFn;
+    if (setCb == null || !isNativeBound || _disposed) return;
+    try {
+      final callable =
+          ffi.NativeCallable<_LuminaScanProgressCbNative>.listener(
+        _onNativeScanProgress,
+      );
+      _scanProgressCallable = callable;
+      setCb(callable.nativeFunction);
+    } catch (_) {
+      _scanProgressCallable?.close();
+      _scanProgressCallable = null;
+    }
+  }
+
+  void _attachRemoteScanProgress(ServerAudioService remote) {
+    _remoteScanProgressSub?.cancel();
+    _remoteScanProgressSub = remote.scanProgressStream.listen((ev) {
+      if (!_disposed && !_scanProgressController.isClosed) {
+        _scanProgressController.add(ev);
+      }
+    });
   }
 
   /// Pure testable JSON handler bridging Rust `StreamRefreshRequest` JSON to
@@ -703,6 +853,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   bool _activeStreamIsLocalProxy = false;
   int _activeRequestId = 0;
   int _activeEpoch = 0;
+  int _lastCancelledEpoch = 0;
 
   @visibleForTesting
   int get activeEpoch => _activeEpoch;
@@ -1005,6 +1156,47 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
           _LuminaVoidIntNative,
           _LuminaVoidIntDart>('lumina_l2_cache_run_orphan_sweep'));
 
+      // Layer 1 Ingestion optional bindings (gracefully null on older DLLs)
+      _libSetScanProgressCbFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaSetScanProgressCbNative,
+          _LuminaSetScanProgressCbDart>('lumina_library_set_scan_progress_callback'));
+      _libScanStartFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaLibraryRescanTagsNative,
+          _LuminaLibraryRescanTagsDart>('lumina_library_scan_start'));
+      _libWatchAddFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaWatchAddNative,
+          _LuminaWatchAddDart>('lumina_library_watch_add'));
+      _libWatchRemoveFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrIntNative,
+          _LuminaStrIntDart>('lumina_library_watch_remove'));
+      _libWatchListFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidPtrNative,
+          _LuminaVoidPtrDart>('lumina_library_watch_list'));
+      _libGetSkippedFilesFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaIntToPtrNative,
+          _LuminaIntToPtrDart>('lumina_library_get_skipped_files'));
+      _libDismissSkippedFileFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrIntNative,
+          _LuminaStrIntDart>('lumina_library_dismiss_skipped_file'));
+      _libRetrySkippedFileFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrPtrNative,
+          _LuminaStrPtrDart>('lumina_library_retry_skipped_file'));
+      _libSetMetadataOverrideFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStr4IntNative,
+          _LuminaStr4IntDart>('lumina_library_set_metadata_override'));
+      _libClearMetadataOverrideFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStr3IntNative,
+          _LuminaStr3IntDart>('lumina_library_clear_metadata_override'));
+      _libGetMetadataOverridesFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStr2PtrNative,
+          _LuminaStr2PtrDart>('lumina_library_get_metadata_overrides'));
+      _libIngestExternalCatalogFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaStrPtrNative,
+          _LuminaStrPtrDart>('lumina_library_ingest_external_catalog'));
+      _providerListFn = tryLookup(() => dylib.lookupFunction<
+          _LuminaVoidPtrNative,
+          _LuminaVoidPtrDart>('lumina_provider_list'));
+
       final initRc = headless ? _initHeadlessFn!() : _initFn!();
       if (initRc != 0) {
         _dylib = null;
@@ -1013,6 +1205,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
 
       final dbPath = resolveDatabasePath(databasePathOverride: databasePath);
       _withNativeUtf8(dbPath, (ptr) => _libInitFn!(ptr));
+      _registerNativeScanProgressCallback();
       if (_l2CacheInitFn != null) {
         final l2Dir = resolveL2CacheRootDir(databasePathOverride: databasePath);
         try {
@@ -1033,6 +1226,14 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     } catch (_) {
       _dylib = null;
     } finally {
+      _delegateScanProgressSub ??= _delegate.scanProgressStream.listen((ev) {
+        if (!isNativeBound &&
+            _remoteClient == null &&
+            !_disposed &&
+            !_scanProgressController.isClosed) {
+          _scanProgressController.add(ev);
+        }
+      });
       if (!_dbReadyCompleter.isCompleted) {
         _dbReadyCompleter.complete();
       }
@@ -1300,18 +1501,17 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     }
   }
 
-  AudioCodec _parseCodec(String? raw) => switch (raw?.toLowerCase()) {
-    'flac' => AudioCodec.flac,
-    'alac' => AudioCodec.alac,
-    'wav' => AudioCodec.wav,
-    'aiff' => AudioCodec.aiff,
-    'aac' => AudioCodec.aac,
-    'mp3' => AudioCodec.mp3,
-    'opus' => AudioCodec.opus,
-    'dsf' => AudioCodec.dsf,
-    'dsdiff' => AudioCodec.dsdiff,
-    _ => AudioCodec.flac,
-  };
+  AudioCodec _parseCodec(String? raw) => AudioCodec.fromString(raw);
+
+  int? _parseBitrateKbps(Map<String, dynamic> item) {
+    final kbps = (item['bitrate_kbps'] as num?)?.toInt();
+    if (kbps != null && kbps > 0) return kbps;
+    final raw =
+        (item['bitrate_bps'] as num?)?.toInt() ??
+        (item['bitrate'] as num?)?.toInt();
+    if (raw == null || raw <= 0) return null;
+    return raw > 10000 ? (raw / 1000.0).round() : raw;
+  }
 
   SignalQuality _parseQuality(String? raw) => switch (raw?.toLowerCase()) {
     'lossless' => SignalQuality.lossless,
@@ -1345,6 +1545,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
               bitDepth: (item['bit_depth'] as num?)?.toInt() ?? 16,
               channels: (item['channels'] as num?)?.toInt() ?? 2,
               isDsd: item['is_dsd'] == true,
+              bitrateKbps: _parseBitrateKbps(item),
             ),
             providerName: 'Local Library',
             filePath: item['file_path']?.toString(),
@@ -1519,6 +1720,10 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         json.containsKey('gapless_transitions') ||
         json.containsKey('manual_zero_latency_switches') ||
         json.containsKey('format_mismatch_recoveries') ||
+        json.containsKey('swap_generation') ||
+        json.containsKey('swapGeneration') ||
+        json.containsKey('current_track') ||
+        json.containsKey('active_track') ||
         json['dual_deck'] is Map;
   }
 
@@ -1526,6 +1731,198 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     if (_hasDualDeckFields(json)) {
       _lastDualDeckSnapshot = DualDeckStatus.fromJson(json);
     }
+  }
+
+  static String _providerDisplayName(String? providerId) {
+    final normalized = providerId?.trim().toLowerCase() ?? '';
+    return switch (normalized) {
+      'qobuz' => 'Qobuz',
+      'tidal' => 'Tidal',
+      'deezer' => 'Deezer',
+      'youtube_music' || 'ytm' => 'YouTube Music',
+      'apple_music' || 'apple' => 'Apple Music',
+      'podcast_rss' || 'podcast' => 'Podcast',
+      'local' => 'Local Library',
+      _ => (providerId != null && providerId.trim().isNotEmpty)
+          ? providerId.trim()
+          : 'Local Library',
+    };
+  }
+
+  static String _normalizedTrackKey(String rawId, {String? providerId}) {
+    final probe = TrackInfo(
+      id: rawId,
+      title: '',
+      artist: '',
+      album: '',
+      duration: Duration.zero,
+      format: const AudioFormat(
+        codec: AudioCodec.flac,
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        channels: 2,
+      ),
+      providerName: _providerDisplayName(providerId),
+    );
+    final meta = TrackMetadata.fromTrackInfo(
+      probe,
+      providerIdOverride:
+          (providerId != null && providerId.trim().isNotEmpty)
+              ? providerId.trim()
+              : null,
+    );
+    return '${meta.providerId}:${meta.trackId}';
+  }
+
+  static bool _tracksReferToSame(
+    TrackInfo? current,
+    String reportedId,
+    String? reportedProviderId,
+  ) {
+    if (current == null) return false;
+    if (current.id == reportedId) return true;
+    final normCurrent = current.responsiveArtworkKey;
+    final normReported = _normalizedTrackKey(
+      reportedId,
+      providerId: reportedProviderId,
+    );
+    return normCurrent == normReported;
+  }
+
+  TrackInfo? _findMatchingTrackCandidate(
+    String? reportedId,
+    String? reportedProviderId,
+  ) {
+    if (reportedId == null || reportedId.isEmpty) return null;
+    if (_pendingStandbyTrack != null &&
+        _tracksReferToSame(_pendingStandbyTrack, reportedId, reportedProviderId)) {
+      return _pendingStandbyTrack;
+    }
+    final directStandby = _standbyTracksById[reportedId];
+    if (directStandby != null) return directStandby;
+    for (final candidate in _standbyTracksById.values) {
+      if (_tracksReferToSame(candidate, reportedId, reportedProviderId)) {
+        return candidate;
+      }
+    }
+    for (final candidate in _queue) {
+      if (_tracksReferToSame(candidate, reportedId, reportedProviderId)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  int _findTrackIndexInQueue(TrackInfo target) {
+    final byExact = PlaybackPersistenceService.findTrackIndex(_queue, target);
+    if (byExact >= 0) return byExact;
+    final targetKey = target.responsiveArtworkKey;
+    return _queue.indexWhere((t) => t.responsiveArtworkKey == targetKey);
+  }
+
+  static String? _nonEmptyString(dynamic raw) {
+    final s = raw?.toString().trim();
+    return (s != null && s.isNotEmpty) ? s : null;
+  }
+
+  static TrackInfo? _trackFromCurrentTrackMap(
+    Map<String, dynamic> map, {
+    int fallbackDurationMs = 0,
+  }) {
+    final rawId =
+        _nonEmptyString(map['track_id']) ??
+        _nonEmptyString(map['id']) ??
+        _nonEmptyString(map['external_track_id']);
+    if (rawId == null) return null;
+    final providerId = _nonEmptyString(map['provider_id']);
+    final title = _nonEmptyString(map['title']) ?? '未知曲目';
+    final artist = _nonEmptyString(map['artist']) ?? '未知藝術家';
+    final album = _nonEmptyString(map['album']) ?? '';
+    final coverUrl =
+        _nonEmptyString(map['cover_url']) ??
+        _nonEmptyString(map['album_art_url']) ??
+        _nonEmptyString(map['artwork_url']);
+    final mapDurMs = (map['duration_ms'] as num?)?.toInt() ?? 0;
+    final effDurMs = mapDurMs > 0 ? mapDurMs : fallbackDurationMs;
+    final canonicalId =
+        (providerId != null &&
+            providerId != 'local' &&
+            !rawId.contains(':'))
+        ? TrackMetadata(
+            providerId: providerId,
+            trackId: rawId,
+            title: title,
+            artist: artist,
+          ).toTrackInfo().id
+        : rawId;
+    return TrackInfo(
+      id: canonicalId,
+      title: title,
+      artist: artist,
+      album: album,
+      duration: Duration(milliseconds: effDurMs > 0 ? effDurMs : 0),
+      coverUrl: coverUrl,
+      albumArtUrl: coverUrl,
+      providerName: _providerDisplayName(providerId),
+      format: const AudioFormat(
+        codec: AudioCodec.flac,
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        channels: 2,
+      ),
+    );
+  }
+
+  static TrackInfo? _mergeTrackInfo(
+    TrackInfo? base,
+    TrackInfo? jsonTrack, {
+    int liveDurationMs = 0,
+  }) {
+    if (base == null && jsonTrack == null) return null;
+    if (base == null) {
+      return liveDurationMs > 0
+          ? jsonTrack!.copyWith(duration: Duration(milliseconds: liveDurationMs))
+          : jsonTrack;
+    }
+    if (jsonTrack == null) {
+      return liveDurationMs > 0
+          ? base.copyWith(duration: Duration(milliseconds: liveDurationMs))
+          : base;
+    }
+    final mergedTitle =
+        (base.title.trim().isNotEmpty && base.title.trim() != '未知曲目')
+        ? base.title
+        : jsonTrack.title;
+    final mergedArtist =
+        (base.artist.trim().isNotEmpty && base.artist.trim() != '未知藝術家')
+        ? base.artist
+        : jsonTrack.artist;
+    final mergedAlbum = base.album.trim().isNotEmpty
+        ? base.album
+        : jsonTrack.album;
+    final mergedCover =
+        (base.coverUrl != null && base.coverUrl!.trim().isNotEmpty)
+        ? base.coverUrl
+        : jsonTrack.coverUrl;
+    final mergedAlbumArt =
+        (base.albumArtUrl != null && base.albumArtUrl!.trim().isNotEmpty)
+        ? base.albumArtUrl
+        : (jsonTrack.albumArtUrl ?? mergedCover);
+    final mergedDuration = liveDurationMs > 0
+        ? Duration(milliseconds: liveDurationMs)
+        : (base.duration > Duration.zero ? base.duration : jsonTrack.duration);
+    final mergedProvider = base.providerName.trim().isNotEmpty
+        ? base.providerName
+        : jsonTrack.providerName;
+    return base.copyWith(
+      title: mergedTitle,
+      artist: mergedArtist,
+      album: mergedAlbum,
+      coverUrl: mergedCover,
+      albumArtUrl: mergedAlbumArt,
+      duration: mergedDuration,
+      providerName: mergedProvider,
+    );
   }
 
   @visibleForTesting
@@ -1545,8 +1942,8 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     final clockSrc = json['clock_source']?.toString() ?? _state.clockSource;
     final playReqId = (json['play_request_id'] as num?)?.toInt() ?? 0;
     final loadedReqId = (json['loaded_request_id'] as num?)?.toInt() ?? 0;
-    final stateEpoch = (json['epoch'] as num?)?.toInt() ?? playReqId;
-    if (_activeEpoch > 0 && stateEpoch > 0 && stateEpoch < _activeEpoch) {
+    final stateEpoch = PlaybackState.parsePlaybackEpoch(json);
+    if (_activeEpoch > 0 && stateEpoch < _activeEpoch) {
       return false;
     }
     if (_activeRequestId > 0 &&
@@ -1554,6 +1951,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         playReqId != _activeRequestId) {
       return false;
     }
+    final effectiveEpoch = stateEpoch > 0 ? stateEpoch : _activeEpoch;
     _updateDualDeckSnapshotFromJson(json);
     var status = PlaybackStatus.fromCode(stateCode);
     if (_activeRequestId > 0 && playReqId > loadedReqId) {
@@ -1586,30 +1984,6 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       ),
     );
 
-    final enteredPlaying =
-        _state.status != PlaybackStatus.playing &&
-        status == PlaybackStatus.playing;
-
-    final reportedTrackId = json['current_track_id']?.toString().trim();
-    TrackInfo? baseTrack = _state.track;
-    if (reportedTrackId != null &&
-        reportedTrackId.isNotEmpty &&
-        baseTrack?.id != reportedTrackId) {
-      if (_pendingStandbyTrack?.id == reportedTrackId) {
-        baseTrack = _pendingStandbyTrack;
-      } else {
-        final queueMatch = _queue
-            .where((t) => t.id == reportedTrackId)
-            .firstOrNull;
-        if (queueMatch != null) {
-          baseTrack = queueMatch;
-        }
-      }
-    }
-    final updatedTrack = baseTrack != null && durMs > 0
-        ? baseTrack.copyWith(duration: Duration(milliseconds: durMs))
-        : baseTrack;
-
     if (status == PlaybackStatus.stopped ||
         status == PlaybackStatus.error ||
         status == PlaybackStatus.paused) {
@@ -1620,31 +1994,108 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       _positionTimer?.cancel();
     }
 
+    final enteredPlaying =
+        _state.status != PlaybackStatus.playing &&
+        status == PlaybackStatus.playing;
+
+    final swapGen =
+        (json['swap_generation'] as num?)?.toInt() ??
+        (json['swapGeneration'] as num?)?.toInt() ??
+        _lastDualDeckSnapshot?.swapGeneration ??
+        _state.swapGeneration;
+    final rawTrackObj =
+        json['current_track'] ??
+        json['active_track'] ??
+        _lastDualDeckSnapshot?.activeTrackJson;
+    final currentTrackMap = rawTrackObj is Map
+        ? Map<String, dynamic>.from(rawTrackObj)
+        : null;
+    final rawReportedId = json['current_track_id']?.toString().trim();
+    final mapReportedId =
+        _nonEmptyString(currentTrackMap?['track_id']) ??
+        _nonEmptyString(currentTrackMap?['id']) ??
+        _nonEmptyString(currentTrackMap?['external_track_id']);
+    final reportedTrackId =
+        (rawReportedId != null && rawReportedId.isNotEmpty)
+        ? rawReportedId
+        : mapReportedId;
+    final reportedProviderId = _nonEmptyString(currentTrackMap?['provider_id']);
+
+    final swapIncremented =
+        swapGen > _lastObservedSwapGeneration && swapGen > 0;
+    final trackIdChanged =
+        reportedTrackId != null &&
+        reportedTrackId.isNotEmpty &&
+        !_tracksReferToSame(_state.track, reportedTrackId, reportedProviderId);
+    final trackSwapped = swapIncremented || trackIdChanged;
+    if (swapGen != _lastObservedSwapGeneration) {
+      _lastObservedSwapGeneration = swapGen;
+    }
+
+    final jsonTrack = currentTrackMap != null
+        ? _trackFromCurrentTrackMap(currentTrackMap, fallbackDurationMs: durMs)
+        : null;
+    TrackInfo? updatedTrack;
+    if (trackSwapped) {
+      final matchedCandidate = _findMatchingTrackCandidate(
+        reportedTrackId,
+        reportedProviderId,
+      );
+      updatedTrack =
+          _mergeTrackInfo(
+            matchedCandidate,
+            jsonTrack,
+            liveDurationMs: durMs,
+          ) ??
+          _mergeTrackInfo(_state.track, null, liveDurationMs: durMs);
+    } else {
+      updatedTrack = _mergeTrackInfo(
+        _state.track,
+        jsonTrack,
+        liveDurationMs: durMs,
+      );
+    }
+
+    if (trackSwapped && updatedTrack != null) {
+      _pendingStandbyTrack = null;
+      final qIdx = _findTrackIndexInQueue(updatedTrack);
+      if (qIdx >= 0) {
+        _currentIndex = qIdx;
+        _queue[qIdx] =
+            _mergeTrackInfo(_queue[qIdx], updatedTrack, liveDurationMs: durMs)!;
+      }
+      if (status == PlaybackStatus.playing) {
+        _loadLyricsForTrack(updatedTrack);
+        _refreshSignalPath();
+      }
+    } else if (enteredPlaying) {
+      if (updatedTrack != null && _currentLyrics.isEmpty) {
+        _loadLyricsForTrack(updatedTrack);
+      }
+      _refreshSignalPath();
+    }
+
     _emitState(
       _state.copyWith(
         status: status,
         track: updatedTrack,
-        position: Duration(milliseconds: posMs),
+        position: Duration(milliseconds: posMs < 0 ? 0 : posMs),
         seekEpoch: seekEpoch,
         isSeeking: isSeeking,
         deviceLost: deviceLost,
         lastError: lastErr,
         clearLastError: lastErr == null || lastErr.isEmpty,
         clockSource: clockSrc,
+        swapGeneration: swapGen,
+        playbackEpoch: effectiveEpoch,
       ),
     );
-    if (enteredPlaying) {
-      _refreshSignalPath();
-      if (updatedTrack != null && _currentLyrics.isEmpty) {
-        _loadLyricsForTrack(updatedTrack);
-      }
-    }
     return true;
   }
 
   void _startPositionTimer() {
     _positionTimer?.cancel();
-    _positionTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _positionTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!isNativeBound) {
         _positionTimer?.cancel();
         return;
@@ -1655,9 +2106,12 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
           try {
             final json = jsonDecode(raw) as Map<String, dynamic>;
             _applyNativeStateJson(json);
-            return;
           } catch (_) {}
         }
+        return;
+      }
+      if (_activeEpoch > 0) {
+        return;
       }
 
       final stateCode = _getStateFn!();
@@ -1777,9 +2231,39 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.loading,
         track: track,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         clearLastError: true,
       ),
     );
+  }
+
+  @override
+  void beginOptimisticTrackLoadAtEpoch(
+    TrackInfo track, {
+    List<TrackInfo>? queue,
+    required int epoch,
+  }) {
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+      _activeRequestId = epoch;
+    }
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      _remoteClient!.beginOptimisticTrackLoadAtEpoch(
+        track,
+        queue: queue,
+        epoch: epoch,
+      );
+      return;
+    }
+    if (!isNativeBound) {
+      _delegate.beginOptimisticTrackLoadAtEpoch(
+        track,
+        queue: queue,
+        epoch: epoch,
+      );
+      return;
+    }
+    beginOptimisticTrackLoad(track, queue: queue);
   }
 
   @override
@@ -1799,6 +2283,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.error,
         track: track,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         lastError: message,
       ),
     );
@@ -1812,15 +2297,19 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       _activeEpoch = epoch;
       _activeRequestId = epoch;
     }
+    if (epoch > 0) {
+      _lastCancelledEpoch = _activeEpoch;
+    }
+    final effectiveEpoch = epoch > 0 ? epoch : _activeEpoch;
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
-      await _remoteClient!.cancelPendingPlayback(epoch: epoch);
+      await _remoteClient!.cancelPendingPlayback(epoch: effectiveEpoch);
       return;
     }
     if (!isNativeBound) {
-      await _delegate.cancelPendingPlayback();
+      await _delegate.cancelPendingPlaybackAtEpoch(effectiveEpoch);
       return;
     }
-    _playbackCancelPendingFn?.call(0);
+    _playbackCancelPendingFn?.call(effectiveEpoch);
   }
 
   @override
@@ -1886,6 +2375,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     String? hintExtension,
     required int requestId,
   }) async {
+    if (requestId > 0 && requestId < _activeEpoch) return;
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
       return _remoteClient!.playStreamUrlAsync(
         track: track,
@@ -1933,23 +2423,44 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     TrackInfo track,
     StreamSourceSpec spec, {
     required int epoch,
+  }) => playStreamSpecWithOptions(track, spec, epoch: epoch, debounced: false);
+
+  @override
+  Future<void> playStreamSpecWithOptions(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+    bool debounced = false,
   }) async {
     if (spec is ExternalBackendSpec) {
       throw StateError(
         'ExternalBackendSpec (${spec.providerId}) cannot enter FfiAudioService',
       );
     }
-    if (epoch < _activeEpoch) return;
 
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
-      return _remoteClient!.playStreamSpecAsync(track, spec, epoch: epoch);
+      return _remoteClient!.playStreamSpecWithOptions(
+        track,
+        spec,
+        epoch: epoch,
+        debounced: debounced,
+      );
     }
     if (!isNativeBound) {
-      return _delegate.playStreamSpecAsync(track, spec, epoch: epoch);
+      return _delegate.playStreamSpecWithOptions(
+        track,
+        spec,
+        epoch: epoch,
+        debounced: debounced,
+      );
     }
-
-    await cancelPendingPlayback(epoch: epoch);
     if (epoch < _activeEpoch) return;
+
+    if (epoch > _activeEpoch) {
+      await cancelPendingPlayback(epoch: epoch);
+    }
+    if (epoch < _activeEpoch) return;
+    _lastCancelledEpoch = 0;
 
     final resolvedFields = _legacyFieldsForSpec(spec);
     if (_playbackPlayAsyncFn == null) {
@@ -1969,6 +2480,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       hintExtension: resolvedFields.hintExtension,
       sourceSpec: spec,
       epoch: epoch,
+      debounced: debounced,
     );
     _dispatchNativeAsyncPayload(
       track: track,
@@ -2000,6 +2512,8 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       );
       return;
     }
+    _pendingStandbyTrack = track;
+    _rememberStandbyTrack(track);
     if (!isNativeBound) {
       await _delegate.prepareStandbySpecAsync(
         track,
@@ -2022,13 +2536,13 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       sourceSpec: spec,
       epoch: effectiveEpoch,
     );
-    _pendingStandbyTrack = track;
     final rc = _withNativeUtf8(
       payload,
       (p) => prepareFn(p, effectiveEpoch),
     );
     if (rc != 0) {
       _pendingStandbyTrack = null;
+      _standbyTracksById.remove(track.id);
     }
   }
 
@@ -2108,6 +2622,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
           status: PlaybackStatus.error,
           track: track,
           position: Duration.zero,
+          playbackEpoch: epoch,
           lastError: msg,
         ),
       );
@@ -2120,6 +2635,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.loading,
         track: track,
         position: Duration.zero,
+        playbackEpoch: epoch,
         clearLastError: true,
       ),
     );
@@ -2168,6 +2684,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     TrackInfo target,
     StreamSourceSpec spec, {
     required int epoch,
+    bool debounced = false,
   }) {
     final fields = _legacyFieldsForSpec(spec);
     return _encodeTrackPayload(
@@ -2178,6 +2695,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       hintExtension: fields.hintExtension,
       sourceSpec: spec,
       epoch: epoch,
+      debounced: debounced,
     );
   }
 
@@ -2189,13 +2707,22 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     String? hintExtension,
     StreamSourceSpec? sourceSpec,
     int? epoch,
+    bool debounced = false,
   }) {
     final effectivePath = filePathOverride ?? target.filePath;
+    final meta = TrackMetadata.fromTrackInfo(target);
+    final coverUrl = (target.artworkUrl ?? target.coverUrl)?.trim();
+    final albumArtUrl = target.albumArtUrl?.trim();
     return jsonEncode({
       'id': target.id,
+      if (target.id.isNotEmpty) 'track_id': target.id,
+      if (meta.providerId.isNotEmpty) 'provider_id': meta.providerId,
       'title': target.title,
       'artist': target.artist,
       'album': target.album,
+      if (coverUrl != null && coverUrl.isNotEmpty) 'cover_url': coverUrl,
+      if (albumArtUrl != null && albumArtUrl.isNotEmpty)
+        'album_art_url': albumArtUrl,
       if (target.duration.inMilliseconds > 0)
         'duration_ms': target.duration.inMilliseconds,
       'codec': target.format.codec.name,
@@ -2209,7 +2736,9 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       if (headers.isNotEmpty) 'headers': headers,
       if (hintExtension != null && hintExtension.isNotEmpty)
         'hint_extension': hintExtension,
+      'playback_epoch': ?epoch,
       'epoch': ?epoch,
+      if (debounced) 'debounced': true,
       if (sourceSpec != null) 'source_spec': sourceSpec.toJson(),
       'source': target.providerName,
     });
@@ -2356,8 +2885,9 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     _pendingResumePosition = null;
     _needsLoadOnResume = false;
 
-    _activeRequestId = 0;
-    _activeEpoch = 0;
+    final nextEpoch = _activeEpoch + 1;
+    _activeEpoch = nextEpoch;
+    _activeRequestId = nextEpoch;
     _activeStreamIsLocalProxy = _isLoopbackUrl(streamUrl);
     _pendingStandbyTrack = null;
     _lastDualDeckSnapshot = null;
@@ -2366,6 +2896,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       streamUrl: streamUrl,
       headers: headers,
       hintExtension: hintExtension,
+      epoch: nextEpoch,
     );
     final rc = _withNativeUtf8(payload, (p) => _playFn!(p));
     if (rc != 0) {
@@ -2383,6 +2914,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
               : PlaybackStatus.stopped,
           track: target,
           position: Duration.zero,
+          playbackEpoch: nextEpoch,
           lastError: streamUrl != null ? _lastError : null,
         ),
       );
@@ -2408,6 +2940,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.playing,
         track: syncedTrack,
         position: initialPos,
+        playbackEpoch: nextEpoch,
       ),
     );
     _refreshSignalPath();
@@ -2512,6 +3045,11 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
       'last_error': _state.lastError,
       'device_lost': _state.deviceLost,
       'current_track_id': _state.track?.id,
+      'swap_generation': _state.swapGeneration,
+      'swapGeneration': _state.swapGeneration,
+      'playback_epoch': _state.playbackEpoch,
+      'playbackEpoch': _state.playbackEpoch,
+      'epoch': _state.playbackEpoch,
     };
   }
 
@@ -2692,20 +3230,28 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   Future<void> stop() async {
     _playbackInterruptHandler?.call();
     _positionTimer?.cancel();
-    _activeRequestId = 0;
-    _activeEpoch = 0;
     _pendingResumePosition = null;
     _needsLoadOnResume = false;
     _activeStreamIsLocalProxy = false;
     _pendingStandbyTrack = null;
+    _standbyTracksById.clear();
     _lastDualDeckSnapshot = null;
     if (!isNativeBound) {
+      _lastCancelledEpoch = 0;
       return _delegate.stop();
     }
-    _playbackCancelPendingFn?.call(0);
+    if (_activeEpoch > 0 && _activeEpoch != _lastCancelledEpoch) {
+      _activeEpoch++;
+      _activeRequestId = _activeEpoch;
+    }
+    _lastCancelledEpoch = 0;
     _stopFn!();
     _emitState(
-      _state.copyWith(status: PlaybackStatus.stopped, position: Duration.zero),
+      _state.copyWith(
+        status: PlaybackStatus.stopped,
+        position: Duration.zero,
+        playbackEpoch: _activeEpoch,
+      ),
     );
   }
 
@@ -2758,6 +3304,40 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   }
 
   @override
+  Future<void> skipToTrack(TrackInfo track, {List<TrackInfo>? queueContext}) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.skipToTrack(track, queueContext: queueContext);
+    }
+    if (!isNativeBound) {
+      return _delegate.skipToTrack(track, queueContext: queueContext);
+    }
+    if (_streamingTrackHandler != null &&
+        AudioService.isStreamingTrackId(track.id)) {
+      await _streamingTrackHandler!(
+        track,
+        queueContext: queueContext,
+        debounce: true,
+      );
+      return;
+    }
+    final fp = track.filePath?.trim();
+    if (_playbackPlayAsyncFn != null &&
+        fp != null &&
+        fp.isNotEmpty &&
+        !AudioService.isStreamingTrackId(track.id) &&
+        !AudioService.isStreamingTrackId(fp)) {
+      final nextEpoch = ++_activeEpoch;
+      await playStreamSpecWithOptions(
+        track,
+        LocalFileSpec(key: StreamKey('local', fp, 'default'), path: fp),
+        epoch: nextEpoch,
+      );
+      return;
+    }
+    await play(track: track);
+  }
+
+  @override
   Future<void> next() async {
     if (!isNativeBound) {
       return _delegate.next();
@@ -2767,12 +3347,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     _pendingResumePosition = null;
     _currentIndex = (_currentIndex + 1) % _queue.length;
     final target = _queue[_currentIndex];
-    if (_streamingTrackHandler != null &&
-        AudioService.isStreamingTrackId(target.id)) {
-      await _streamingTrackHandler!(target, queueContext: null, debounce: true);
-      return;
-    }
-    await play(track: target);
+    await skipToTrack(target);
   }
 
   @override
@@ -2785,12 +3360,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     _pendingResumePosition = null;
     _currentIndex = (_currentIndex - 1 + _queue.length) % _queue.length;
     final target = _queue[_currentIndex];
-    if (_streamingTrackHandler != null &&
-        AudioService.isStreamingTrackId(target.id)) {
-      await _streamingTrackHandler!(target, queueContext: null, debounce: true);
-      return;
-    }
-    await play(track: target);
+    await skipToTrack(target);
   }
 
   @override
@@ -3359,6 +3929,24 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
       return _remoteClient!.listProviders();
     }
+    if (isNativeBound && _providerListFn != null) {
+      final raw = _takeRustString(_providerListFn!());
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is List) {
+            return decoded
+                .whereType<Map>()
+                .map(
+                  (e) => ProviderStatusInfo.fromJson(
+                    Map<String, dynamic>.from(e),
+                  ),
+                )
+                .toList(growable: false);
+          }
+        } catch (_) {}
+      }
+    }
     return _delegate.listProviders();
   }
 
@@ -3623,6 +4211,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     if (tok != null) {
       _remoteClient = remote;
       _connectionMode = remote.connectionMode;
+      _attachRemoteScanProgress(remote);
     } else {
       remote.dispose();
     }
@@ -3652,6 +4241,7 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     if (ok) {
       _remoteClient = remote;
       _connectionMode = ConnectionMode.wanRemote;
+      _attachRemoteScanProgress(remote);
     } else {
       remote.dispose();
     }
@@ -3769,7 +4359,325 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
   }
 
   @override
+  Stream<ScanProgressEvent> get scanProgressStream =>
+      _scanProgressController.stream;
+
+  @override
+  Future<String?> startDirectoryScan(String path, {bool force = false}) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.startDirectoryScan(path, force: force);
+    }
+    if (!isNativeBound || _libScanStartFn == null) {
+      return _delegate.startDirectoryScan(path, force: force);
+    }
+    final ptr = _withNativeUtf8(
+      path,
+      (p) => _libScanStartFn!(p, force ? 1 : 0),
+    );
+    final raw = _takeRustString(ptr);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return decoded['scan_id']?.toString();
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  @override
+  Future<List<WatchedRootRecord>> listWatchedRoots() async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.listWatchedRoots();
+    }
+    if (!isNativeBound || _libWatchListFn == null) {
+      return _delegate.listWatchedRoots();
+    }
+    final raw = _takeRustString(_libWatchListFn!());
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          return decoded
+              .whereType<Map>()
+              .map(
+                (e) => WatchedRootRecord.fromJson(Map<String, dynamic>.from(e)),
+              )
+              .toList(growable: false);
+        }
+      } catch (_) {}
+    }
+    return const [];
+  }
+
+  @override
+  Future<WatchedRootRecord?> addWatchedRoot(
+    String rootPath, {
+    WatchMode watchMode = WatchMode.nativeOs,
+    int pollIntervalSec = 300,
+  }) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.addWatchedRoot(
+        rootPath,
+        watchMode: watchMode,
+        pollIntervalSec: pollIntervalSec,
+      );
+    }
+    if (!isNativeBound || _libWatchAddFn == null) {
+      return _delegate.addWatchedRoot(
+        rootPath,
+        watchMode: watchMode,
+        pollIntervalSec: pollIntervalSec,
+      );
+    }
+    final ptr = _withNativeUtf8(
+      rootPath,
+      (pRoot) => _withNativeUtf8(
+        watchMode.toJson(),
+        (pMode) => _libWatchAddFn!(pRoot, pMode, pollIntervalSec),
+      ),
+    );
+    final raw = _takeRustString(ptr);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return WatchedRootRecord.fromJson(Map<String, dynamic>.from(decoded));
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> removeWatchedRoot(String rootPath) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.removeWatchedRoot(rootPath);
+    }
+    if (!isNativeBound || _libWatchRemoveFn == null) {
+      return _delegate.removeWatchedRoot(rootPath);
+    }
+    final rc = _withNativeUtf8(rootPath, (p) => _libWatchRemoveFn!(p));
+    return rc == 0;
+  }
+
+  @override
+  Future<List<SkippedFileRecord>> getSkippedFiles({
+    bool includeDismissed = false,
+  }) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.getSkippedFiles(includeDismissed: includeDismissed);
+    }
+    if (!isNativeBound || _libGetSkippedFilesFn == null) {
+      return _delegate.getSkippedFiles(includeDismissed: includeDismissed);
+    }
+    final raw = _takeRustString(
+      _libGetSkippedFilesFn!(includeDismissed ? 1 : 0),
+    );
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          return decoded
+              .whereType<Map>()
+              .map(
+                (e) => SkippedFileRecord.fromJson(Map<String, dynamic>.from(e)),
+              )
+              .toList(growable: false);
+        }
+      } catch (_) {}
+    }
+    return const [];
+  }
+
+  @override
+  Future<bool> dismissSkippedFile(String skippedId) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.dismissSkippedFile(skippedId);
+    }
+    if (!isNativeBound || _libDismissSkippedFileFn == null) {
+      return _delegate.dismissSkippedFile(skippedId);
+    }
+    final rc = _withNativeUtf8(skippedId, (p) => _libDismissSkippedFileFn!(p));
+    return rc == 0;
+  }
+
+  @override
+  Future<Map<String, dynamic>> retrySkippedFile(String skippedId) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.retrySkippedFile(skippedId);
+    }
+    if (!isNativeBound || _libRetrySkippedFileFn == null) {
+      return _delegate.retrySkippedFile(skippedId);
+    }
+    final raw = _takeRustString(
+      _withNativeUtf8(skippedId, (p) => _libRetrySkippedFileFn!(p)),
+    );
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          final map = Map<String, dynamic>.from(decoded);
+          if (map['status'] == 'imported') {
+            _reloadTracksFromNative();
+            _emitState(_state);
+          }
+          return map;
+        }
+      } catch (_) {}
+    }
+    return const <String, dynamic>{
+      'status': 'not_found',
+      'detail': 'Retry failed',
+    };
+  }
+
+  @override
+  Future<bool> setMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+    dynamic value,
+  ) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.setMetadataOverride(
+        entityType,
+        entityId,
+        fieldName,
+        value,
+      );
+    }
+    if (!isNativeBound || _libSetMetadataOverrideFn == null) {
+      return _delegate.setMetadataOverride(entityType, entityId, fieldName, value);
+    }
+    final valueJson = jsonEncode(value);
+    final rc = _withNativeUtf8(
+      entityType,
+      (pType) => _withNativeUtf8(
+        entityId,
+        (pId) => _withNativeUtf8(
+          fieldName,
+          (pField) => _withNativeUtf8(
+            valueJson,
+            (pVal) => _libSetMetadataOverrideFn!(pType, pId, pField, pVal),
+          ),
+        ),
+      ),
+    );
+    if (rc == 0) {
+      _reloadTracksFromNative();
+      _emitState(_state);
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> clearMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+  ) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.clearMetadataOverride(
+        entityType,
+        entityId,
+        fieldName,
+      );
+    }
+    if (!isNativeBound || _libClearMetadataOverrideFn == null) {
+      return _delegate.clearMetadataOverride(entityType, entityId, fieldName);
+    }
+    final rc = _withNativeUtf8(
+      entityType,
+      (pType) => _withNativeUtf8(
+        entityId,
+        (pId) => _withNativeUtf8(
+          fieldName,
+          (pField) => _libClearMetadataOverrideFn!(pType, pId, pField),
+        ),
+      ),
+    );
+    if (rc == 0) {
+      _reloadTracksFromNative();
+      _emitState(_state);
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<List<MetadataOverrideRecord>> getMetadataOverrides(
+    String entityType,
+    String entityId,
+  ) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.getMetadataOverrides(entityType, entityId);
+    }
+    if (!isNativeBound || _libGetMetadataOverridesFn == null) {
+      return _delegate.getMetadataOverrides(entityType, entityId);
+    }
+    final ptr = _withNativeUtf8(
+      entityType,
+      (pType) => _withNativeUtf8(
+        entityId,
+        (pId) => _libGetMetadataOverridesFn!(pType, pId),
+      ),
+    );
+    final raw = _takeRustString(ptr);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          return decoded
+              .whereType<Map>()
+              .map(
+                (e) => MetadataOverrideRecord.fromJson(
+                  Map<String, dynamic>.from(e),
+                ),
+              )
+              .toList(growable: false);
+        }
+      } catch (_) {}
+    }
+    return const [];
+  }
+
+  @override
+  Future<Map<String, int>> ingestExternalCatalog(
+    ExternalCatalogIngestBatch batch,
+  ) async {
+    if (_remoteClient != null && _connectionMode != ConnectionMode.localOrUsbDac) {
+      return _remoteClient!.ingestExternalCatalog(batch);
+    }
+    if (!isNativeBound || _libIngestExternalCatalogFn == null) {
+      return _delegate.ingestExternalCatalog(batch);
+    }
+    final raw = _takeRustString(
+      _withNativeUtf8(
+        jsonEncode(batch.toJson()),
+        (p) => _libIngestExternalCatalogFn!(p),
+      ),
+    );
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return <String, int>{
+            'albums_ingested': (decoded['albums_ingested'] as num?)?.toInt() ?? 0,
+            'tracks_ingested': (decoded['tracks_ingested'] as num?)?.toInt() ?? 0,
+          };
+        }
+      } catch (_) {}
+    }
+    return const <String, int>{'albums_ingested': 0, 'tracks_ingested': 0};
+  }
+
+  @override
   Future<void> switchToLocalMode() async {
+    await _remoteScanProgressSub?.cancel();
+    _remoteScanProgressSub = null;
     await _remoteClient?.switchToLocalMode();
     _remoteClient?.dispose();
     _remoteClient = null;
@@ -3781,20 +4689,30 @@ class FfiAudioService implements AudioService, DualDeckAudioService {
     if (_disposed) return;
     _disposed = true;
     detachStreamingManager();
+    _delegateScanProgressSub?.cancel();
+    _delegateScanProgressSub = null;
+    _remoteScanProgressSub?.cancel();
+    _remoteScanProgressSub = null;
     _visualizerCoordinator?.dispose();
     _visualizerCoordinator = null;
     _positionTimer?.cancel();
     _remoteClient?.dispose();
     if (isNativeBound) {
       try {
+        _libSetScanProgressCbFn?.call(ffi.nullptr);
+      } catch (_) {}
+      try {
         _l2CacheFlushAccessFn?.call();
       } catch (_) {}
       _shutdownFn?.call();
       _dylib = null;
     }
+    _scanProgressCallable?.close();
+    _scanProgressCallable = null;
     _stateController.close();
     _signalPathController.close();
     _positionController.close();
+    _scanProgressController.close();
     _delegate.dispose();
   }
 }

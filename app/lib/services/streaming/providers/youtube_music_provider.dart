@@ -7,13 +7,16 @@ import 'package:flutter/foundation.dart';
 import '../../../models/audio_format.dart';
 import '../../../models/playback_state.dart';
 import '../../../models/podcast_models.dart';
+import '../../../models/recommendation_models.dart';
 import '../../../models/stream_source_spec.dart';
 import '../../../models/streaming_models.dart';
 import '../../../models/studio_models.dart';
 import '../oauth_helper.dart';
 import '../pot_provider.dart';
+import '../recommendation_provider.dart';
 import '../stream_resolver.dart';
 import '../streaming_provider.dart';
+import '../track_matcher.dart';
 import '../yt_dlp_service.dart';
 import '../ytm_resident_resolver.dart';
 
@@ -45,7 +48,7 @@ class _InnerTubeAudioCandidate {
 
 /// Real YouTube Music InnerTube + Google OAuth 2.0 Device Flow + yt-dlp provider.
 class YouTubeMusicProvider extends BaseStreamingProvider
-    implements StreamResolver {
+    implements StreamResolver, RecommendationProvider {
   static const String _ytMusicOrigin = 'https://music.youtube.com';
   static const String _ytWebOrigin = 'https://www.youtube.com';
   static const String _youtubeScope =
@@ -227,6 +230,22 @@ class YouTubeMusicProvider extends BaseStreamingProvider
         cancelToken?.throwIfCancelled();
         return _residentResolver.resolve(key, cancelToken: cancelToken);
       }
+      if (e.kind == StreamingErrorKind.unknown) {
+        final classified = StreamingException.classifyKind(
+          statusCode: e.statusCode,
+          message: e.message,
+          isDrmRestricted: e.isDrmRestricted,
+        );
+        if (classified != null) {
+          throw StreamingException(
+            e.message,
+            statusCode: e.statusCode,
+            isTokenExpired: e.isTokenExpired,
+            isDrmRestricted: e.isDrmRestricted,
+            kind: classified,
+          );
+        }
+      }
       rethrow;
     }
   }
@@ -347,7 +366,11 @@ class YouTubeMusicProvider extends BaseStreamingProvider
       if (e.isCancelled) {
         throw const StreamingException('操作已取消', isCancelled: true);
       }
-      throw StreamingException(_redactSecrets(e.message));
+      final safeMsg = _redactSecrets(e.message);
+      throw StreamingException(
+        safeMsg,
+        kind: StreamingException.classifyKind(message: safeMsg),
+      );
     } finally {
       cancelToken?.removeListener(onCancel);
     }
@@ -2014,8 +2037,11 @@ class YouTubeMusicProvider extends BaseStreamingProvider
             final playability = res.json['playabilityStatus'];
             final status =
                 playability is Map ? playability['status']?.toString() : null;
+            final reason =
+                playability is Map ? playability['reason']?.toString() : null;
             diagnostics.add(
-              '$label HTTP ${res.statusCode}: status=${status ?? 'OK'} (no direct audio URL)',
+              '$label HTTP ${res.statusCode}: status=${status ?? 'OK'}'
+              '${reason != null && reason.isNotEmpty ? ' ($reason)' : ' (no direct audio URL)'}',
             );
           }
         } else {
@@ -2036,6 +2062,21 @@ class YouTubeMusicProvider extends BaseStreamingProvider
 
     final summary = _redactSecrets(diagnostics.join(' | '));
     debugPrint('[YouTubeMusic] All layers failed for $videoId: $summary');
+    final classified = StreamingException.classifyKind(message: summary);
+    if (classified == StreamingErrorKind.regionRestricted) {
+      throw StreamingException(
+        'YouTube Music 此曲目受地區限制無法在目前區域播放',
+        kind: StreamingErrorKind.regionRestricted,
+      );
+    }
+    if (classified == StreamingErrorKind.trackUnavailable ||
+        summary.contains('status=UNPLAYABLE') ||
+        summary.contains('status=ERROR')) {
+      throw StreamingException(
+        'YouTube Music 此曲目已下架、設為私人或目前無法播放',
+        kind: StreamingErrorKind.trackUnavailable,
+      );
+    }
     throw const StreamingException(
       'YouTube Music 未能解析可播放的音訊串流（所有 yt-dlp 與 InnerTube 解析途徑皆已失敗）',
     );
@@ -2078,7 +2119,11 @@ class YouTubeMusicProvider extends BaseStreamingProvider
       if (e.isCancelled) {
         throw const StreamingException('操作已取消', isCancelled: true);
       }
-      throw StreamingException(_redactSecrets(e.message));
+      final safeMsg = _redactSecrets(e.message);
+      throw StreamingException(
+        safeMsg,
+        kind: StreamingException.classifyKind(message: safeMsg),
+      );
     } finally {
       cancel?.removeListener(onCancel);
     }
@@ -2107,7 +2152,11 @@ class YouTubeMusicProvider extends BaseStreamingProvider
           throw const StreamingException('操作已取消', isCancelled: true);
         }
         diagnostics.add('$layerLabel FFmpeg proxy failed: ${e.message}');
-        throw StreamingException(_redactSecrets(e.message));
+        final safeMsg = _redactSecrets(e.message);
+      throw StreamingException(
+        safeMsg,
+        kind: StreamingException.classifyKind(message: safeMsg),
+      );
       } catch (e) {
         final safe = _redactSecrets(e.toString());
         diagnostics.add('$layerLabel FFmpeg proxy failed: $safe');
@@ -2230,6 +2279,10 @@ class YouTubeMusicProvider extends BaseStreamingProvider
       sampleRateHz: sampleRate,
       bitDepth: 16,
       channels: 2,
+      bitrateKbps:
+          (stream.bitrateKbps != null && stream.bitrateKbps! > 0)
+              ? stream.bitrateKbps!.round()
+              : null,
     );
   }
 
@@ -2391,6 +2444,13 @@ class YouTubeMusicProvider extends BaseStreamingProvider
         : int.tryParse(sampleRateRaw?.toString() ?? '') ??
             (codec == AudioCodec.opus ? 48000 : 44100);
     final channels = (best['audioChannels'] as num?)?.toInt() ?? 2;
+    final bitrateBps =
+        (best['averageBitrate'] as num?)?.toInt() ??
+        (best['bitrate'] as num?)?.toInt();
+    final bitrateKbps =
+        (bitrateBps != null && bitrateBps > 0)
+            ? (bitrateBps / 1000.0).round()
+            : null;
 
     return _InnerTubeAudioCandidate(
       requiresFfmpegTranscode: requiresTranscode,
@@ -2402,6 +2462,7 @@ class YouTubeMusicProvider extends BaseStreamingProvider
           sampleRateHz: sampleRate,
           bitDepth: 16,
           channels: channels,
+          bitrateKbps: bitrateKbps,
         ),
       ),
     );
@@ -2448,13 +2509,23 @@ class YouTubeMusicProvider extends BaseStreamingProvider
 
   Future<Map<String, dynamic>> _fetchWatchNextRadio(
     String videoId, {
+    String? continuation,
     bool forceRefresh = false,
     CancellationToken? cancel,
   }) async {
+    final trimmedCont = continuation?.trim();
+    final hasCont = trimmedCont != null && trimmedCont.isNotEmpty;
+    final qp = <String, String>{
+      'prettyPrint': 'false',
+      if (hasCont) ...<String, String>{
+        'ctoken': trimmedCont,
+        'continuation': trimmedCont,
+      },
+    };
     final uri = BaseStreamingProvider.buildUri(
       baseUrl,
       '/youtubei/v1/next',
-      const <String, String>{'prettyPrint': 'false'},
+      qp,
     );
     final json = await http.requestJson(
       method: 'POST',
@@ -2470,6 +2541,7 @@ class YouTubeMusicProvider extends BaseStreamingProvider
         'videoId': videoId,
         'playlistId': 'RDAMVM$videoId',
         'isAudioOnly': true,
+        if (hasCont) 'continuation': trimmedCont,
       },
       cancel: cancel,
     );
@@ -2478,13 +2550,140 @@ class YouTubeMusicProvider extends BaseStreamingProvider
   }
 
   static String? _extractContinuationToken(Map<String, dynamic> root) {
-    final nextData = _findFirstMapByKey(root, 'nextContinuationData');
+    final nextData = _findFirstMapByKey(root, 'nextContinuationData') ??
+        _findFirstMapByKey(root, 'nextRadioContinuationData');
     final tok1 = nextData?['continuation']?.toString().trim();
     if (tok1 != null && tok1.isNotEmpty) return tok1;
     final cmd = _findFirstMapByKey(root, 'continuationCommand');
     final tok2 = cmd?['token']?.toString().trim();
     if (tok2 != null && tok2.isNotEmpty) return tok2;
     return null;
+  }
+
+  static final RegExp _ytmYearSegmentRegex = RegExp(r'^\d{4}$');
+  static final RegExp _ytmViewPlayCountRegex = RegExp(
+    r'^(?:(?:no|\d[\d,.]*(?:\s*[KMBkmb萬億万억])?)\s*(?:views?|plays?|watching|listens?|次觀看|次播放|次观看|次收聽|回視聴|回再生)|(?:觀看次數|播放次數|观看次数|播放次数)\s*[:：]?\s*[\d,.]+\s*[KMBkmb萬億万억]?\s*(?:次)?)$',
+    caseSensitive: false,
+  );
+  static final RegExp _ytmRelativeTimeRegex = RegExp(
+    r'^(?:\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago|\d+\s*(?:秒|分鐘|小時|天|週|個月|年)前)$',
+    caseSensitive: false,
+  );
+
+  ({String artist, String album}) _parsePlaylistPanelByline(
+    Map<String, dynamic> item,
+  ) {
+    final longObj = item['longBylineText'];
+    final shortObj = item['shortBylineText'];
+    final longRaw = _extractInnerTubeText(longObj)?.trim() ?? '';
+    final primaryObj = longRaw.isNotEmpty ? longObj : shortObj;
+
+    final segments = <({String text, bool isArtist, bool isAlbum})>[];
+    if (primaryObj is Map && primaryObj['runs'] is List) {
+      final buf = StringBuffer();
+      var isArtist = false;
+      var isAlbum = false;
+
+      void flushSegment() {
+        final text = buf.toString().trim();
+        buf.clear();
+        if (text.isNotEmpty) {
+          segments.add((text: text, isArtist: isArtist, isAlbum: isAlbum));
+        }
+        isArtist = false;
+        isAlbum = false;
+      }
+
+      for (final rawRun in primaryObj['runs'] as List) {
+        if (rawRun is! Map) continue;
+        final run = Map<String, dynamic>.from(rawRun);
+        final rawText = run['text']?.toString() ?? '';
+        if (rawText.isEmpty) continue;
+        final pageType = _extractPageType(run);
+        final browseId = _extractBrowseId(run['navigationEndpoint'])?.trim();
+        final runIsArtist =
+            pageType == 'MUSIC_PAGE_TYPE_ARTIST' ||
+            pageType == 'MUSIC_PAGE_TYPE_USER_CHANNEL';
+        final runIsAlbum =
+            pageType == 'MUSIC_PAGE_TYPE_ALBUM' ||
+            (browseId != null && browseId.startsWith('MPREb_'));
+
+        if (rawText.contains('•') || rawText.contains('·')) {
+          final parts = rawText.split(RegExp(r'[•·]'));
+          for (var i = 0; i < parts.length; i++) {
+            final part = parts[i];
+            if (part.trim().isNotEmpty) {
+              buf.write(part);
+              if (parts.length == 1) {
+                isArtist = isArtist || runIsArtist;
+                isAlbum = isAlbum || runIsAlbum;
+              }
+            }
+            if (i < parts.length - 1) {
+              flushSegment();
+            }
+          }
+        } else {
+          buf.write(rawText);
+          isArtist = isArtist || runIsArtist;
+          isAlbum = isAlbum || runIsAlbum;
+        }
+      }
+      flushSegment();
+    } else {
+      final rawText = _extractInnerTubeText(primaryObj)?.trim() ?? '';
+      if (rawText.isNotEmpty) {
+        for (final part in rawText.split(RegExp(r'\s*[•·]\s*'))) {
+          final trimmed = part.trim();
+          if (trimmed.isNotEmpty) {
+            segments.add((text: trimmed, isArtist: false, isAlbum: false));
+          }
+        }
+      }
+    }
+
+    if (segments.isEmpty) {
+      return (artist: '未知藝術家', album: 'YouTube Music Radio');
+    }
+
+    var artistIndex = segments.indexWhere((s) => s.isArtist);
+    if (artistIndex < 0) {
+      artistIndex = 0;
+    }
+    final artist = segments[artistIndex].text;
+
+    String? album;
+    final taggedAlbumIndex = segments.indexWhere(
+      (s) => s.isAlbum && !s.isArtist,
+    );
+    if (taggedAlbumIndex >= 0 && taggedAlbumIndex != artistIndex) {
+      album = segments[taggedAlbumIndex].text;
+    } else {
+      bool isMetadataNoise(String text) {
+        if (text.toLowerCase() == artist.toLowerCase()) return true;
+        if (_looksLikeDuration(text)) return true;
+        if (_ytmYearSegmentRegex.hasMatch(text)) return true;
+        if (_ytmViewPlayCountRegex.hasMatch(text)) return true;
+        if (_ytmRelativeTimeRegex.hasMatch(text)) return true;
+        return false;
+      }
+
+      for (var i = artistIndex + 1; i < segments.length; i++) {
+        final seg = segments[i];
+        if (seg.isArtist) continue;
+        if (!isMetadataNoise(seg.text)) {
+          album = seg.text;
+          break;
+        }
+      }
+    }
+
+    return (
+      artist: artist.isNotEmpty ? artist : '未知藝術家',
+      album: (album != null && album.isNotEmpty)
+          ? album
+          : 'YouTube Music Radio',
+    );
   }
 
   List<TrackInfo> _parsePlaylistPanelTracks(
@@ -2505,24 +2704,28 @@ class YouTubeMusicProvider extends BaseStreamingProvider
       if (videoId.isEmpty) continue;
       final trackId = 'ytm:$videoId';
       if (!seenIds.add(trackId)) continue;
-      final title = _extractInnerTubeText(item['title']) ?? '未命名曲目';
-      final artist =
-          _extractInnerTubeText(item['longBylineText']) ??
-          _extractInnerTubeText(item['shortBylineText']) ??
-          '未知藝術家';
+      final rawTitle = _extractInnerTubeText(item['title'])?.trim();
+      final title = (rawTitle != null && rawTitle.isNotEmpty)
+          ? rawTitle
+          : '未命名曲目';
+      final byline = _parsePlaylistPanelByline(item);
       final lengthText = _extractInnerTubeText(item['lengthText']) ?? '';
       final duration = _looksLikeDuration(lengthText)
           ? _parseDuration(lengthText)
           : Duration.zero;
       final coverUrl = _extractThumbnailUrl(item['thumbnail']) ??
           _extractThumbnailUrl(item['thumbnailRenderer']) ??
-          resolvedFallback;
+          resolvedFallback ??
+          upgradeStreamingCoverUrl(
+            'https://i.ytimg.com/vi/$videoId/hqdefault.jpg',
+            targetSize: 1200,
+          );
       tracks.add(
         TrackInfo(
           id: trackId,
           title: title,
-          artist: artist.split(RegExp(r'\s*[•·]\s*')).first.trim(),
-          album: 'YouTube Music Radio',
+          artist: byline.artist,
+          album: byline.album,
           duration: duration,
           albumArtUrl: coverUrl,
           coverUrl: coverUrl,
@@ -3938,5 +4141,439 @@ class YouTubeMusicProvider extends BaseStreamingProvider
 
     if (hours == 0 && mins == 0 && secs == 0) return Duration.zero;
     return Duration(hours: hours, minutes: mins, seconds: secs);
+  }
+
+  // ─── RecommendationProvider ────────────────────────────────────────────────
+
+  @override
+  String get recommendationProviderId => kind;
+
+  RecError _mapRecError(Object e) {
+    if (e is RecError) return e;
+    if (e is StreamingException) {
+      if (e.isCancelled) {
+        return RecError(
+          kind: RecErrorKind.cancelled,
+          message: e.message,
+          statusCode: e.statusCode,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 401 || e.isTokenExpired) {
+        return RecError(
+          kind: RecErrorKind.authRequired,
+          message: e.message,
+          statusCode: 401,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 429) {
+        return RecError(
+          kind: RecErrorKind.rateLimited,
+          message: e.message,
+          statusCode: 429,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 404) {
+        return RecError(
+          kind: RecErrorKind.notFound,
+          message: e.message,
+          statusCode: 404,
+          providerId: kind,
+        );
+      }
+      return RecError(
+        kind: RecErrorKind.network,
+        message: e.message,
+        statusCode: e.statusCode,
+        providerId: kind,
+      );
+    }
+    return RecError(
+      kind: RecErrorKind.unknown,
+      message: e.toString(),
+      providerId: kind,
+    );
+  }
+
+  Future<StreamingCatalog> _searchWithGuestFallback(
+    String query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return StreamingCatalog(syncedAt: clock());
+
+    Future<StreamingCatalog> postSearch({required bool authenticated}) async {
+      final uri = BaseStreamingProvider.buildUri(
+        baseUrl,
+        '/youtubei/v1/search',
+        const <String, String>{'prettyPrint': 'false'},
+      );
+      final json = await http.requestJson(
+        method: 'POST',
+        uri: uri,
+        headers: _buildWebRemixHeaders(authenticated: authenticated),
+        jsonBody: <String, dynamic>{
+          'context': _buildWebRemixContext(),
+          'query': trimmed,
+        },
+        cancel: cancel,
+      );
+      _captureVisitorData(json);
+      return StreamingCatalog(
+        tracks: _parseTracksFromJson(json),
+        playlists: _parsePlaylistsFromJson(json),
+        albums: _parseAlbumsFromJson(json),
+        syncedAt: clock(),
+      );
+    }
+
+    final isConnected = authState == StreamingAuthState.connected;
+    if (!isConnected) {
+      return postSearch(authenticated: false);
+    }
+    try {
+      await refreshSessionIfNeeded();
+      return await postSearch(authenticated: true);
+    } on StreamingException catch (e) {
+      if (e.isCancelled) rethrow;
+      if (e.statusCode == 401 || e.isTokenExpired) {
+        return postSearch(authenticated: false);
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  Future<RadioPage> getTrackRadio(
+    TrackMetadata seed, {
+    int limit = 10,
+    String? cursor,
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+
+    String? videoId;
+    final rawTrackId = seed.trackId.trim();
+    final lowerTrackId = rawTrackId.toLowerCase();
+    final rawFilePath = seed.filePath?.trim();
+    final lowerFilePath = rawFilePath?.toLowerCase() ?? '';
+    final isExplicitYtmSeed = seed.providerId == kind ||
+        seed.providerId.isEmpty ||
+        lowerTrackId.startsWith('ytm:') ||
+        lowerTrackId.startsWith('ytm_') ||
+        lowerTrackId.startsWith('youtube_music:') ||
+        lowerTrackId.startsWith('streaming:youtube_music:') ||
+        lowerTrackId.contains('youtube.com') ||
+        lowerTrackId.contains('youtu.be') ||
+        lowerFilePath.contains('youtube.com') ||
+        lowerFilePath.contains('youtu.be');
+
+    if (isExplicitYtmSeed) {
+      videoId = tryExtractCleanVideoId(rawTrackId, filePath: rawFilePath);
+    }
+
+    if (videoId == null || videoId.isEmpty) {
+      final queryText = '${seed.artist.trim()} ${seed.title.trim()}'.trim();
+      if (queryText.isNotEmpty) {
+        try {
+          final catalog = await _searchWithGuestFallback(
+            queryText,
+            cancel: cancel,
+          );
+          final candidates = catalog.tracks
+              .where((t) => tryExtractCleanVideoId(t.id) != null)
+              .map(
+                (t) => TrackMetadata.fromTrackInfo(
+                  t,
+                  providerIdOverride: kind,
+                ),
+              )
+              .toList(growable: false);
+          if (candidates.isNotEmpty) {
+            final best = TrackMatcher.selectBestMatch(
+                  TrackMatchQuery.fromTrackMetadata(seed),
+                  candidates,
+                ) ??
+                candidates.first;
+            videoId = tryExtractCleanVideoId(
+              best.trackId,
+              filePath: best.filePath,
+            );
+          }
+        } on StreamingException catch (e) {
+          throw _mapRecError(e);
+        }
+      }
+    }
+
+    if (videoId == null || videoId.isEmpty) {
+      return const RadioPage(
+        tracks: <TrackMetadata>[],
+        sourceLabel: 'YouTube Music Radio',
+      );
+    }
+
+    try {
+      Map<String, dynamic> nextJson;
+      try {
+        nextJson = await _fetchWatchNextRadio(
+          videoId,
+          continuation: cursor,
+          cancel: cancel,
+        );
+      } on StreamingException catch (e) {
+        if (!e.isCancelled &&
+            authState == StreamingAuthState.connected &&
+            (e.statusCode == 401 || e.isTokenExpired)) {
+          // Fallback to unauthenticated Guest request if session cookies expired.
+          final trimmedCont = cursor?.trim();
+          final hasCont = trimmedCont != null && trimmedCont.isNotEmpty;
+          final uri = BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/youtubei/v1/next',
+            <String, String>{
+              'prettyPrint': 'false',
+              if (hasCont) ...<String, String>{
+                'ctoken': trimmedCont,
+                'continuation': trimmedCont,
+              },
+            },
+          );
+          nextJson = await http.requestJson(
+            method: 'POST',
+            uri: uri,
+            headers: _buildWebRemixHeaders(authenticated: false),
+            jsonBody: <String, dynamic>{
+              'context': _buildWebRemixContext(),
+              'videoId': videoId,
+              'playlistId': 'RDAMVM$videoId',
+              'isAudioOnly': true,
+              if (hasCont) 'continuation': trimmedCont,
+            },
+            cancel: cancel,
+          );
+          _captureVisitorData(nextJson);
+        } else {
+          rethrow;
+        }
+      }
+
+      final tracks = <TrackMetadata>[];
+      final seenIds = <String>{};
+
+      void addCandidateTracks(List<TrackInfo> parsed) {
+        for (final t in parsed) {
+          final clean = tryExtractCleanVideoId(t.id, filePath: t.filePath);
+          if (clean == null || clean == videoId) continue;
+          if (seenIds.add(clean)) {
+            tracks.add(
+              TrackMetadata.fromTrackInfo(t, providerIdOverride: kind),
+            );
+          }
+        }
+      }
+
+      addCandidateTracks(_parsePlaylistPanelTracks(nextJson));
+      addCandidateTracks(_parseTracksFromJson(nextJson));
+
+      final effectiveLimit = limit > 0 ? limit : tracks.length;
+      final limitedTracks = tracks.length > effectiveLimit
+          ? tracks.take(effectiveLimit).toList(growable: false)
+          : tracks;
+      final nextCursor = _extractContinuationToken(nextJson);
+
+      return RadioPage(
+        tracks: limitedTracks,
+        nextCursor: nextCursor,
+        sourceLabel: 'YouTube Music Radio',
+      );
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
+  }
+
+  List<TrackInfo> _parseTwoRowVideoTracks(Map<String, dynamic> root) {
+    final tracks = <TrackInfo>[];
+    final seenIds = <String>{};
+    for (final item in _collectMapsByKey(root, 'musicTwoRowItemRenderer')) {
+      final nav = item['navigationEndpoint'];
+      if (nav is! Map) continue;
+      final watch = nav['watchEndpoint'];
+      if (watch is! Map) continue;
+      final rawVid = watch['videoId']?.toString().trim() ?? '';
+      final videoId = tryExtractCleanVideoId(rawVid);
+      if (videoId == null || !seenIds.add(videoId)) continue;
+
+      final title = _extractInnerTubeText(item['title']) ?? '未命名曲目';
+      final subtitle = _extractInnerTubeText(item['subtitle']) ?? '';
+      final parts = subtitle
+          .split(RegExp(r'\s*[•·]\s*'))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList(growable: false);
+      final artist = parts.isNotEmpty ? parts.first : '未知藝術家';
+      final album = (parts.length >= 2 &&
+              !parts[1].toLowerCase().contains('play') &&
+              !parts[1].toLowerCase().contains('view'))
+          ? parts[1]
+          : 'YouTube Music';
+      final coverUrl = _extractThumbnailUrl(item['thumbnailRenderer']) ??
+          _extractThumbnailUrl(item['thumbnail']);
+
+      tracks.add(
+        TrackInfo(
+          id: 'ytm:$videoId',
+          title: title,
+          artist: artist,
+          album: album,
+          duration: Duration.zero,
+          albumArtUrl: coverUrl,
+          coverUrl: coverUrl,
+          format: const AudioFormat(
+            codec: AudioCodec.opus,
+            sampleRateHz: 48000,
+            bitDepth: 16,
+            channels: 2,
+          ),
+          providerName: 'YouTube Music',
+        ),
+      );
+    }
+    return tracks;
+  }
+
+  @override
+  Future<List<FeedSection>> getPersonalizedFeed({
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    if (authState != StreamingAuthState.connected) {
+      return const <FeedSection>[];
+    }
+
+    try {
+      await refreshSessionIfNeeded();
+      final homeJson = await _browse('FEmusic_home', cancel: cancel);
+
+      final sections = <FeedSection>[];
+      var idx = 0;
+
+      void collectShelf(Map<String, dynamic> shelf, {required bool isCarousel}) {
+        String? title;
+        String? subtitle;
+        if (isCarousel) {
+          final header = shelf['header'];
+          final basicHeader = header is Map
+              ? (header['musicCarouselShelfBasicHeaderRenderer'] is Map
+                    ? header['musicCarouselShelfBasicHeaderRenderer'] as Map
+                    : header)
+              : null;
+          title = _extractInnerTubeText(basicHeader?['title']);
+          subtitle = _extractInnerTubeText(basicHeader?['strapline']);
+        } else {
+          title = _extractInnerTubeText(shelf['title']);
+          subtitle = _extractInnerTubeText(shelf['subtitle']);
+        }
+
+        final mergedTracks = <TrackMetadata>[];
+        final seenTrackIds = <String>{};
+        for (final t in <TrackInfo>[
+          ..._parseTracksFromJson(shelf),
+          ..._parseTwoRowVideoTracks(shelf),
+        ]) {
+          final meta = TrackMetadata.fromTrackInfo(
+            t,
+            providerIdOverride: kind,
+          );
+          if (seenTrackIds.add(meta.trackId)) {
+            mergedTracks.add(meta);
+          }
+        }
+        final albums = _parseAlbumsFromJson(shelf);
+        if (mergedTracks.isNotEmpty || albums.isNotEmpty) {
+          sections.add(
+            FeedSection(
+              id: 'ytm_home_${idx++}',
+              title: (title != null && title.trim().isNotEmpty)
+                  ? title.trim()
+                  : 'YouTube Music',
+              subtitle: (subtitle != null && subtitle.trim().isNotEmpty)
+                  ? subtitle.trim()
+                  : null,
+              providerId: kind,
+              tracks: mergedTracks,
+              albums: albums,
+            ),
+          );
+        }
+      }
+
+      for (final carousel
+          in _collectMapsByKey(homeJson, 'musicCarouselShelfRenderer')) {
+        collectShelf(carousel, isCarousel: true);
+      }
+      for (final shelf in _collectMapsByKey(homeJson, 'musicShelfRenderer')) {
+        collectShelf(shelf, isCarousel: false);
+      }
+
+      if (sections.isEmpty) {
+        final mergedTracks = <TrackMetadata>[];
+        final seenTrackIds = <String>{};
+        for (final t in <TrackInfo>[
+          ..._parseTracksFromJson(homeJson),
+          ..._parseTwoRowVideoTracks(homeJson),
+        ]) {
+          final meta = TrackMetadata.fromTrackInfo(
+            t,
+            providerIdOverride: kind,
+          );
+          if (seenTrackIds.add(meta.trackId)) {
+            mergedTracks.add(meta);
+          }
+        }
+        final albums = _parseAlbumsFromJson(homeJson);
+        if (mergedTracks.isNotEmpty || albums.isNotEmpty) {
+          sections.add(
+            FeedSection(
+              id: 'ytm_home_0',
+              title: 'YouTube Music Home',
+              providerId: kind,
+              tracks: mergedTracks,
+              albums: albums,
+            ),
+          );
+        }
+      }
+
+      return List<FeedSection>.unmodifiable(sections);
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
+  }
+
+  @override
+  Future<TrackMetadata?> matchTrack(
+    TrackMatchQuery query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    final searchText = '${query.artist.trim()} ${query.title.trim()}'.trim();
+    if (searchText.isEmpty) return null;
+
+    try {
+      final catalog = await _searchWithGuestFallback(
+        searchText,
+        cancel: cancel,
+      );
+      final candidates = catalog.tracks
+          .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+          .toList(growable: false);
+      return TrackMatcher.selectBestMatch(query, candidates);
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
   }
 }

@@ -347,9 +347,25 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // SignalPathModal closes via Esc.
+        // Quality badge opens AudioInfoPopover -> Esc closes AudioInfoPopover.
         await tester.tap(find.byKey(const Key('quality_badge_button')));
         await tester.pumpAndSettle();
+        expect(find.byKey(const Key('audio_info_popover')), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('audio_info_popover')), findsNothing);
+
+        // Re-open AudioInfoPopover -> jump to SignalPathModal -> Esc closes SignalPathModal.
+        await tester.tap(find.byKey(const Key('quality_badge_button')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('audio_info_popover')), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const Key('btn_open_signal_path_from_popover')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('audio_info_popover')), findsNothing);
         expect(find.text('音訊訊號路徑'), findsOneWidget);
 
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -527,10 +543,14 @@ void main() {
         await tester.pumpAndSettle();
         expect(nav.current.tab, HomeTab.albumDetail);
 
-        // Build Level 4: Expand Now Playing.
+        // Build Level 4: Expand Now Playing (Focus View -> Split Lyrics).
         await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
+        expect(nowPlayingCtrl.mode, NowPlayingViewMode.cover);
+        await tester.tap(find.byKey(const Key('btn_now_playing_mode_split')));
+        await tester.pumpAndSettle();
+        expect(nowPlayingCtrl.mode, NowPlayingViewMode.split);
 
         // Build Level 3: Enter Fullscreen.
         await windowController.setFullScreen(true);
@@ -544,14 +564,14 @@ void main() {
         expect(nowPlayingCtrl.lyricsSettingsExpanded, isTrue);
         expect(find.byKey(const Key('btn_lyrics_font_down')), findsOneWidget);
 
-        // Build Level 2a: Open Quick Queue popover.
-        await tester.tap(find.byKey(const Key('btn_quick_queue_popover')));
+        // Build Level 2a: Open Quick Output popover (OverlayEntry popover).
+        await tester.tap(find.byKey(const Key('btn_quick_output_popover')));
         await tester.pumpAndSettle();
-        expect(find.byKey(const Key('quick_queue_popover')), findsOneWidget);
+        expect(find.byKey(const Key('quick_output_popover')), findsOneWidget);
 
-        // Step 1 (Level 2a): Dismiss Quick Queue popover ONLY (repeats ignored).
+        // Step 1 (Level 2a): Dismiss Quick Output popover ONLY (repeats ignored).
         await _sendEscapeWithRepeats(tester);
-        expect(find.byKey(const Key('quick_queue_popover')), findsNothing);
+        expect(find.byKey(const Key('quick_output_popover')), findsNothing);
         expect(nowPlayingCtrl.lyricsSettingsExpanded, isTrue);
         expect(windowController.isFullScreenNotifier.value, isTrue);
         expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);

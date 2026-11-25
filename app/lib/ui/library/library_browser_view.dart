@@ -114,18 +114,18 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
         hintText: '搜尋藝術家、專輯或曲目...',
         hintStyle: const TextStyle(color: LuminaTokens.textMuted),
         filled: true,
-        fillColor: LuminaTokens.cardBg,
+        fillColor: LuminaTokens.glassPillBg,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: LuminaTokens.spaceSm,
           vertical: LuminaTokens.spaceSm,
         ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-          borderSide: const BorderSide(color: LuminaTokens.borderControl),
+          borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-          borderSide: const BorderSide(color: LuminaTokens.borderControl),
+          borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
@@ -143,8 +143,9 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
                 icon: const Icon(Icons.folder_open_rounded, size: 17),
                 label: const Text('設定資料夾與掃描'),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: LuminaTokens.textPrimary,
-                  side: const BorderSide(color: LuminaTokens.borderControl),
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                  side: const BorderSide(color: LuminaTokens.glassPillBorder),
                   padding: const EdgeInsets.symmetric(
                     horizontal: LuminaTokens.spaceMd,
                     vertical: LuminaTokens.spaceSm,
@@ -190,8 +191,11 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
                       onPressed: widget.onOpenLibrarySettings,
                       icon: const Icon(Icons.folder_open_rounded, size: 18),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: LuminaTokens.textPrimary,
-                        side: const BorderSide(color: LuminaTokens.borderControl),
+                        backgroundColor: LuminaTokens.glassPillBg,
+                        foregroundColor: LuminaTokens.glassTextPrimary,
+                        side: const BorderSide(
+                          color: LuminaTokens.glassPillBorder,
+                        ),
                       ),
                     ),
                   ],
@@ -229,7 +233,12 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
                       return TrackHoverPrefetch(
                         track: item,
                         child: Material(
-                          type: MaterialType.transparency,
+                          color: isSelected
+                              ? LuminaTokens.glassNavActiveBg
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(
+                            LuminaTokens.radiusSm,
+                          ),
                           child: ListTile(
                             key: Key('queue_track_${item.id}'),
                             shape: RoundedRectangleBorder(
@@ -237,23 +246,21 @@ class _LibraryBrowserViewState extends State<LibraryBrowserView> {
                                 LuminaTokens.radiusSm,
                               ),
                             ),
-                            hoverColor: LuminaTokens.cardHoverBg.withValues(
-                              alpha: 0.6,
-                            ),
+                            hoverColor: LuminaTokens.glassRowHoverBg,
                             leading: Icon(
                               isSelected
                                   ? Icons.equalizer_rounded
                                   : Icons.music_note_rounded,
                               color: isSelected
-                                  ? LuminaTokens.accentPurpleText
+                                  ? Colors.white
                                   : LuminaTokens.textSecondary,
                             ),
                             title: Text(
                               item.title,
                               style: TextStyle(
                                 color: isSelected
-                                    ? LuminaTokens.accentPurpleText
-                                    : LuminaTokens.textPrimary,
+                                    ? Colors.white
+                                    : LuminaTokens.glassTextPrimary,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),

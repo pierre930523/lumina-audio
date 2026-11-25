@@ -33,12 +33,11 @@ class _OutputCardEntry {
 
 class _OutputZonePanelState extends State<OutputZonePanel>
     with WidgetsBindingObserver {
-  // Preserved exact card background colors asserted by output_zone_redesign_test.dart
-  static const _activeCardBg = Color(0xFF2E323C);
-  static const _activeCardBorder = LuminaTokens.accentBlue;
-  static const _inactiveCardBg = Color(0xFF191B21);
-  static const _inactiveCardBorder = LuminaTokens.borderSubtle;
-  static const _purpleAccent = Color(0xFF7C4DFF);
+  // Glass card tokens aligned with output_zone_redesign_test.dart
+  static const _activeCardBg = LuminaTokens.glassCardActiveBg;
+  static const _activeCardBorder = LuminaTokens.glassCoverRim;
+  static const _inactiveCardBg = LuminaTokens.glassCardBg;
+  static const _inactiveCardBorder = LuminaTokens.glassCardBorder;
 
   List<AudioDeviceCapabilitiesModel> _capabilities = const [];
   AudioEngineOutputInfoModel _outputInfo = const AudioEngineOutputInfoModel();
@@ -537,9 +536,11 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                   vertical: LuminaTokens.spaceSm,
                 ),
                 decoration: BoxDecoration(
-                  color: LuminaTokens.statusErrorBg,
+                  color: LuminaTokens.statusError.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                  border: Border.all(color: LuminaTokens.statusError),
+                  border: Border.all(
+                    color: LuminaTokens.statusError.withValues(alpha: 0.45),
+                  ),
                 ),
                 child: Row(
                   children: [
@@ -680,7 +681,7 @@ class _OutputZonePanelState extends State<OutputZonePanel>
             ),
           ],
           const SizedBox(height: LuminaTokens.spaceLg),
-          const Divider(color: LuminaTokens.borderSubtle, height: 1),
+          const Divider(color: LuminaTokens.glassCardDivider, height: 1),
           const SizedBox(height: LuminaTokens.spaceMd),
           _buildMultiRoomZonesSection(),
         ],
@@ -718,7 +719,7 @@ class _OutputZonePanelState extends State<OutputZonePanel>
         padding: EdgeInsets.all(cardPadding),
         decoration: BoxDecoration(
           color: active ? _activeCardBg : _inactiveCardBg,
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+          borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
           border: Border.all(
             color: active ? _activeCardBorder : _inactiveCardBorder,
             width: 1,
@@ -736,9 +737,14 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                   height: 40,
                   decoration: BoxDecoration(
                     color: active
-                        ? LuminaTokens.textPrimary.withValues(alpha: 0.12)
-                        : LuminaTokens.cardElevatedBg,
+                        ? LuminaTokens.glassNavActiveBg
+                        : LuminaTokens.glassPillBg,
                     borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                    border: Border.all(
+                      color: active
+                          ? LuminaTokens.glassCoverRim
+                          : LuminaTokens.glassSidebarBorder,
+                    ),
                   ),
                   child: Icon(
                     iconData,
@@ -794,7 +800,7 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                             shape: BoxShape.circle,
                             color: isPlaying
                                 ? LuminaTokens.statusSuccess
-                                : LuminaTokens.accentPurpleText,
+                                : LuminaTokens.glassTextSecondary,
                           ),
                         ),
                         const SizedBox(width: LuminaTokens.spaceXs),
@@ -820,20 +826,18 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                               vertical: 2,
                             ),
                             decoration: BoxDecoration(
-                              color: _purpleAccent.withValues(alpha: 0.22),
+                              color: LuminaTokens.hiResGoldBg,
                               borderRadius: BorderRadius.circular(
                                 LuminaTokens.radiusSm,
                               ),
                               border: Border.all(
-                                color: LuminaTokens.accentPurpleText.withValues(
-                                  alpha: 0.7,
-                                ),
+                                color: LuminaTokens.hiResGoldBorder,
                               ),
                             ),
                             child: const Text(
                               'BIT-PERFECT',
                               style: TextStyle(
-                                color: LuminaTokens.accentPurpleText,
+                                color: LuminaTokens.hiResGoldText,
                                 fontSize: 10.5,
                                 fontWeight: FontWeight.w700,
                               ),
@@ -884,8 +888,8 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                           ? null
                           : () => _activateCard(entry),
                       style: LuminaSettingsStyles.filledButtonStyle(
-                        backgroundColor: _purpleAccent,
-                        foregroundColor: LuminaTokens.textPrimary,
+                        backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                        foregroundColor: LuminaTokens.onAccentDark,
                         padding: const EdgeInsets.symmetric(
                           horizontal: LuminaTokens.spaceMd,
                           vertical: LuminaTokens.spaceXs,
@@ -972,7 +976,9 @@ class _OutputZonePanelState extends State<OutputZonePanel>
               padding: const EdgeInsets.all(LuminaTokens.spaceSm),
               decoration: BoxDecoration(
                 color: _inactiveCardBg,
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+                borderRadius: BorderRadius.circular(
+                  LuminaTokens.glassCardRadius,
+                ),
                 border: Border.all(color: _inactiveCardBorder),
               ),
               child: Column(
@@ -986,10 +992,10 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                           label: '選取 ${z.name}',
                           child: Checkbox(
                             value: checked,
-                            activeColor: LuminaTokens.accentBlue,
+                            activeColor: LuminaTokens.glassSwitchOnTrack,
                             checkColor: LuminaTokens.onAccentDark,
                             side: const BorderSide(
-                              color: LuminaTokens.borderControl,
+                              color: LuminaTokens.glassPillBorder,
                               width: 1.5,
                             ),
                             onChanged: (v) {
@@ -1032,16 +1038,16 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                         tooltip: zPlaying ? '暫停此音區' : '播放此音區',
                         style: LuminaSettingsStyles.iconButtonStyle(
                           foregroundColor: zPlaying
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.textSecondary,
+                              ? Colors.white
+                              : LuminaTokens.glassTextSecondary,
                         ),
                         icon: Icon(
                           zPlaying
                               ? Icons.pause_circle_outline_rounded
                               : Icons.play_circle_outline_rounded,
                           color: zPlaying
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.textSecondary,
+                              ? Colors.white
+                              : LuminaTokens.glassTextSecondary,
                         ),
                         onPressed: () => _toggleZone(z),
                       ),
@@ -1050,11 +1056,11 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                           key: Key('btn_cast_zone_${z.id}'),
                           tooltip: '投放至 ${z.name}',
                           style: LuminaSettingsStyles.iconButtonStyle(
-                            foregroundColor: LuminaTokens.accentPurpleText,
+                            foregroundColor: LuminaTokens.glassTextPrimary,
                           ),
                           icon: const Icon(
                             Icons.cast_rounded,
-                            color: LuminaTokens.accentPurpleText,
+                            color: LuminaTokens.glassTextPrimary,
                           ),
                           onPressed: () async {
                             await widget.audioService.castToZone(z.id, 'play');
@@ -1076,12 +1082,10 @@ class _OutputZonePanelState extends State<OutputZonePanel>
                       Expanded(
                         child: SliderTheme(
                           data: SliderTheme.of(context).copyWith(
-                            activeTrackColor: LuminaTokens.accentBlue,
-                            inactiveTrackColor: LuminaTokens.borderControl,
-                            thumbColor: LuminaTokens.textPrimary,
-                            overlayColor: LuminaTokens.focusRing.withValues(
-                              alpha: 0.2,
-                            ),
+                            activeTrackColor: LuminaTokens.glassTextPrimary,
+                            inactiveTrackColor: LuminaTokens.glassTrackUnplayed,
+                            thumbColor: Colors.white,
+                            overlayColor: LuminaTokens.glassPillHoverBg,
                           ),
                           child: Semantics(
                             label: '${z.name} 音量',

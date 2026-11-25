@@ -35,7 +35,11 @@ struct DavEntry {
     href_path: String,
     is_collection: bool,
     display_name: Option<String>,
+    last_modified: Option<String>,
+    content_length: Option<u64>,
 }
+
+pub type WebDavEntryMetaMap = HashMap<String, (Option<String>, Option<u64>)>;
 
 pub struct WebDavProvider {
     config: WebDavConfig,
@@ -44,6 +48,7 @@ pub struct WebDavProvider {
     online: Arc<RwLock<bool>>,
     cached_albums: Arc<RwLock<Vec<CanonicalAlbum>>>,
     cached_tracks: Arc<RwLock<Vec<TrackSource>>>,
+    cached_entry_metadata: Arc<RwLock<WebDavEntryMetaMap>>,
 }
 
 impl WebDavProvider {
@@ -67,7 +72,12 @@ impl WebDavProvider {
             online: Arc::new(RwLock::new(true)),
             cached_albums: Arc::new(RwLock::new(Vec::new())),
             cached_tracks: Arc::new(RwLock::new(Vec::new())),
+            cached_entry_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub async fn last_entry_metadata(&self) -> HashMap<String, (Option<String>, Option<u64>)> {
+        self.cached_entry_metadata.read().await.clone()
     }
 
     pub async fn set_online(&self, online: bool) {
@@ -154,6 +164,7 @@ impl WebDavProvider {
   <D:prop>
     <D:resourcetype/>
     <D:displayname/>
+    <D:getlastmodified/>
     <D:getcontentlength/>
     <D:getcontenttype/>
   </D:prop>
@@ -318,6 +329,7 @@ impl MusicProvider for WebDavProvider {
 
         let mut audio_rel_paths: Vec<String> = Vec::new();
         let mut dir_files: HashMap<String, Vec<String>> = HashMap::new();
+        let mut entry_meta_map: HashMap<String, (Option<String>, Option<u64>)> = HashMap::new();
         let mut errors: Vec<ScanErrorItem> = Vec::new();
 
         while let Some(current_dir) = queue.pop_front() {
@@ -360,9 +372,8 @@ impl MusicProvider for WebDavProvider {
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
 
-                if href_segment.is_empty()
-                    || href_segment.starts_with('.')
-                    || display_trimmed.is_some_and(|d| d.starts_with('.'))
+                if crate::local::ignore::should_ignore_name(&href_segment)
+                    || display_trimmed.is_some_and(crate::local::ignore::should_ignore_name)
                 {
                     continue;
                 }
@@ -392,11 +403,16 @@ impl MusicProvider for WebDavProvider {
                     dir_files.entry(parent_rel).or_default().push(file_name);
 
                     if is_scannable_audio(Path::new(&rel)) {
+                        entry_meta_map.insert(
+                            rel.clone(),
+                            (entry.last_modified.clone(), entry.content_length),
+                        );
                         audio_rel_paths.push(rel);
                     }
                 }
             }
         }
+        *self.cached_entry_metadata.write().await = entry_meta_map;
 
         let scanned_count = audio_rel_paths.len();
         let mut grouped: HashMap<(String, String), Vec<(String, String, u16, AudioFormat, String)>> =
@@ -566,12 +582,16 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
     let mut cur_href = String::new();
     let mut cur_is_col = false;
     let mut cur_display: Option<String> = None;
+    let mut cur_last_modified: Option<String> = None;
+    let mut cur_content_length: Option<u64> = None;
     let mut resp_status_text = String::new();
     let mut has_any_propstat = false;
     let mut has_ok_propstat = false;
 
     let mut ps_is_col = false;
     let mut ps_display: Option<String> = None;
+    let mut ps_last_modified: Option<String> = None;
+    let mut ps_content_length_str = String::new();
     let mut ps_status_text = String::new();
 
     let mut buf = Vec::new();
@@ -589,6 +609,8 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                         cur_href.clear();
                         cur_is_col = false;
                         cur_display = None;
+                        cur_last_modified = None;
+                        cur_content_length = None;
                         resp_status_text.clear();
                         has_any_propstat = false;
                         has_ok_propstat = false;
@@ -598,6 +620,8 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                         has_any_propstat = true;
                         ps_is_col = false;
                         ps_display = None;
+                        ps_last_modified = None;
+                        ps_content_length_str.clear();
                         ps_status_text.clear();
                     }
                     "resourcetype" if in_response => {
@@ -610,7 +634,9 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                             cur_is_col = true;
                         }
                     }
-                    "href" | "displayname" | "status" if in_response => {
+                    "href" | "displayname" | "status" | "getlastmodified" | "getcontentlength"
+                        if in_response =>
+                    {
                         current_tag = Some(name);
                     }
                     _ => {}
@@ -642,6 +668,22 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                                     entry.push_str(&text);
                                 }
                             }
+                            "getlastmodified" => {
+                                if in_propstat {
+                                    let entry = ps_last_modified.get_or_insert_with(String::new);
+                                    entry.push_str(&text);
+                                } else {
+                                    let entry = cur_last_modified.get_or_insert_with(String::new);
+                                    entry.push_str(&text);
+                                }
+                            }
+                            "getcontentlength" => {
+                                if in_propstat {
+                                    ps_content_length_str.push_str(&text);
+                                } else if let Ok(len) = text.trim().parse::<u64>() {
+                                    cur_content_length = Some(len);
+                                }
+                            }
                             "status" => {
                                 if in_propstat {
                                     ps_status_text.push_str(&text);
@@ -666,6 +708,11 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                                 href_path: extract_path_from_href(&cur_href),
                                 is_collection: cur_is_col,
                                 display_name: cur_display.take(),
+                                last_modified: cur_last_modified
+                                    .take()
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty()),
+                                content_length: cur_content_length.take(),
                             });
                         }
                         in_response = false;
@@ -682,6 +729,12 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                             if cur_display.is_none() {
                                 cur_display = ps_display.take();
                             }
+                            if cur_last_modified.is_none() {
+                                cur_last_modified = ps_last_modified.take();
+                            }
+                            if cur_content_length.is_none() {
+                                cur_content_length = ps_content_length_str.trim().parse::<u64>().ok();
+                            }
                         }
                         in_propstat = false;
                         in_resourcetype = false;
@@ -690,7 +743,7 @@ fn parse_propfind_xml(xml: &str) -> Result<Vec<DavEntry>, ProviderError> {
                     "resourcetype" => {
                         in_resourcetype = false;
                     }
-                    "href" | "displayname" | "status" => {
+                    "href" | "displayname" | "status" | "getlastmodified" | "getcontentlength" => {
                         current_tag = None;
                     }
                     _ => {}

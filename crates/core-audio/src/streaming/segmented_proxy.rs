@@ -1151,7 +1151,7 @@ impl SegmentedStreamProxy {
 
             let (joined_bg_prefetch, mut rx) =
                 self.spawn_slot_fetch(epoch, slot, window_cancel, active_seg_hint, true)?;
-            match await_watch_result(&mut rx).await {
+            match await_watch_result(&mut rx, window_cancel).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(StreamError::HttpStatus(403 | 410)) if joined_bg_prefetch => {
                     // Background prefetch aborted on 403/410 without consuming retries;

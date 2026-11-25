@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../models/audio_output_info.dart';
+import '../../models/ingestion_models.dart';
 import '../../models/lyric.dart';
 import '../../models/signal_path.dart';
 import '../../models/studio_models.dart';
@@ -9,10 +10,12 @@ import 'package:flutter/foundation.dart';
 
 import '../../models/audio_format.dart';
 import '../../models/playback_state.dart';
+import '../../models/recommendation_models.dart';
 import '../../models/stream_source_spec.dart';
 import '../../models/streaming_models.dart';
 import '../audio_service.dart';
 import '../playback_persistence_service.dart';
+import 'autoplay_controller.dart';
 import 'l1_stream_cache.dart';
 import 'playback_backend.dart';
 import 'providers/apple_music_provider.dart';
@@ -105,10 +108,12 @@ class StreamingPlaybackCoordinator {
   static const Duration _ytmStablePlayPreloadPosition = Duration(seconds: 8);
   static const int maxLookaheadTracks = 2;
   static const Duration defaultLookaheadDelay = Duration(seconds: 5);
+  static const Duration defaultRapidSkipWindow = Duration(milliseconds: 300);
 
   final AudioService audioService;
   final StreamingManager streamingManager;
   final YtDlpService ytDlpService;
+  final AutoplayController? autoplayController;
   final StreamResolverRegistry _resolverRegistry;
   final bool _useCustomResolverRegistry;
   final bool _hasCustomClock;
@@ -120,6 +125,7 @@ class StreamingPlaybackCoordinator {
   final bool _useResolverPipeline;
   final Duration resolveTimeout;
   final Duration debounceDelay;
+  final Duration rapidSkipWindow;
   final Duration lookaheadDelay;
   final int lookaheadCount;
   final DateTime Function() _clock;
@@ -140,22 +146,40 @@ class StreamingPlaybackCoordinator {
       StreamController<PlaybackState>.broadcast();
   final StreamController<Duration> _positionController =
       StreamController<Duration>.broadcast();
+  final StreamController<TrackInfo> _trackChangedController =
+      StreamController<TrackInfo>.broadcast();
+  final StreamController<List<TrackInfo>> _queueUpdatedController =
+      StreamController<List<TrackInfo>>.broadcast();
 
   final List<TrackInfo> _sharedQueue = <TrackInfo>[];
   int _sharedQueueIndex = -1;
   PlaybackState? _loadingExternalState;
+  PlaybackState? _latestCoordinatorState;
   bool _switchingBackends = false;
 
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<PlaybackState>? _stateSub;
   StreamSubscription<PlaybackState>? _nativeStateSub;
   StreamSubscription<PlaybackState>? _externalStateSub;
+  StreamSubscription<void>? _autoplayChangesSub;
 
   PlaybackBackend? _activeBackend;
   int _epoch = 0;
   int? _resolvingRequestId;
   int _resolvingGeneration = 0;
   int _notifiedErrorForEpoch = -1;
+  TrackInfo? _lastActivePlayingTrack;
+  TrackInfo? _lastTransitionTrack;
+  int _lastTransitionSwapGen = 0;
+  int _lastObservedBackendSwapGen = 0;
+  bool _hadPreviousTransition = false;
+  bool _suppressAutoplayChangeQueueEmit = false;
+  String? _pendingUserInitiatedSkipTrackId;
+  TrackInfo? _pendingSwapZeroPosTrack;
+  int _pendingSwapZeroPosGen = -1;
+  Duration? _pendingSwapInitialPos;
+  String? _handledEndedTrackId;
+  int _handledEndedEpoch = -1;
   CancellationToken? _activeCancelToken;
   _YtmPlaybackAttempt? _activeYtmAttempt;
   _TidalDashPlaybackAttempt? _activeTidalDashAttempt;
@@ -179,19 +203,29 @@ class StreamingPlaybackCoordinator {
   int _attemptedStandbyEpoch = -1;
   String? _preparedExternalHandoffTrackId;
   int _preparedExternalHandoffEpoch = -1;
+  DateTime? _lastSkipAt;
+  bool _backendCancelSentForBurst = false;
+  String? _pendingOptimisticTrackId;
+  int _pendingOptimisticEpoch = -1;
+  TrackInfo? _burstAbandonedTrack;
+  bool _burstAbandonedWasAuto = false;
+  Duration _burstAbandonedPlayed = Duration.zero;
+  bool _hasDeferredAutoplaySkip = false;
   bool _disposed = false;
 
   StreamingPlaybackCoordinator({
     required this.audioService,
     required this.streamingManager,
     YtDlpService? ytDlpService,
+    this.autoplayController,
     StreamResolverRegistry? resolverRegistry,
     PlaybackBackend? nativeBackend,
     PlaybackBackend? externalBackend,
     ExternalPlaybackBridge? externalPlaybackBridge,
     bool? useResolverPipeline,
     this.resolveTimeout = const Duration(seconds: 15),
-    this.debounceDelay = const Duration(milliseconds: 120),
+    this.debounceDelay = const Duration(milliseconds: 130),
+    this.rapidSkipWindow = defaultRapidSkipWindow,
     this.lookaheadDelay = defaultLookaheadDelay,
     int lookaheadCount = maxLookaheadTracks,
     DateTime Function()? clock,
@@ -248,6 +282,30 @@ class StreamingPlaybackCoordinator {
     } else {
       _stateSub = audioService.stateStream.listen(_handleStateUpdate);
     }
+    if (autoplayController != null) {
+      _autoplayChangesSub = autoplayController!.changes.listen((_) {
+        if (_disposed) return;
+        final combined = autoplayController!.combinedQueue;
+        if (combined.isNotEmpty) {
+          _sharedQueue
+            ..clear()
+            ..addAll(combined);
+          final curTrack = currentState.track;
+          if (curTrack != null) {
+            _sharedQueueIndex = _findTrackIndexInList(_sharedQueue, curTrack);
+          }
+        }
+        if (!_suppressAutoplayChangeQueueEmit &&
+            !_queueUpdatedController.isClosed) {
+          _queueUpdatedController.add(List<TrackInfo>.unmodifiable(queue));
+        }
+        final cur = currentState;
+        if (cur.status == PlaybackStatus.playing && cur.track != null) {
+          _syncStablePlayTimer(cur);
+          _maybePreResolveNext(cur, cur.position);
+        }
+      });
+    }
   }
 
   static AppleMusicCredentials? _appleCredentialsFor(StreamingManager manager) {
@@ -268,6 +326,14 @@ class StreamingPlaybackCoordinator {
 
   int get activeRequestId => _epoch;
   int get currentEpoch => _epoch;
+
+  int _nextEpoch() {
+    final serviceEpoch = audioService.currentState.playbackEpoch;
+    if (serviceEpoch > _epoch) {
+      _epoch = serviceEpoch;
+    }
+    return ++_epoch;
+  }
   PlaybackBackend? get activeBackend => _activeBackend;
   String? get preparedStandbyTrackId => _preparedStandbyTrackId;
   bool get isStandbyReady =>
@@ -280,15 +346,158 @@ class StreamingPlaybackCoordinator {
       (_loadingExternalState != null ||
           (_activeBackend != null &&
               !identical(_activeBackend, _nativeBackend)));
-  bool get hasSharedQueue => _sharedQueue.isNotEmpty;
-  List<TrackInfo> get queue =>
-      _sharedQueue.isNotEmpty ? _sharedQueue : audioService.queue;
+  bool get hasSharedQueue =>
+      (autoplayController?.combinedQueue.isNotEmpty ?? false) ||
+      _sharedQueue.isNotEmpty;
+  List<TrackInfo> get queue {
+    final ap = autoplayController;
+    if (ap != null && ap.combinedQueue.isNotEmpty) {
+      return ap.combinedQueue;
+    }
+    return _sharedQueue.isNotEmpty ? _sharedQueue : audioService.queue;
+  }
   Stream<PlaybackState> get stateStream => _stateController.stream;
   Stream<Duration> get positionStream => _positionController.stream;
-  PlaybackState get currentState =>
-      _loadingExternalState ??
-      _activeBackend?.currentState ??
-      audioService.currentState;
+  Stream<TrackInfo> get trackChangedStream => _trackChangedController.stream;
+  Stream<List<TrackInfo>> get queueUpdatedStream =>
+      _queueUpdatedController.stream;
+  PlaybackState get currentState {
+    if (_loadingExternalState != null) {
+      return _loadingExternalState!;
+    }
+    final raw = _activeBackend?.currentState ?? audioService.currentState;
+    final latest = _latestCoordinatorState;
+    if (latest != null &&
+        _pendingOptimisticEpoch == _epoch &&
+        _pendingOptimisticTrackId != null &&
+        latest.playbackEpoch == _epoch &&
+        raw.playbackEpoch < _epoch) {
+      return latest;
+    }
+    if (latest != null &&
+        latest.track != null &&
+        raw.track != null &&
+        _tracksReferToSame(latest.track, raw.track)) {
+      final mergedTrack = _mergeRichTrack(raw.track!, latest.track);
+      final effSwap = raw.swapGeneration > latest.swapGeneration
+          ? raw.swapGeneration
+          : latest.swapGeneration;
+      final forceZero =
+          _pendingSwapZeroPosTrack != null &&
+          _tracksReferToSame(_pendingSwapZeroPosTrack, mergedTrack) &&
+          (_pendingSwapZeroPosGen <= 0 || effSwap == _pendingSwapZeroPosGen);
+      return raw.copyWith(
+        track: mergedTrack,
+        position: forceZero ? Duration.zero : raw.position,
+        swapGeneration: effSwap,
+      );
+    }
+    if (latest != null &&
+        latest.track != null &&
+        raw.track == null &&
+        raw.status == latest.status) {
+      return latest;
+    }
+    return raw;
+  }
+
+  static bool _tracksReferToSame(TrackInfo? a, TrackInfo? b) {
+    if (a == null || b == null) return false;
+    if (a.id.isNotEmpty && a.id == b.id) return true;
+    if (PlaybackPersistenceService.tracksMatch(a, b)) return true;
+    if (a.id.trim().isNotEmpty && b.id.trim().isNotEmpty) {
+      return a.responsiveArtworkKey == b.responsiveArtworkKey;
+    }
+    return false;
+  }
+
+  static int _findTrackIndexInList(List<TrackInfo> tracks, TrackInfo target) {
+    final exact = PlaybackPersistenceService.findTrackIndex(tracks, target);
+    if (exact >= 0) return exact;
+    if (target.id.trim().isEmpty) return -1;
+    final targetKey = target.responsiveArtworkKey;
+    return tracks.indexWhere(
+      (t) => t.id.trim().isNotEmpty && t.responsiveArtworkKey == targetKey,
+    );
+  }
+
+  static bool _isGenericDefaultFormat(AudioFormat f) {
+    return f.codec == AudioCodec.flac &&
+        f.sampleRateHz == 44100 &&
+        f.bitDepth == 16 &&
+        f.channels == 2 &&
+        !f.isDsd &&
+        f.bitrateKbps == null;
+  }
+
+  static TrackInfo _mergeRichTrack(TrackInfo primary, TrackInfo? enrichment) {
+    if (enrichment == null) return primary;
+    final mergedId =
+        enrichment.id.trim().isNotEmpty ? enrichment.id : primary.id;
+    final pTitle = primary.title.trim();
+    final eTitle = enrichment.title.trim();
+    final mergedTitle = (pTitle.isNotEmpty && pTitle != '未知曲目')
+        ? primary.title
+        : (eTitle.isNotEmpty ? enrichment.title : primary.title);
+    final pArtist = primary.artist.trim();
+    final eArtist = enrichment.artist.trim();
+    final mergedArtist = (pArtist.isNotEmpty && pArtist != '未知藝術家')
+        ? primary.artist
+        : (eArtist.isNotEmpty ? enrichment.artist : primary.artist);
+    final pAlbum = primary.album.trim();
+    final eAlbum = enrichment.album.trim();
+    final mergedAlbum = (pAlbum.isNotEmpty && pAlbum != '未知專輯')
+        ? primary.album
+        : (eAlbum.isNotEmpty ? enrichment.album : primary.album);
+    final mergedCover =
+        (primary.coverUrl != null && primary.coverUrl!.trim().isNotEmpty)
+        ? primary.coverUrl
+        : enrichment.coverUrl;
+    final mergedAlbumArt =
+        (primary.albumArtUrl != null && primary.albumArtUrl!.trim().isNotEmpty)
+        ? primary.albumArtUrl
+        : (enrichment.albumArtUrl ?? mergedCover);
+    final mergedDuration = primary.duration > Duration.zero
+        ? primary.duration
+        : enrichment.duration;
+    final mergedFormat =
+        _isGenericDefaultFormat(primary.format) &&
+            !_isGenericDefaultFormat(enrichment.format)
+        ? enrichment.format
+        : primary.format;
+    final mergedProvider =
+        enrichment.providerName.trim().isNotEmpty &&
+            enrichment.providerName != 'Remote Core' &&
+            (primary.providerName.trim().isEmpty ||
+                primary.providerName == 'Local Library' ||
+                primary.providerName == 'Remote Core')
+        ? enrichment.providerName
+        : primary.providerName;
+
+    return enrichment.copyWith(
+      id: mergedId,
+      title: mergedTitle,
+      artist: mergedArtist,
+      album: mergedAlbum,
+      duration: mergedDuration,
+      coverUrl: mergedCover,
+      albumArtUrl: mergedAlbumArt,
+      format: mergedFormat,
+      providerName: mergedProvider,
+      filePath: primary.filePath ?? enrichment.filePath,
+      albumArtist: primary.albumArtist ?? enrichment.albumArtist,
+      genre: primary.genre ?? enrichment.genre,
+      year: primary.year ?? enrichment.year,
+      trackNumber: primary.trackNumber ?? enrichment.trackNumber,
+      discNumber: primary.discNumber ?? enrichment.discNumber,
+      composer: primary.composer ?? enrichment.composer,
+      artworkCacheKey: primary.artworkCacheKey ?? enrichment.artworkCacheKey,
+      hasLyrics: primary.hasLyrics || enrichment.hasLyrics,
+      isrc: primary.isrc ?? enrichment.isrc,
+      qualityLabel: primary.qualityLabel ?? enrichment.qualityLabel,
+      artistId: primary.artistId ?? enrichment.artistId,
+    );
+  }
 
   bool shouldInterceptTrack(TrackInfo track) {
     if (track.filePath != null && track.filePath!.trim().isNotEmpty) {
@@ -301,12 +510,167 @@ class StreamingPlaybackCoordinator {
     return isStreamingTrack(track);
   }
 
+  static bool _listsHaveSameIds(List<TrackInfo> a, List<TrackInfo> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id) return false;
+    }
+    return true;
+  }
+
   void setQueueContext(
     List<TrackInfo>? queueContext, {
     TrackInfo? currentTrack,
     int? queueIndex,
     bool resetLookaheadOnChange = true,
+  }) => _setQueueContextInternal(
+    queueContext,
+    currentTrack: currentTrack,
+    queueIndex: queueIndex,
+    resetLookaheadOnChange: resetLookaheadOnChange,
+    syncAutoplayCurrentTrack: true,
+  );
+
+  void _setQueueContextInternal(
+    List<TrackInfo>? queueContext, {
+    TrackInfo? currentTrack,
+    int? queueIndex,
+    bool resetLookaheadOnChange = true,
+    required bool syncAutoplayCurrentTrack,
   }) {
+    final ap = autoplayController;
+    if (ap != null) {
+      if (queueContext != null && queueContext.isNotEmpty) {
+        final matchesCombined = _listsHaveSameIds(
+          queueContext,
+          ap.combinedQueue,
+        );
+        if (matchesCombined) {
+          final combined = ap.combinedQueue;
+          _sharedQueue
+            ..clear()
+            ..addAll(combined);
+          if (queueIndex != null &&
+              queueIndex >= 0 &&
+              queueIndex < _sharedQueue.length) {
+            _sharedQueueIndex = queueIndex;
+          } else if (currentTrack != null) {
+            _sharedQueueIndex = PlaybackPersistenceService.findTrackIndex(
+              _sharedQueue,
+              currentTrack,
+            );
+          } else {
+            _sharedQueueIndex = -1;
+          }
+          if (syncAutoplayCurrentTrack &&
+              currentTrack != null &&
+              ap.currentTrack?.id != currentTrack.id) {
+            ap.advanceToTrack(currentTrack);
+          }
+          return;
+        }
+
+        final userQueueChanged = !_listsHaveSameIds(queueContext, ap.userQueue);
+        if (userQueueChanged || syncAutoplayCurrentTrack) {
+          ap.setUserQueue(
+            queueContext,
+            currentTrack: currentTrack,
+            currentIndex: queueIndex,
+            bumpEpoch: userQueueChanged,
+          );
+        } else if (currentTrack != null && ap.currentTrack == null) {
+          ap.setUserQueue(
+            queueContext,
+            currentTrack: currentTrack,
+            currentIndex: queueIndex,
+            bumpEpoch: false,
+          );
+        }
+
+        final combined = ap.combinedQueue;
+        _sharedQueue
+          ..clear()
+          ..addAll(combined);
+        if (currentTrack != null) {
+          _sharedQueueIndex = PlaybackPersistenceService.findTrackIndex(
+            _sharedQueue,
+            currentTrack,
+          );
+        } else if (queueIndex != null &&
+            queueIndex >= 0 &&
+            queueIndex < _sharedQueue.length) {
+          _sharedQueueIndex = queueIndex;
+        } else {
+          _sharedQueueIndex = -1;
+        }
+        if (userQueueChanged && resetLookaheadOnChange) {
+          _cancelStablePlayTimer();
+          _resetLookaheadCompleted();
+          _cancelLookaheadPrefetch();
+          _clearStandbyTracking();
+          _syncStablePlayTimer(currentState);
+        }
+        if (ap.needsRefill) {
+          unawaited(ap.maybeTriggerRefill());
+        }
+        return;
+      }
+
+      if (currentTrack != null) {
+        if (PlaybackPersistenceService.findTrackIndex(
+              ap.combinedQueue,
+              currentTrack,
+            ) >=
+            0) {
+          final combined = ap.combinedQueue;
+          _sharedQueue
+            ..clear()
+            ..addAll(combined);
+          _sharedQueueIndex = PlaybackPersistenceService.findTrackIndex(
+            _sharedQueue,
+            currentTrack,
+          );
+          if (syncAutoplayCurrentTrack &&
+              ap.currentTrack?.id != currentTrack.id) {
+            ap.advanceToTrack(currentTrack);
+          }
+          return;
+        }
+
+        if (audioService.queue.isNotEmpty &&
+            PlaybackPersistenceService.findTrackIndex(
+                  audioService.queue,
+                  currentTrack,
+                ) >=
+                0) {
+          ap.setUserQueue(
+            audioService.queue,
+            currentTrack: currentTrack,
+            bumpEpoch: true,
+          );
+        } else {
+          ap.setUserQueue(
+            <TrackInfo>[currentTrack],
+            currentTrack: currentTrack,
+            currentIndex: 0,
+            bumpEpoch: true,
+          );
+        }
+        _sharedQueue
+          ..clear()
+          ..addAll(ap.combinedQueue);
+        _sharedQueueIndex = PlaybackPersistenceService.findTrackIndex(
+          _sharedQueue,
+          currentTrack,
+        );
+        if (ap.needsRefill) {
+          unawaited(ap.maybeTriggerRefill());
+        }
+        return;
+      }
+      return;
+    }
+
     if (queueContext != null && queueContext.isNotEmpty) {
       var queueChanged = _sharedQueue.length != queueContext.length;
       if (!queueChanged) {
@@ -378,12 +742,21 @@ class StreamingPlaybackCoordinator {
   }
 
   void clearSharedQueue() {
+    autoplayController?.clearAll();
     _sharedQueue.clear();
     _sharedQueueIndex = -1;
+    _lastActivePlayingTrack = null;
+    _lastTransitionTrack = null;
+    _pendingSwapZeroPosTrack = null;
+    _handledEndedTrackId = null;
+    _handledEndedEpoch = -1;
     _cancelStablePlayTimer();
     _resetLookaheadCompleted();
     _cancelLookaheadPrefetch();
     _clearStandbyTracking();
+    if (!_queueUpdatedController.isClosed) {
+      _queueUpdatedController.add(const <TrackInfo>[]);
+    }
   }
 
   void _clearStandbyTracking({bool clearPrepared = true}) {
@@ -493,7 +866,7 @@ class StreamingPlaybackCoordinator {
                 !identical(_activeBackend, _nativeBackend))
             ? _activeBackend!
             : _externalBackend;
-    final stopEpoch = ++_epoch;
+    final stopEpoch = _nextEpoch();
     _cancelPendingWork();
     _clearStandbyTracking();
     _resolvingRequestId = null;
@@ -916,6 +1289,12 @@ class StreamingPlaybackCoordinator {
   Future<void> prefetchTrack(
     TrackInfo track, {
     CancellationToken? cancelToken,
+  }) => _prefetchTrackInternal(track, cancelToken: cancelToken);
+
+  Future<void> _prefetchTrackInternal(
+    TrackInfo track, {
+    CancellationToken? cancelToken,
+    void Function(Object error)? onFailure,
   }) async {
     if (_disposed || !_useResolverPipeline) return;
     if (cancelToken?.isCancelled == true) return;
@@ -961,14 +1340,29 @@ class StreamingPlaybackCoordinator {
         );
       }
 
+      if (_disposed || localCancel.isCancelled) return;
+      if (spec != null && useLegacySpecCache) {
+        _storeSpecCache(track, spec);
+      } else if (spec == null &&
+          onFailure != null &&
+          !streamingManager.isPlaybackAuthBlocked(key.providerId)) {
+        final provider = streamingManager.providerFor(key.providerId);
+        final providerPlayable =
+            provider == null ||
+            provider.supportsGuestMode ||
+            provider.authState == StreamingAuthState.connected;
+        if (providerPlayable) {
+          onFailure(StreamingException('串流預載失敗：${track.id}'));
+        }
+      }
+    } catch (e) {
       if (!_disposed &&
           !localCancel.isCancelled &&
-          spec != null &&
-          useLegacySpecCache) {
-        _storeSpecCache(track, spec);
+          !(e is StreamingException && e.isCancelled)) {
+        onFailure?.call(e);
       }
-    } catch (_) {
-      // Prefetch failures and cancellations are strictly silent.
+      // Prefetch failures and cancellations are strictly silent to UI unless
+      // handled internally for auto-queue eviction.
     } finally {
       timeoutTimer?.cancel();
       cancelToken?.removeListener(forwardCancel);
@@ -1087,34 +1481,59 @@ class StreamingPlaybackCoordinator {
       return;
     }
 
-    final activeQueue = queue;
-    if (activeQueue.length <= 1) return;
-
-    int currentIdx = -1;
-    if (_sharedQueue.isNotEmpty &&
-        _sharedQueueIndex >= 0 &&
-        _sharedQueueIndex < activeQueue.length &&
-        activeQueue[_sharedQueueIndex].id == currentTrackId) {
-      currentIdx = _sharedQueueIndex;
-    }
-    if (currentIdx < 0) {
-      currentIdx = PlaybackPersistenceService.findTrackIndex(
-        activeQueue,
+    final ap = autoplayController;
+    final List<TrackInfo> candidates;
+    if (ap != null && ap.enabled) {
+      final upcoming = <TrackInfo>[];
+      final combined = ap.combinedQueue;
+      final curIdx = PlaybackPersistenceService.findTrackIndex(
+        combined,
         curState.track!,
       );
-    }
-    if (currentIdx < 0) return;
+      if (curIdx >= 0) {
+        for (var i = curIdx + 1; i < combined.length; i++) {
+          final c = combined[i];
+          if (c.id != currentTrackId) {
+            upcoming.add(c);
+          }
+        }
+      } else {
+        final next = ap.peekNextTrack();
+        if (next != null && next.id != currentTrackId) {
+          upcoming.add(next);
+        }
+      }
+      candidates = upcoming;
+    } else {
+      final activeQueue = queue;
+      if (activeQueue.length <= 1) return;
 
-    // Strictly bounded to at most lookaheadCount (1..2) tracks ahead;
-    // NEVER resolves an entire playlist at once.
-    final candidates = <TrackInfo>[];
-    for (var offset = 1; offset <= lookaheadCount; offset++) {
-      final nextIdx = currentIdx + offset;
-      if (nextIdx >= activeQueue.length) break;
-      final candidate = activeQueue[nextIdx];
-      if (candidate.id == currentTrackId) continue;
-      if (canPrefetchTrack(candidate)) {
-        candidates.add(candidate);
+      int currentIdx = -1;
+      if (_sharedQueue.isNotEmpty &&
+          _sharedQueueIndex >= 0 &&
+          _sharedQueueIndex < activeQueue.length &&
+          activeQueue[_sharedQueueIndex].id == currentTrackId) {
+        currentIdx = _sharedQueueIndex;
+      }
+      if (currentIdx < 0) {
+        currentIdx = PlaybackPersistenceService.findTrackIndex(
+          activeQueue,
+          curState.track!,
+        );
+      }
+      if (currentIdx < 0) return;
+
+      // Strictly bounded to at most lookaheadCount (1..2) tracks ahead;
+      // NEVER resolves an entire playlist at once.
+      candidates = <TrackInfo>[];
+      for (var offset = 1; offset <= lookaheadCount; offset++) {
+        final nextIdx = currentIdx + offset;
+        if (nextIdx >= activeQueue.length) break;
+        final candidate = activeQueue[nextIdx];
+        if (candidate.id == currentTrackId) continue;
+        if (canPrefetchTrack(candidate)) {
+          candidates.add(candidate);
+        }
       }
     }
     if (candidates.isEmpty) return;
@@ -1124,19 +1543,92 @@ class StreamingPlaybackCoordinator {
     _lookaheadCancelToken = cancel;
 
     try {
-      for (final candidate in candidates) {
+      var prefetchedCount = 0;
+      var attemptIdx = 0;
+      var failureHandledCount = 0;
+      final visitedIds = <String>{};
+
+      while (prefetchedCount < lookaheadCount &&
+          failureHandledCount < AutoplayController.maxConsecutiveAutoFailures) {
         if (_disposed || expectedEpoch != _epoch || cancel.isCancelled) {
           return;
         }
+        TrackInfo? candidate;
+        if (ap != null && ap.enabled) {
+          final combined = ap.combinedQueue;
+          final curIdx = PlaybackPersistenceService.findTrackIndex(
+            combined,
+            curState.track!,
+          );
+          final startIdx = curIdx >= 0 ? curIdx + 1 : 0;
+          for (var i = startIdx; i < combined.length; i++) {
+            final item = combined[i];
+            if (item.id == currentTrackId || visitedIds.contains(item.id)) {
+              continue;
+            }
+            candidate = item;
+            break;
+          }
+        } else {
+          if (attemptIdx >= candidates.length) break;
+          candidate = candidates[attemptIdx++];
+        }
+        if (candidate == null) break;
+        visitedIds.add(candidate.id);
+        if (!canPrefetchTrack(candidate)) {
+          prefetchedCount++;
+          continue;
+        }
+
         final key = _tryDeriveKey(candidate);
-        if (key == null) continue;
-        if (_peekCachedSpec(key) != null) continue;
+        if (key == null) {
+          prefetchedCount++;
+          continue;
+        }
+        if (_peekCachedSpec(key) != null) {
+          prefetchedCount++;
+          continue;
+        }
 
         _inFlightLookaheadKey = key;
-        await prefetchTrack(candidate, cancelToken: cancel);
+        var failed = false;
+        await _prefetchTrackInternal(
+          candidate,
+          cancelToken: cancel,
+          onFailure: (ap != null && ap.isAutoTrack(candidate.id))
+              ? (err) {
+                  failed = true;
+                  if (_disposed ||
+                      expectedEpoch != _epoch ||
+                      cancel.isCancelled) {
+                    return;
+                  }
+                  failureHandledCount++;
+                  final res = ap.handleAutoTrackUnplayable(
+                    candidate!,
+                    '$err',
+                  );
+                  if (res.reachedFailureLimit) {
+                    _notifiedErrorForEpoch = expectedEpoch;
+                    onError?.call(
+                      candidate,
+                      '連續 ${AutoplayController.maxConsecutiveAutoFailures} 首自動推薦曲目無法播放，已停止自動推薦',
+                      false,
+                    );
+                  }
+                }
+              : null,
+        );
         if (identical(_lookaheadCancelToken, cancel) &&
             _inFlightLookaheadKey == key) {
           _inFlightLookaheadKey = null;
+        }
+        if (!failed) {
+          prefetchedCount++;
+        } else if (ap != null &&
+            ap.consecutiveAutoFailures >=
+                AutoplayController.maxConsecutiveAutoFailures) {
+          break;
         }
       }
     } finally {
@@ -1159,7 +1651,34 @@ class StreamingPlaybackCoordinator {
     );
   }
 
+  static bool _isLocalTrack(TrackInfo track) {
+    final fp = track.filePath?.trim();
+    if (fp == null || fp.isEmpty) return false;
+    if (AudioService.isStreamingTrackId(track.id)) return false;
+    if (AudioService.isStreamingTrackId(fp)) return false;
+    return true;
+  }
+
+  void _finalizeDeferredAutoplaySkip(TrackInfo settledTrack) {
+    if (!_hasDeferredAutoplaySkip) return;
+    final ap = autoplayController;
+    final abandoned = _burstAbandonedTrack;
+    final abandonedWasAuto = _burstAbandonedWasAuto;
+    final abandonedPlayed = _burstAbandonedPlayed;
+    _hasDeferredAutoplaySkip = false;
+    _burstAbandonedTrack = null;
+    _burstAbandonedWasAuto = false;
+    _burstAbandonedPlayed = Duration.zero;
+    ap?.finalizeSettledSkip(
+      abandonedTrack: abandoned,
+      abandonedWasAuto: abandonedWasAuto,
+      abandonedPlayed: abandonedPlayed,
+      settledTrack: settledTrack,
+    );
+  }
+
   bool _shouldOptimisticallyTouchNativeAudio(TrackInfo track) {
+    if (_isLocalTrack(track)) return true;
     try {
       final key = _resolverRegistry.deriveKey(track);
       final resolver = _resolverRegistry.resolverFor(key.providerId);
@@ -1176,23 +1695,65 @@ class StreamingPlaybackCoordinator {
     TrackInfo track, {
     List<TrackInfo>? queueContext,
     bool debounce = false,
+    bool adaptiveSkipDebounce = false,
     int? queueIndex,
+    bool userInitiatedSkip = false,
   }) {
     if (_disposed) return Future.value();
 
+    final now = _clock();
+    var isRapidBurst = false;
+    if (adaptiveSkipDebounce) {
+      final prevSkip = _lastSkipAt;
+      isRapidBurst =
+          prevSkip != null && now.difference(prevSkip) <= rapidSkipWindow;
+      _lastSkipAt = now;
+    } else if (userInitiatedSkip) {
+      _lastSkipAt = now;
+    }
+    final shouldDebounce =
+        (debounce || isRapidBurst) && debounceDelay > Duration.zero;
+
     final canTryStandbySkip =
         _useResolverPipeline &&
+        !shouldDebounce &&
         _preparedStandbyTrackId == track.id &&
         _nativeBackend.isStandbyReady;
+    final alreadyTransitionedFromEnded =
+        _tracksReferToSame(_lastTransitionTrack, track);
 
-    setQueueContext(
+    _setQueueContextInternal(
       queueContext,
       currentTrack: track,
       queueIndex: queueIndex,
       resetLookaheadOnChange: false,
+      syncAutoplayCurrentTrack: false,
     );
+    _pendingUserInitiatedSkipTrackId = userInitiatedSkip ? track.id : null;
+    if (!alreadyTransitionedFromEnded) {
+      final ap = autoplayController;
+      if (ap != null) {
+        if (shouldDebounce && !_hasDeferredAutoplaySkip) {
+          _burstAbandonedTrack = ap.currentTrack;
+          _burstAbandonedWasAuto = ap.isCurrentFromAutoQueue;
+          _burstAbandonedPlayed = ap.currentTrackObservedPlayDuration;
+          _hasDeferredAutoplaySkip = true;
+        } else if (!shouldDebounce) {
+          _hasDeferredAutoplaySkip = false;
+          _burstAbandonedTrack = null;
+        }
+        ap.advanceToTrack(
+          track,
+          userInitiatedSkip: userInitiatedSkip,
+          deferSideEffects: shouldDebounce,
+        );
+      }
+      _lastActivePlayingTrack = null;
+      _pendingSwapZeroPosTrack = null;
+    }
 
     if (canTryStandbySkip) {
+      _backendCancelSentForBurst = false;
       final fut = _executeStandbySkipOrFallback(
         track,
         queueContext: queueContext,
@@ -1203,7 +1764,9 @@ class StreamingPlaybackCoordinator {
     }
 
     _clearStandbyTracking();
-    final taskEpoch = ++_epoch;
+    final taskEpoch = _nextEpoch();
+    _pendingOptimisticTrackId = track.id;
+    _pendingOptimisticEpoch = taskEpoch;
 
     final incomingKey = _useResolverPipeline ? _tryDeriveKey(track) : null;
     _cancelStablePlayTimer();
@@ -1214,6 +1777,7 @@ class StreamingPlaybackCoordinator {
     if (_inFlightHoverKey == null || _inFlightHoverKey != incomingKey) {
       _cancelHoverPrefetch();
     }
+    _cancelAllPreResolves();
 
     _debounceTimer?.cancel();
     _debounceTimer = null;
@@ -1227,46 +1791,86 @@ class StreamingPlaybackCoordinator {
     final cancel = CancellationToken();
     _activeCancelToken = cancel;
 
+    // Immediately kill stale yt-dlp / ffmpeg processes across both pipeline and
+    // legacy modes so rapid skipping never leaves orphaned child processes.
+    ytDlpService.cancelPlaybackProcesses(exceptRequestId: taskEpoch);
+    _activeYtmAttempt = null;
+    _activeTidalDashAttempt = null;
+
+    final shouldSendBackendCancel =
+        !shouldDebounce || !_backendCancelSentForBurst;
+    if (shouldDebounce) {
+      _backendCancelSentForBurst = true;
+    } else {
+      _backendCancelSentForBurst = false;
+    }
+
     if (_useResolverPipeline) {
       final touchesNative = _shouldOptimisticallyTouchNativeAudio(track);
+      final PlaybackState optimisticState;
       if (touchesNative) {
         _loadingExternalState = null;
-        unawaited(audioService.cancelPendingPlaybackAtEpoch(taskEpoch));
-        audioService.beginOptimisticTrackLoad(track, queue: queueContext);
+        if (shouldSendBackendCancel) {
+          unawaited(audioService.cancelPendingPlaybackAtEpoch(taskEpoch));
+        }
+        audioService.beginOptimisticTrackLoadAtEpoch(
+          track,
+          queue: queueContext,
+          epoch: taskEpoch,
+        );
+        optimisticState = currentState.copyWith(
+          status: PlaybackStatus.loading,
+          track: track,
+          position: Duration.zero,
+          playbackEpoch: taskEpoch,
+          clearLastError: true,
+        );
       } else {
         _loadingExternalState = _externalBackend.currentState.copyWith(
           status: PlaybackStatus.loading,
           track: track,
           position: Duration.zero,
+          playbackEpoch: taskEpoch,
           clearLastError: true,
           clockSource: 'external_musickit',
         );
+        optimisticState = _loadingExternalState!;
       }
+      _latestCoordinatorState = optimisticState;
       if (!_stateController.isClosed) {
-        _stateController.add(
-          (_loadingExternalState ?? currentState).copyWith(
-            status: PlaybackStatus.loading,
-            track: track,
-            position: Duration.zero,
-            clearLastError: true,
-          ),
-        );
+        _stateController.add(optimisticState);
+      }
+      if (!_positionController.isClosed) {
+        _positionController.add(Duration.zero);
       }
     } else {
-      // Legacy mode: immediately kill stale yt-dlp.exe / ffmpeg.exe BEFORE
-      // debounce or resolve so rapid track switching leaves zero lingering processes.
-      ytDlpService.cancelPlaybackProcesses(exceptRequestId: taskEpoch);
-      _activeYtmAttempt = null;
-      _activeTidalDashAttempt = null;
-      unawaited(audioService.cancelPendingPlayback());
-      audioService.beginOptimisticTrackLoad(track, queue: queueContext);
+      if (shouldSendBackendCancel) {
+        unawaited(audioService.cancelPendingPlaybackAtEpoch(taskEpoch));
+      }
+      audioService.beginOptimisticTrackLoadAtEpoch(
+        track,
+        queue: queueContext,
+        epoch: taskEpoch,
+      );
+      _latestCoordinatorState = currentState.copyWith(
+        status: PlaybackStatus.loading,
+        track: track,
+        position: Duration.zero,
+        playbackEpoch: taskEpoch,
+        clearLastError: true,
+      );
     }
 
-    Future<void> launchTask() => _useResolverPipeline
-        ? _executeResolveAndPlaySpec(track, taskEpoch, cancel)
+    Future<void> launchTask({required bool debounced}) => _useResolverPipeline
+        ? _executeResolveAndPlaySpec(
+            track,
+            taskEpoch,
+            cancel,
+            debounced: debounced,
+          )
         : _executeResolveAndPlayLegacy(track, taskEpoch, cancel);
 
-    if (debounce && debounceDelay > Duration.zero) {
+    if (shouldDebounce) {
       final completer = Completer<void>();
       _pendingDebounceCompleter = completer;
       _debounceTimer = Timer(debounceDelay, () {
@@ -1278,7 +1882,7 @@ class StreamingPlaybackCoordinator {
           if (!completer.isCompleted) completer.complete();
           return;
         }
-        final fut = launchTask();
+        final fut = launchTask(debounced: true);
         _activeTaskFuture = fut;
         fut.whenComplete(() {
           if (!completer.isCompleted) completer.complete();
@@ -1288,7 +1892,7 @@ class StreamingPlaybackCoordinator {
       return completer.future;
     }
 
-    final fut = launchTask();
+    final fut = launchTask(debounced: false);
     _activeTaskFuture = fut;
     return fut;
   }
@@ -1300,6 +1904,7 @@ class StreamingPlaybackCoordinator {
 
   Future<void> pause() {
     _cancelStablePlayTimer();
+    ytDlpService.stopFfmpegProxy();
     if (_useResolverPipeline) {
       if (_loadingExternalState != null) {
         _loadingExternalState = _loadingExternalState!.copyWith(
@@ -1311,7 +1916,6 @@ class StreamingPlaybackCoordinator {
       }
       return _effectiveControlBackend.pause();
     }
-    ytDlpService.stopFfmpegProxy();
     return audioService.pause();
   }
 
@@ -1351,7 +1955,8 @@ class StreamingPlaybackCoordinator {
   }
 
   Future<void> seek(Duration position) {
-    final seekEpoch = ++_epoch;
+    final seekEpoch = _nextEpoch();
+    _pendingSwapZeroPosTrack = null;
     _activeCancelToken?.cancel();
     _cancelStablePlayTimer();
     _resetLookaheadCompleted();
@@ -1415,11 +2020,24 @@ class StreamingPlaybackCoordinator {
   }
 
   Future<void> stop() async {
-    final stopEpoch = ++_epoch;
+    final stopEpoch = _nextEpoch();
     _cancelPendingWork();
     _clearStandbyTracking();
+    _lastActivePlayingTrack = null;
+    _lastTransitionTrack = null;
+    _pendingSwapZeroPosTrack = null;
+    _pendingOptimisticTrackId = null;
+    _pendingOptimisticEpoch = -1;
+    _backendCancelSentForBurst = false;
+    _hasDeferredAutoplaySkip = false;
+    _burstAbandonedTrack = null;
+    _latestCoordinatorState = null;
     final wasLoadingExternal = _loadingExternalState != null;
     _loadingExternalState = null;
+
+    ytDlpService.cancelPlaybackProcesses();
+    _activeYtmAttempt = null;
+    _activeTidalDashAttempt = null;
 
     if (_useResolverPipeline) {
       final target =
@@ -1429,9 +2047,6 @@ class StreamingPlaybackCoordinator {
       return;
     }
 
-    ytDlpService.cancelPlaybackProcesses();
-    _activeYtmAttempt = null;
-    _activeTidalDashAttempt = null;
     await audioService.stop();
   }
 
@@ -1441,10 +2056,49 @@ class StreamingPlaybackCoordinator {
 
   Future<void> previous() => _stepQueue(delta: -1);
 
+  Future<void> _playResolvedOrLocalTrack(
+    TrackInfo target, {
+    bool debounce = false,
+    bool adaptiveSkipDebounce = false,
+    bool userInitiatedSkip = false,
+  }) async {
+    if (_disposed) return;
+    final ap = autoplayController;
+    final snapshot = (ap != null && ap.combinedQueue.isNotEmpty)
+        ? List<TrackInfo>.from(ap.combinedQueue)
+        : List<TrackInfo>.from(queue);
+
+    await playTrack(
+      target,
+      queueContext: snapshot.isNotEmpty ? snapshot : null,
+      debounce: debounce,
+      adaptiveSkipDebounce: adaptiveSkipDebounce,
+      userInitiatedSkip: userInitiatedSkip,
+    );
+  }
+
   Future<void> _stepQueue({required int delta}) async {
-    if (!_useResolverPipeline) {
-      return delta >= 0 ? audioService.next() : audioService.previous();
+    final ap = autoplayController;
+    if (ap != null && ap.enabled && delta > 0) {
+      var nextTrack = ap.peekNextTrack();
+      if (nextTrack == null) {
+        final refillGuardEpoch = _epoch;
+        await ap.maybeTriggerRefill();
+        if (_disposed || _epoch != refillGuardEpoch) return;
+        nextTrack = ap.peekNextTrack();
+      }
+      if (nextTrack == null) {
+        // When Autoplay is enabled, never wrap back to index 0.
+        return;
+      }
+      await _playResolvedOrLocalTrack(
+        nextTrack,
+        adaptiveSkipDebounce: true,
+        userInitiatedSkip: true,
+      );
+      return;
     }
+
     final activeQueue = queue;
     if (activeQueue.isEmpty) {
       return delta >= 0 ? audioService.next() : audioService.previous();
@@ -1481,25 +2135,13 @@ class StreamingPlaybackCoordinator {
       _sharedQueueIndex = targetIdx;
     }
 
-    final useZeroLatencyStandby =
-        delta > 0 &&
-        _preparedStandbyTrackId == target.id &&
-        _nativeBackend.isStandbyReady;
-
-    if (shouldInterceptTrack(target) || useZeroLatencyStandby) {
-      await playTrack(
-        target,
-        queueContext: snapshot,
-        debounce: !useZeroLatencyStandby,
-        queueIndex: targetIdx,
-      );
-      return;
-    }
-
-    await stopExternalIfActive();
-    _loadingExternalState = null;
-    _activeBackend = _nativeBackend;
-    await audioService.play(track: target);
+    await playTrack(
+      target,
+      queueContext: snapshot,
+      adaptiveSkipDebounce: true,
+      queueIndex: targetIdx,
+      userInitiatedSkip: delta > 0,
+    );
   }
 
   Future<void> _executeStandbySkipOrFallback(
@@ -1507,7 +2149,7 @@ class StreamingPlaybackCoordinator {
     List<TrackInfo>? queueContext,
     int? queueIndex,
   }) async {
-    final skipEpoch = ++_epoch;
+    final skipEpoch = _nextEpoch();
     final incomingKey = _tryDeriveKey(track);
     _cancelStablePlayTimer();
     _resetLookaheadCompleted();
@@ -1576,7 +2218,18 @@ class StreamingPlaybackCoordinator {
           ),
         );
       }
-      _syncStablePlayTimer(currentState);
+      final cur = currentState;
+      if (cur.status == PlaybackStatus.playing && cur.track != null) {
+        onTrackTransitioned(
+          resolvedTrack,
+          backendInitiated: false,
+          userInitiatedSkip: true,
+          swapGeneration: cur.swapGeneration,
+          sourceState: cur,
+        );
+      } else {
+        _syncStablePlayTimer(cur);
+      }
       return;
     }
 
@@ -1592,16 +2245,23 @@ class StreamingPlaybackCoordinator {
     _activeCancelToken = fallbackCancel;
     if (_shouldOptimisticallyTouchNativeAudio(track)) {
       unawaited(audioService.cancelPendingPlaybackAtEpoch(skipEpoch));
-      audioService.beginOptimisticTrackLoad(track, queue: queueContext);
+      audioService.beginOptimisticTrackLoadAtEpoch(
+        track,
+        queue: queueContext,
+        epoch: skipEpoch,
+      );
+      final optimistic = currentState.copyWith(
+        status: PlaybackStatus.loading,
+        track: track,
+        position: Duration.zero,
+        playbackEpoch: skipEpoch,
+        clearLastError: true,
+      );
+      _pendingOptimisticTrackId = track.id;
+      _pendingOptimisticEpoch = skipEpoch;
+      _latestCoordinatorState = optimistic;
       if (!_stateController.isClosed) {
-        _stateController.add(
-          currentState.copyWith(
-            status: PlaybackStatus.loading,
-            track: track,
-            position: Duration.zero,
-            clearLastError: true,
-          ),
-        );
+        _stateController.add(optimistic);
       }
     }
     await _executeResolveAndPlaySpec(track, skipEpoch, fallbackCancel);
@@ -1610,48 +2270,60 @@ class StreamingPlaybackCoordinator {
   Future<void> _executeResolveAndPlaySpec(
     TrackInfo track,
     int taskEpoch,
-    CancellationToken cancel,
-  ) async {
+    CancellationToken cancel, {
+    bool debounced = false,
+  }) async {
     bool isStale() => _disposed || taskEpoch != _epoch || cancel.isCancelled;
     if (isStale()) return;
+
+    _backendCancelSentForBurst = false;
+    _finalizeDeferredAutoplaySkip(track);
 
     final resolveGen = ++_resolvingGeneration;
     _resolvingRequestId = taskEpoch;
     StreamSourceSpec? resolvedSpec;
 
     try {
-      final resolveSw = Stopwatch()..start();
-      final key = _resolverRegistry.deriveKey(track);
-      final useLegacySpecCache = _usesLegacyCoordinatorSpecCache(key);
-      final cachedSpec = _peekCachedSpec(key);
-      if (cachedSpec != null) {
-        resolvedSpec = cachedSpec;
+      if (_isLocalTrack(track)) {
+        final fp = track.filePath!.trim();
+        final localKey =
+            _tryDeriveKey(track) ?? StreamKey('local', fp, 'default');
+        resolvedSpec = LocalFileSpec(key: localKey, path: fp);
       } else {
-        resolvedSpec = await _awaitWithCancellationAndTimeout<StreamSourceSpec>(
-          () => _useCustomResolverRegistry
-              ? _singleFlight.resolve(
-                  key,
-                  cancelToken: cancel,
-                  bypassCache: useLegacySpecCache,
-                  legacyTrack: track,
-                )
-              : streamingManager.resolveSourceSpec(
-                  key,
-                  cancelToken: cancel,
-                  bypassCache: useLegacySpecCache,
-                  legacyTrack: track,
-                ),
-          cancel,
-        );
-        if (!isStale() && useLegacySpecCache) {
-          _storeSpecCache(track, resolvedSpec);
+        final resolveSw = Stopwatch()..start();
+        final key = _resolverRegistry.deriveKey(track);
+        final useLegacySpecCache = _usesLegacyCoordinatorSpecCache(key);
+        final cachedSpec = _peekCachedSpec(key);
+        if (cachedSpec != null) {
+          resolvedSpec = cachedSpec;
+        } else {
+          resolvedSpec =
+              await _awaitWithCancellationAndTimeout<StreamSourceSpec>(
+                () => _useCustomResolverRegistry
+                    ? _singleFlight.resolve(
+                        key,
+                        cancelToken: cancel,
+                        bypassCache: useLegacySpecCache,
+                        legacyTrack: track,
+                      )
+                    : streamingManager.resolveSourceSpec(
+                        key,
+                        cancelToken: cancel,
+                        bypassCache: useLegacySpecCache,
+                        legacyTrack: track,
+                      ),
+                cancel,
+              );
+          if (!isStale() && useLegacySpecCache) {
+            _storeSpecCache(track, resolvedSpec);
+          }
         }
+        debugPrint(
+          '[StreamResolve] key=${key.providerId}:${key.trackId} '
+          'leg=${cachedSpec != null ? 'l1_cache' : key.providerId} '
+          'resolve_ms=${resolveSw.elapsedMilliseconds}',
+        );
       }
-      debugPrint(
-        '[StreamResolve] key=${key.providerId}:${key.trackId} '
-        'leg=${cachedSpec != null ? 'l1_cache' : key.providerId} '
-        'resolve_ms=${resolveSw.elapsedMilliseconds}',
-      );
 
       if (isStale()) return;
 
@@ -1706,13 +2378,18 @@ class StreamingPlaybackCoordinator {
         );
       }
 
-      await targetBackend.play(spec, resolvedTrack, epoch: taskEpoch);
+      await targetBackend.playWithDebounced(
+        spec,
+        resolvedTrack,
+        epoch: taskEpoch,
+        debounced: debounced,
+      );
       if (!isStale()) {
         _syncStablePlayTimer(currentState);
       }
     } on StreamingException catch (e) {
       if (e.isCancelled || isStale()) return;
-      _handleResolveSpecFailure(
+      await _handleAutoOrRegularSpecFailure(
         track,
         taskEpoch,
         e.message,
@@ -1722,7 +2399,8 @@ class StreamingPlaybackCoordinator {
     } on TimeoutException {
       if (isStale()) return;
       cancel.cancel();
-      _handleResolveSpecFailure(
+      ytDlpService.cancelPlaybackProcesses(exceptRequestId: _epoch);
+      await _handleAutoOrRegularSpecFailure(
         track,
         taskEpoch,
         '串流解析逾時，請稍後再試',
@@ -1730,7 +2408,7 @@ class StreamingPlaybackCoordinator {
       );
     } catch (e) {
       if (isStale()) return;
-      _handleResolveSpecFailure(
+      await _handleAutoOrRegularSpecFailure(
         track,
         taskEpoch,
         '串流播放失敗：$e',
@@ -1741,6 +2419,66 @@ class StreamingPlaybackCoordinator {
           _resolvingRequestId == taskEpoch) {
         _resolvingRequestId = null;
       }
+    }
+  }
+
+  Future<void> _handleAutoOrRegularSpecFailure(
+    TrackInfo track,
+    int taskEpoch,
+    String message, {
+    StreamSourceSpec? resolvedSpec,
+    bool isDrmRestricted = false,
+  }) async {
+    final ap = autoplayController;
+    if (ap == null || !ap.isAutoTrack(track.id)) {
+      _handleResolveSpecFailure(
+        track,
+        taskEpoch,
+        message,
+        resolvedSpec: resolvedSpec,
+        isDrmRestricted: isDrmRestricted,
+      );
+      return;
+    }
+
+    _loadingExternalState = null;
+    _evictSpecCacheForTrack(track);
+
+    final res = ap.handleAutoTrackUnplayable(track, message);
+    if (res.reachedFailureLimit) {
+      const limitMsg =
+          '連續 ${AutoplayController.maxConsecutiveAutoFailures} 首自動推薦曲目無法播放，已停止自動推薦';
+      _notifiedErrorForEpoch = taskEpoch;
+      if (resolvedSpec is! ExternalBackendSpec &&
+          _shouldOptimisticallyTouchNativeAudio(track)) {
+        audioService.failOptimisticTrackLoad(track, limitMsg);
+      } else if (!_stateController.isClosed) {
+        _stateController.add(
+          currentState.copyWith(
+            status: PlaybackStatus.error,
+            track: track,
+            lastError: limitMsg,
+          ),
+        );
+      }
+      onError?.call(track, limitMsg, isDrmRestricted);
+      return;
+    }
+
+    var nextTrack = res.nextTrack;
+    if (nextTrack == null && ap.enabled) {
+      await ap.maybeTriggerRefill();
+      if (_disposed || taskEpoch != _epoch) return;
+      nextTrack = ap.peekNextTrack();
+    }
+    if (nextTrack != null) {
+      await _playResolvedOrLocalTrack(nextTrack, debounce: false);
+      return;
+    }
+
+    if (resolvedSpec is! ExternalBackendSpec &&
+        _shouldOptimisticallyTouchNativeAudio(track)) {
+      audioService.failOptimisticTrackLoad(track, message);
     }
   }
 
@@ -1778,6 +2516,14 @@ class StreamingPlaybackCoordinator {
         _disposed || requestId != _epoch || cancel.isCancelled;
 
     if (isStale()) return;
+
+    _backendCancelSentForBurst = false;
+    _finalizeDeferredAutoplaySkip(track);
+
+    if (_isLocalTrack(track)) {
+      await audioService.play(track: track);
+      return;
+    }
 
     final resolveGen = ++_resolvingGeneration;
     _resolvingRequestId = requestId;
@@ -1888,9 +2634,7 @@ class StreamingPlaybackCoordinator {
     final completer = Completer<T>();
 
     void onCancel() {
-      if (!_useResolverPipeline) {
-        ytDlpService.cancelPlaybackProcesses(exceptRequestId: _epoch);
-      }
+      ytDlpService.cancelPlaybackProcesses(exceptRequestId: _epoch);
       if (!completer.isCompleted) {
         completer.completeError(
           const StreamingException('操作已取消', isCancelled: true),
@@ -2217,6 +2961,361 @@ class StreamingPlaybackCoordinator {
     }
   }
 
+  /// Unified idempotent track transition handler for gapless EOF swaps,
+  /// exclusive-mode reopens, zero-latency manual skips, and non-dual-deck EOFs.
+  TrackInfo onTrackTransitioned(
+    TrackInfo newTrack, {
+    bool backendInitiated = true,
+    bool userInitiatedSkip = false,
+    int? swapGeneration,
+    PlaybackState? sourceState,
+  }) {
+    if (_disposed) return newTrack;
+
+    final baseState = sourceState ?? currentState;
+    final effectiveSwapGen =
+        swapGeneration ?? sourceState?.swapGeneration ?? baseState.swapGeneration;
+    if (effectiveSwapGen < _lastObservedBackendSwapGen) {
+      _lastObservedBackendSwapGen = effectiveSwapGen;
+      _lastTransitionSwapGen = effectiveSwapGen;
+    }
+
+    final sameTrack = _tracksReferToSame(_lastTransitionTrack, newTrack);
+    final swapDidAdvance =
+        effectiveSwapGen > 0 && effectiveSwapGen > _lastTransitionSwapGen;
+    if (sameTrack && !swapDidAdvance) {
+      return _lastTransitionTrack ?? baseState.track ?? newTrack;
+    }
+
+    final effectiveUserSkip =
+        userInitiatedSkip ||
+        (_pendingUserInitiatedSkipTrackId != null &&
+            _tracksReferToSame(
+              TrackInfo(
+                id: _pendingUserInitiatedSkipTrackId!,
+                title: '',
+                artist: '',
+                album: '',
+                duration: Duration.zero,
+                format: newTrack.format,
+                providerName: newTrack.providerName,
+              ),
+              newTrack,
+            ));
+    if (effectiveUserSkip) {
+      _pendingUserInitiatedSkipTrackId = null;
+    }
+
+    // 1. Deduplication watermark.
+    if (effectiveSwapGen > _lastTransitionSwapGen) {
+      _lastTransitionSwapGen = effectiveSwapGen;
+    }
+    if (effectiveSwapGen > _lastObservedBackendSwapGen) {
+      _lastObservedBackendSwapGen = effectiveSwapGen;
+    }
+
+    // 2. Advance/pop AutoplayController (user_queue first else auto_queue[0])
+    //    and sync _sharedQueue / _sharedQueueIndex preserving rich metadata.
+    TrackInfo effectiveTrack = newTrack;
+    final ap = autoplayController;
+    if (ap != null) {
+      _suppressAutoplayChangeQueueEmit = true;
+      try {
+        effectiveTrack = ap.consumeTransitionedTrack(
+          newTrack,
+          userInitiatedSkip: effectiveUserSkip,
+          forceAdvance: swapDidAdvance,
+        );
+      } finally {
+        _suppressAutoplayChangeQueueEmit = false;
+      }
+      final combined = ap.combinedQueue;
+      if (combined.isNotEmpty) {
+        _sharedQueue
+          ..clear()
+          ..addAll(combined);
+        _sharedQueueIndex = _findTrackIndexInList(_sharedQueue, effectiveTrack);
+      }
+    } else {
+      if (_sharedQueue.isEmpty && audioService.queue.isNotEmpty) {
+        _sharedQueue
+          ..clear()
+          ..addAll(audioService.queue);
+      }
+      final idx = _findTrackIndexInList(_sharedQueue, newTrack);
+      if (idx >= 0) {
+        effectiveTrack = _mergeRichTrack(newTrack, _sharedQueue[idx]);
+        _sharedQueue[idx] = effectiveTrack;
+        _sharedQueueIndex = idx;
+      } else if (audioService.queue.isNotEmpty) {
+        final svcIdx = _findTrackIndexInList(audioService.queue, newTrack);
+        if (svcIdx >= 0) {
+          effectiveTrack = _mergeRichTrack(
+            newTrack,
+            audioService.queue[svcIdx],
+          );
+        }
+      }
+    }
+
+    _lastTransitionTrack = effectiveTrack;
+    _lastActivePlayingTrack = effectiveTrack;
+
+    // 3. Clear standby tracking & reset stable-play/lookahead so the new next
+    //    track prepares cleanly.
+    if (sourceState?.status == PlaybackStatus.playing) {
+      _handledEndedTrackId = null;
+      _handledEndedEpoch = -1;
+    }
+    _clearStandbyTracking();
+    _cancelStablePlayTimer();
+    _resetLookaheadCompleted();
+    _cancelLookaheadPrefetch();
+
+    // 4. Emit full PlaybackState, trackChangedStream, and queueUpdatedStream.
+    final shouldResetPos =
+        swapDidAdvance ||
+        (backendInitiated && _hadPreviousTransition) ||
+        baseState.position <= const Duration(milliseconds: 500);
+    _hadPreviousTransition = true;
+    final nextPos = shouldResetPos ? Duration.zero : baseState.position;
+    if (shouldResetPos) {
+      _pendingSwapZeroPosTrack = effectiveTrack;
+      _pendingSwapZeroPosGen = effectiveSwapGen;
+      _pendingSwapInitialPos =
+          (baseState.position > Duration.zero &&
+              baseState.position <= const Duration(milliseconds: 500))
+          ? baseState.position
+          : null;
+    } else {
+      _pendingSwapZeroPosTrack = null;
+      _pendingSwapZeroPosGen = -1;
+      _pendingSwapInitialPos = null;
+    }
+
+    final emittedState = baseState.copyWith(
+      track: effectiveTrack,
+      position: nextPos,
+      swapGeneration: effectiveSwapGen,
+      clearLastError: baseState.status != PlaybackStatus.error,
+    );
+    _latestCoordinatorState = emittedState;
+
+    if (!_stateController.isClosed) {
+      _stateController.add(emittedState);
+    }
+    if (!_positionController.isClosed) {
+      _positionController.add(nextPos);
+    }
+    if (!_trackChangedController.isClosed) {
+      _trackChangedController.add(effectiveTrack);
+    }
+    if (!_queueUpdatedController.isClosed) {
+      _queueUpdatedController.add(List<TrackInfo>.unmodifiable(queue));
+    }
+
+    // 5. Trigger refill if needed and re-arm stable play / pre-resolve next.
+    if (ap != null) {
+      ap.onPlaybackProgress(effectiveTrack, nextPos);
+      if (ap.needsRefill) {
+        unawaited(ap.maybeTriggerRefill());
+      }
+    }
+    _syncStablePlayTimer(emittedState);
+    _maybePreResolveNext(emittedState, nextPos);
+
+    return effectiveTrack;
+  }
+
+  /// Evaluates state updates for track transitions, returning `true` when
+  /// [onTrackTransitioned] already emitted state/streams and armed timers.
+  bool _processStateTransitionOrEnd(PlaybackState state) {
+    if (_disposed) return false;
+    final ap = autoplayController;
+
+    if (state.swapGeneration < _lastObservedBackendSwapGen) {
+      _lastObservedBackendSwapGen = state.swapGeneration;
+      _lastTransitionSwapGen = state.swapGeneration;
+    }
+
+    final track = state.track;
+    final swapIncremented =
+        state.swapGeneration > 0 &&
+        state.swapGeneration > _lastObservedBackendSwapGen;
+    final playingTrackChanged =
+        state.status == PlaybackStatus.playing &&
+        track != null &&
+        !_tracksReferToSame(_lastActivePlayingTrack, track);
+
+    if (track != null &&
+        ((state.status == PlaybackStatus.playing &&
+                (swapIncremented || playingTrackChanged)) ||
+            (swapIncremented &&
+                state.status != PlaybackStatus.stopped &&
+                state.status != PlaybackStatus.error &&
+                state.status != PlaybackStatus.uninitialized))) {
+      onTrackTransitioned(
+        track,
+        backendInitiated: true,
+        swapGeneration: state.swapGeneration,
+        sourceState: state,
+      );
+      return true;
+    }
+
+    if (state.status == PlaybackStatus.playing && track != null) {
+      _handledEndedTrackId = null;
+      _handledEndedEpoch = -1;
+      if (_pendingSwapZeroPosTrack != null && state.position > Duration.zero) {
+        _pendingSwapZeroPosTrack = null;
+        _pendingSwapZeroPosGen = -1;
+      }
+      ap?.onPlaybackProgress(track, state.position);
+      return false;
+    }
+
+    if (state.status == PlaybackStatus.stopped ||
+        state.status == PlaybackStatus.uninitialized) {
+      _lastActivePlayingTrack = null;
+      _lastTransitionTrack = null;
+      _pendingSwapZeroPosTrack = null;
+      _pendingSwapZeroPosGen = -1;
+      return false;
+    }
+
+    if (state.status == PlaybackStatus.ended && ap != null) {
+      final endedTrack = track ?? ap.currentTrack ?? currentState.track;
+      if (endedTrack != null) {
+        final activeTrack = ap.currentTrack;
+        final isStaleEndedTrack =
+            activeTrack != null && !_tracksReferToSame(activeTrack, endedTrack);
+        final isAlreadyHandled =
+            _handledEndedTrackId == endedTrack.id &&
+            (_handledEndedEpoch == _epoch || _resolvingRequestId != null);
+        if (!isStaleEndedTrack && !isAlreadyHandled) {
+          _handledEndedTrackId = endedTrack.id;
+          _handledEndedEpoch = _epoch;
+          _lastActivePlayingTrack = null;
+          unawaited(_advanceAfterTrackEnded(endedTrack, _epoch));
+        }
+      }
+    }
+    return false;
+  }
+
+  PlaybackState _enrichStateFromCoordinator(PlaybackState state) {
+    final track = state.track;
+    final latest = _latestCoordinatorState;
+    if (track == null ||
+        latest?.track == null ||
+        !_tracksReferToSame(track, latest!.track)) {
+      _latestCoordinatorState = state;
+      return state;
+    }
+    final mergedTrack = _mergeRichTrack(track, latest.track);
+    final effSwap = state.swapGeneration > latest.swapGeneration
+        ? state.swapGeneration
+        : latest.swapGeneration;
+    final enriched = state.copyWith(
+      track: mergedTrack,
+      swapGeneration: effSwap,
+    );
+    _latestCoordinatorState = enriched;
+    return enriched;
+  }
+
+  Future<void> _advanceAfterTrackEnded(
+    TrackInfo endedTrack,
+    int endedEpoch,
+  ) async {
+    final ap = autoplayController;
+    if (_disposed || ap == null || endedEpoch != _epoch) return;
+    var nextTrack = ap.peekNextTrack();
+    if (nextTrack == null && ap.enabled) {
+      await ap.maybeTriggerRefill(
+        seedOverride: TrackMetadata.fromTrackInfo(endedTrack),
+      );
+      if (_disposed || endedEpoch != _epoch) return;
+      nextTrack = ap.peekNextTrack();
+    }
+    if (nextTrack == null) return;
+    final effectiveNext = onTrackTransitioned(
+      nextTrack,
+      backendInitiated: true,
+      userInitiatedSkip: false,
+      sourceState: currentState.copyWith(
+        status: PlaybackStatus.loading,
+        track: nextTrack,
+        position: Duration.zero,
+        clearLastError: true,
+      ),
+    );
+    await _playResolvedOrLocalTrack(effectiveNext, debounce: false);
+  }
+
+  Future<void> _handleAutoTrackRuntimeError(
+    TrackInfo errTrack,
+    int errorEpoch,
+    String msg,
+  ) async {
+    final ap = autoplayController;
+    if (_disposed || ap == null || errorEpoch != _epoch) return;
+    final res = ap.handleAutoTrackUnplayable(errTrack, msg);
+    if (res.reachedFailureLimit) {
+      onError?.call(
+        errTrack,
+        '連續 ${AutoplayController.maxConsecutiveAutoFailures} 首自動推薦曲目無法播放，已停止自動推薦',
+        false,
+      );
+      return;
+    }
+    var nextTrack = res.nextTrack;
+    if (nextTrack == null && ap.enabled) {
+      await ap.maybeTriggerRefill();
+      if (_disposed || errorEpoch != _epoch) return;
+      nextTrack = ap.peekNextTrack();
+    }
+    if (nextTrack != null) {
+      await _playResolvedOrLocalTrack(nextTrack, debounce: false);
+    }
+  }
+
+  bool _isStaleBackendState(PlaybackState state) {
+    if (_epoch <= 0) return false;
+    if (state.playbackEpoch > 0 && state.playbackEpoch < _epoch) {
+      return true;
+    }
+    final pendingId = _pendingOptimisticTrackId;
+    if (_pendingOptimisticEpoch == _epoch && pendingId != null) {
+      final matchesPending =
+          state.track != null &&
+          _tracksReferToSame(state.track, _latestCoordinatorState?.track);
+      if (!matchesPending && state.playbackEpoch < _epoch) {
+        return true;
+      }
+      if (!matchesPending &&
+          state.playbackEpoch == 0 &&
+          (_debounceTimer != null || _resolvingRequestId == _epoch)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _maybeClearPendingOptimistic(PlaybackState state) {
+    if (_pendingOptimisticTrackId == null) return;
+    if (state.status == PlaybackStatus.playing ||
+        state.status == PlaybackStatus.error) {
+      final matchesPending =
+          state.track != null &&
+          _tracksReferToSame(state.track, _latestCoordinatorState?.track);
+      if (matchesPending || state.playbackEpoch >= _epoch) {
+        _pendingOptimisticTrackId = null;
+        _pendingOptimisticEpoch = -1;
+      }
+    }
+  }
+
   void _handleBackendStateUpdate(
     PlaybackBackend source,
     PlaybackState state,
@@ -2228,39 +3327,62 @@ class StreamingPlaybackCoordinator {
     if (_activeBackend != null && !identical(_activeBackend, source)) {
       return;
     }
-    if (identical(source, _nativeBackend) &&
-        state.status == PlaybackStatus.playing &&
-        state.track != null &&
+    if (_isStaleBackendState(state)) {
+      return;
+    }
+    _maybeClearPendingOptimistic(state);
+
+    final transitionHandled = _processStateTransitionOrEnd(state);
+    if (transitionHandled) {
+      return;
+    }
+
+    final ap = autoplayController;
+    final enrichedState = _enrichStateFromCoordinator(state);
+    if (ap != null) {
+      if (enrichedState.status == PlaybackStatus.playing &&
+          enrichedState.track != null) {
+        final combined = ap.combinedQueue;
+        if (combined.isNotEmpty) {
+          _sharedQueue
+            ..clear()
+            ..addAll(combined);
+          _sharedQueueIndex = _findTrackIndexInList(
+            _sharedQueue,
+            enrichedState.track!,
+          );
+        }
+      }
+    } else if (identical(source, _nativeBackend) &&
+        enrichedState.status == PlaybackStatus.playing &&
+        enrichedState.track != null &&
         _sharedQueue.isNotEmpty) {
-      final idx = PlaybackPersistenceService.findTrackIndex(
-        _sharedQueue,
-        state.track!,
-      );
+      final idx = _findTrackIndexInList(_sharedQueue, enrichedState.track!);
       if (idx >= 0) {
         _sharedQueueIndex = idx;
       } else if (audioService.queue.isNotEmpty) {
         _sharedQueue
           ..clear()
           ..addAll(audioService.queue);
-        _sharedQueueIndex = PlaybackPersistenceService.findTrackIndex(
+        _sharedQueueIndex = _findTrackIndexInList(
           _sharedQueue,
-          state.track!,
+          enrichedState.track!,
         );
       } else {
         clearSharedQueue();
       }
     }
     if (!_stateController.isClosed) {
-      _stateController.add(state);
+      _stateController.add(enrichedState);
     }
     if (identical(source, _externalBackend) && !_positionController.isClosed) {
-      _positionController.add(state.position);
+      _positionController.add(enrichedState.position);
     }
-    if (state.status == PlaybackStatus.error) {
-      final errTrack = state.track;
+    if (enrichedState.status == PlaybackStatus.error) {
+      final errTrack = enrichedState.track;
       if (errTrack != null && _resolverRegistry.hasStreamingMapping(errTrack)) {
         _evictSpecCacheForTrack(errTrack);
-        final rawErr = state.lastError?.trim();
+        final rawErr = enrichedState.lastError?.trim();
         final svcErr = audioService.lastError?.trim();
         final msg = (rawErr != null && rawErr.isNotEmpty)
             ? rawErr
@@ -2279,20 +3401,31 @@ class StreamingPlaybackCoordinator {
             );
           }
         }
-        if (_epoch > 0 && _notifiedErrorForEpoch != _epoch) {
+        if (ap != null && ap.isAutoTrack(errTrack.id)) {
+          if (_notifiedErrorForEpoch != _epoch) {
+            _notifiedErrorForEpoch = _epoch;
+            unawaited(_handleAutoTrackRuntimeError(errTrack, _epoch, msg));
+          }
+        } else if (_epoch > 0 && _notifiedErrorForEpoch != _epoch) {
           _notifiedErrorForEpoch = _epoch;
           onError?.call(errTrack, msg, false);
         }
       }
     }
-    _syncStablePlayTimer(state);
-    _maybePreResolveNext(state, state.position);
+    _syncStablePlayTimer(enrichedState);
+    _maybePreResolveNext(enrichedState, enrichedState.position);
   }
 
   void _handleStateUpdate(PlaybackState state) {
     if (_disposed) return;
-    if (!_stateController.isClosed) {
-      _stateController.add(state);
+    if (_isStaleBackendState(state)) return;
+    _maybeClearPendingOptimistic(state);
+    final transitionHandled = _processStateTransitionOrEnd(state);
+    if (!transitionHandled) {
+      final enrichedState = _enrichStateFromCoordinator(state);
+      if (!_stateController.isClosed) {
+        _stateController.add(enrichedState);
+      }
     }
     if (state.status == PlaybackStatus.paused ||
         state.status == PlaybackStatus.stopped ||
@@ -2351,22 +3484,46 @@ class StreamingPlaybackCoordinator {
 
         _activeYtmAttempt = null;
         _activeTidalDashAttempt = null;
-        if (_epoch > 0 && _notifiedErrorForEpoch != _epoch) {
+        final ap = autoplayController;
+        if (ap != null && ap.isAutoTrack(errTrack.id)) {
+          if (_notifiedErrorForEpoch != _epoch) {
+            _notifiedErrorForEpoch = _epoch;
+            unawaited(_handleAutoTrackRuntimeError(errTrack, _epoch, msg));
+          }
+        } else if (_epoch > 0 && _notifiedErrorForEpoch != _epoch) {
           _notifiedErrorForEpoch = _epoch;
           onError?.call(errTrack, msg, false);
         }
       }
     }
-    _maybePreResolveNext(state, state.position);
+    if (!transitionHandled) {
+      _maybePreResolveNext(currentState, state.position);
+    }
   }
 
   void _handlePositionTick(Duration position) {
     if (_disposed) return;
     if (isExternalBackendActive) return;
+    if (_pendingSwapZeroPosTrack != null) {
+      if (_pendingSwapInitialPos != null &&
+          position == _pendingSwapInitialPos) {
+        _pendingSwapInitialPos = null;
+        return;
+      }
+      if (position > Duration.zero) {
+        _pendingSwapZeroPosTrack = null;
+        _pendingSwapZeroPosGen = -1;
+        _pendingSwapInitialPos = null;
+      }
+    }
     if (!_positionController.isClosed) {
       _positionController.add(position);
     }
-    _maybePreResolveNext(currentState, position);
+    final cur = currentState;
+    if (cur.status == PlaybackStatus.playing && cur.track != null) {
+      autoplayController?.onPlaybackProgress(cur.track!, position);
+    }
+    _maybePreResolveNext(cur, position);
   }
 
   String? _tryExtractYtmVideoId(TrackInfo track) =>
@@ -2464,7 +3621,23 @@ class StreamingPlaybackCoordinator {
 
     final nextKey = _tryDeriveKey(nextTrack);
     if (nextKey == null) return;
-    if (streamingManager.isPlaybackAuthBlocked(nextKey.providerId)) return;
+    if (streamingManager.isPlaybackAuthBlocked(nextKey.providerId)) {
+      if (autoplayController != null &&
+          autoplayController!.isAutoTrack(nextTrack.id)) {
+        _attemptedStandbyTrackId = nextTrack.id;
+        _attemptedStandbyEpoch = expectedEpoch;
+        _handleStandbyAutoTrackFailure(
+          nextTrack,
+          expectedEpoch,
+          StreamingException(
+            '授權已失效（${nextKey.providerId}）',
+            statusCode: 401,
+            isTokenExpired: true,
+          ),
+        );
+      }
+      return;
+    }
     final resolver = _resolverRegistry.resolverFor(nextKey.providerId);
     if (resolver == null) return;
 
@@ -2546,14 +3719,57 @@ class StreamingPlaybackCoordinator {
       _preparedStandbyEpoch = expectedEpoch;
       _preparedStandbySpec = spec;
       await _prepareNativeBackendStandby(spec, resolvedTrack, expectedEpoch);
-    } catch (_) {
-      // Pre-decode failures and cancellations are silent; manual skip falls back.
+    } catch (e) {
+      if (_disposed || cancel.isCancelled || expectedEpoch != _epoch) {
+        return;
+      }
+      if (e is StreamingException && e.isCancelled) {
+        return;
+      }
+      _handleStandbyAutoTrackFailure(nextTrack, expectedEpoch, e);
     } finally {
       timeoutTimer?.cancel();
       _inFlightPreResolves.remove(nextTrack.id);
       final current = _preResolveCancelTokens[nextTrack.id];
       if (current != null && identical(current.token, cancel)) {
         _preResolveCancelTokens.remove(nextTrack.id);
+      }
+    }
+  }
+
+  void _handleStandbyAutoTrackFailure(
+    TrackInfo failedTrack,
+    int expectedEpoch,
+    Object error,
+  ) {
+    final ap = autoplayController;
+    if (ap == null || !ap.isAutoTrack(failedTrack.id)) return;
+    _evictSpecCacheForTrack(failedTrack);
+    final res = ap.handleAutoTrackUnplayable(failedTrack, '$error');
+    if (res.reachedFailureLimit) {
+      _notifiedErrorForEpoch = expectedEpoch;
+      onError?.call(
+        failedTrack,
+        '連續 ${AutoplayController.maxConsecutiveAutoFailures} 首自動推薦曲目無法播放，已停止自動推薦',
+        false,
+      );
+      return;
+    }
+    final replacement = res.nextTrack;
+    if (replacement != null &&
+        !_disposed &&
+        expectedEpoch == _epoch &&
+        replacement.id != failedTrack.id) {
+      if (_isExternalTrack(replacement)) {
+        _prepareExternalHandoffForNext(
+          replacement,
+          expectedEpoch: expectedEpoch,
+        );
+      } else {
+        _prepareNativeStandbyForNext(
+          replacement,
+          expectedEpoch: expectedEpoch,
+        );
       }
     }
   }
@@ -2566,12 +3782,15 @@ class StreamingPlaybackCoordinator {
     if (_disposed || expectedEpoch != _epoch) return;
     try {
       await _nativeBackend.prepareStandby(spec, track, epoch: expectedEpoch);
-    } catch (_) {
+    } catch (e) {
       if (_preparedStandbyTrackId == track.id &&
           _preparedStandbyEpoch == expectedEpoch) {
         _preparedStandbyTrackId = null;
         _preparedStandbyEpoch = -1;
         _preparedStandbySpec = null;
+      }
+      if (!_disposed && expectedEpoch == _epoch) {
+        _handleStandbyAutoTrackFailure(track, expectedEpoch, e);
       }
     }
   }
@@ -2583,25 +3802,33 @@ class StreamingPlaybackCoordinator {
     if (currentTrack == null) return;
     if (position < Duration.zero) return;
 
-    final activeQueue = queue;
-    if (activeQueue.length <= 1) return;
+    final TrackInfo nextTrack;
+    final ap = autoplayController;
+    if (ap != null && ap.enabled) {
+      final peeked = ap.peekNextTrack();
+      if (peeked == null || peeked.id == currentTrack.id) return;
+      nextTrack = peeked;
+    } else {
+      final activeQueue = queue;
+      if (activeQueue.length <= 1) return;
 
-    int idx = -1;
-    if (_sharedQueue.isNotEmpty &&
-        _sharedQueueIndex >= 0 &&
-        _sharedQueueIndex < activeQueue.length &&
-        activeQueue[_sharedQueueIndex].id == currentTrack.id) {
-      idx = _sharedQueueIndex;
-    }
-    if (idx < 0) {
-      idx = PlaybackPersistenceService.findTrackIndex(
-        activeQueue,
-        currentTrack,
-      );
-    }
-    if (idx < 0) return;
+      int idx = -1;
+      if (_sharedQueue.isNotEmpty &&
+          _sharedQueueIndex >= 0 &&
+          _sharedQueueIndex < activeQueue.length &&
+          activeQueue[_sharedQueueIndex].id == currentTrack.id) {
+        idx = _sharedQueueIndex;
+      }
+      if (idx < 0) {
+        idx = PlaybackPersistenceService.findTrackIndex(
+          activeQueue,
+          currentTrack,
+        );
+      }
+      if (idx < 0) return;
 
-    final nextTrack = activeQueue[(idx + 1) % activeQueue.length];
+      nextTrack = activeQueue[(idx + 1) % activeQueue.length];
+    }
     final withinEndWindow = shouldTriggerPreDecode(
       position,
       currentTrack.duration,
@@ -2699,6 +3926,8 @@ class StreamingPlaybackCoordinator {
     _nativeStateSub = null;
     _externalStateSub?.cancel();
     _externalStateSub = null;
+    _autoplayChangesSub?.cancel();
+    _autoplayChangesSub = null;
     if (_ownsExternalBackend) {
       _externalBackend.dispose();
     }
@@ -2707,6 +3936,12 @@ class StreamingPlaybackCoordinator {
     }
     if (!_stateController.isClosed) {
       unawaited(_stateController.close());
+    }
+    if (!_trackChangedController.isClosed) {
+      unawaited(_trackChangedController.close());
+    }
+    if (!_queueUpdatedController.isClosed) {
+      unawaited(_queueUpdatedController.close());
     }
     audioService.setStreamingTrackHandler(null);
     audioService.setPlaybackInterruptHandler(null);
@@ -2756,6 +3991,11 @@ class CoordinatingAudioService
     required this.coordinator,
     this.disposeInner = false,
   }) {
+    coordinator.streamingManager.onCatalogSynced ??= (providerId, catalog) async {
+      await inner.ingestExternalCatalog(
+        ExternalCatalogIngestBatch.fromStreamingCatalog(providerId, catalog),
+      );
+    };
     _wasExternalActive = coordinator.isExternalBackendActive;
     _coordinatorStateSub = coordinator.stateStream.listen((state) {
       if (_disposed) return;
@@ -2821,6 +4061,11 @@ class CoordinatingAudioService
   @override
   Stream<Duration> get positionStream => _positionController.stream;
 
+  Stream<TrackInfo> get trackChangedStream => coordinator.trackChangedStream;
+
+  Stream<List<TrackInfo>> get queueUpdatedStream =>
+      coordinator.queueUpdatedStream;
+
   @override
   bool get isNativeBound => inner.isNativeBound;
 
@@ -2843,6 +4088,8 @@ class CoordinatingAudioService
 
   @override
   List<TrackInfo> get queue => coordinator.queue;
+
+  AutoplayController? get autoplayController => coordinator.autoplayController;
 
   @override
   Map<String, PlaybackState> get devicePlaybackStates =>
@@ -2921,7 +4168,26 @@ class CoordinatingAudioService
         );
       }
       await coordinator.stopExternalIfActive();
-      if (coordinator.hasSharedQueue &&
+      final ap = coordinator.autoplayController;
+      if (ap != null) {
+        if (PlaybackPersistenceService.findTrackIndex(
+              ap.combinedQueue,
+              track,
+            ) >=
+            0) {
+          ap.advanceToTrack(track);
+        } else {
+          ap.setUserQueue(
+            <TrackInfo>[track],
+            currentTrack: track,
+            currentIndex: 0,
+            bumpEpoch: true,
+          );
+          if (ap.needsRefill) {
+            unawaited(ap.maybeTriggerRefill());
+          }
+        }
+      } else if (coordinator.hasSharedQueue &&
           PlaybackPersistenceService.findTrackIndex(
                 coordinator.queue,
                 track,
@@ -2929,12 +4195,32 @@ class CoordinatingAudioService
               0) {
         coordinator.clearSharedQueue();
       }
+      if (StreamingPlaybackCoordinator._isLocalTrack(track)) {
+        final effectiveQueue = coordinator.queue.isNotEmpty
+            ? List<TrackInfo>.from(coordinator.queue)
+            : null;
+        return coordinator.playTrack(track, queueContext: effectiveQueue);
+      }
       return inner.play(track: track);
     }
     if (coordinator.isExternalBackendActive) {
       return coordinator.resume();
     }
     return inner.play();
+  }
+
+  @override
+  Future<void> skipToTrack(TrackInfo track, {List<TrackInfo>? queueContext}) {
+    final effectiveQueue = queueContext ??
+        (coordinator.queue.isNotEmpty
+            ? List<TrackInfo>.from(coordinator.queue)
+            : null);
+    return coordinator.playTrack(
+      track,
+      queueContext: effectiveQueue,
+      adaptiveSkipDebounce: true,
+      userInitiatedSkip: true,
+    );
   }
 
   @override
@@ -2980,6 +4266,26 @@ class CoordinatingAudioService
   }
 
   @override
+  Future<void> playStreamSpecWithOptions(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+    bool debounced = false,
+  }) {
+    if (spec is ExternalBackendSpec) {
+      throw StateError(
+        'ExternalBackendSpec (${spec.providerId}) cannot enter Native AudioService',
+      );
+    }
+    return inner.playStreamSpecWithOptions(
+      track,
+      spec,
+      epoch: epoch,
+      debounced: debounced,
+    );
+  }
+
+  @override
   Future<void> prepareStandbySpecAsync(
     TrackInfo track,
     StreamSourceSpec spec, {
@@ -3016,6 +4322,13 @@ class CoordinatingAudioService
   @override
   void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) =>
       inner.beginOptimisticTrackLoad(track, queue: queue);
+
+  @override
+  void beginOptimisticTrackLoadAtEpoch(
+    TrackInfo track, {
+    List<TrackInfo>? queue,
+    required int epoch,
+  }) => inner.beginOptimisticTrackLoadAtEpoch(track, queue: queue, epoch: epoch);
 
   @override
   void failOptimisticTrackLoad(TrackInfo track, String message) =>
@@ -3320,6 +4633,71 @@ class CoordinatingAudioService
     pin: pin,
     allowSelfSignedTls: allowSelfSignedTls,
   );
+
+  @override
+  Stream<ScanProgressEvent> get scanProgressStream => inner.scanProgressStream;
+
+  @override
+  Future<String?> startDirectoryScan(String path, {bool force = false}) =>
+      inner.startDirectoryScan(path, force: force);
+
+  @override
+  Future<List<WatchedRootRecord>> listWatchedRoots() =>
+      inner.listWatchedRoots();
+
+  @override
+  Future<WatchedRootRecord?> addWatchedRoot(
+    String rootPath, {
+    WatchMode watchMode = WatchMode.nativeOs,
+    int pollIntervalSec = 300,
+  }) => inner.addWatchedRoot(
+    rootPath,
+    watchMode: watchMode,
+    pollIntervalSec: pollIntervalSec,
+  );
+
+  @override
+  Future<bool> removeWatchedRoot(String rootPath) =>
+      inner.removeWatchedRoot(rootPath);
+
+  @override
+  Future<List<SkippedFileRecord>> getSkippedFiles({
+    bool includeDismissed = false,
+  }) => inner.getSkippedFiles(includeDismissed: includeDismissed);
+
+  @override
+  Future<bool> dismissSkippedFile(String skippedId) =>
+      inner.dismissSkippedFile(skippedId);
+
+  @override
+  Future<Map<String, dynamic>> retrySkippedFile(String skippedId) =>
+      inner.retrySkippedFile(skippedId);
+
+  @override
+  Future<bool> setMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+    dynamic value,
+  ) => inner.setMetadataOverride(entityType, entityId, fieldName, value);
+
+  @override
+  Future<bool> clearMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+  ) => inner.clearMetadataOverride(entityType, entityId, fieldName);
+
+  @override
+  Future<List<MetadataOverrideRecord>> getMetadataOverrides(
+    String entityType,
+    String entityId,
+  ) => inner.getMetadataOverrides(entityType, entityId);
+
+  @override
+  Future<Map<String, int>> ingestExternalCatalog(
+    ExternalCatalogIngestBatch batch,
+  ) => inner.ingestExternalCatalog(batch);
 
   @override
   Future<void> switchToLocalMode() => inner.switchToLocalMode();

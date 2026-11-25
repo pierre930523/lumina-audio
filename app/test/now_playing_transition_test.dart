@@ -4,8 +4,8 @@ import 'package:lumina_app/models/signal_path.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
 import 'package:lumina_app/services/now_playing_view_controller.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
+import 'package:lumina_app/ui/common/audio_quality_badge.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
-import 'package:lumina_app/ui/signal_path/quality_badge.dart';
 import 'package:material_ui/material_ui.dart';
 
 Widget _buildTestApp({
@@ -67,7 +67,7 @@ void main() {
           find.byKey(const ValueKey('now_playing_hero_metadata')),
           findsOneWidget,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
 
         final initialCoverWidget = tester.widget(find.byType(AlbumArtworkView));
 
@@ -83,7 +83,7 @@ void main() {
           find.byKey(const ValueKey('now_playing_hero_metadata')),
           findsOneWidget,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
 
         // Confirm identical persistent instance (zero rebuild churn during animation)
         final midCoverWidget = tester.widget(find.byType(AlbumArtworkView));
@@ -98,7 +98,7 @@ void main() {
           find.byKey(const ValueKey('now_playing_hero_metadata')),
           findsOneWidget,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
 
         final endCoverWidget = tester.widget(find.byType(AlbumArtworkView));
         expect(identical(initialCoverWidget, endCoverWidget), isTrue);
@@ -115,7 +115,7 @@ void main() {
           find.byKey(const ValueKey('now_playing_hero_metadata')),
           findsOneWidget,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
         expect(
           identical(initialCoverWidget, tester.widget(find.byType(AlbumArtworkView))),
           isTrue,
@@ -130,7 +130,7 @@ void main() {
           find.byKey(const ValueKey('now_playing_hero_metadata')),
           findsOneWidget,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
       },
     );
   });

@@ -296,6 +296,20 @@ impl fmt::Display for DeckState {
     }
 }
 
+/// Track metadata associated with an active or standby playback deck.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DeckTrackMetadata {
+    pub track_id: String,
+    pub provider_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
 /// Snapshot of the dual-deck engine state, standby readiness, and transition telemetry.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DualDeckStatusSnapshot {
@@ -308,6 +322,12 @@ pub struct DualDeckStatusSnapshot {
     pub gapless_transitions: u64,
     pub manual_zero_latency_switches: u64,
     pub format_mismatch_recoveries: u64,
+    #[serde(default)]
+    pub swap_generation: u64,
+    #[serde(default)]
+    pub playback_epoch: u64,
+    #[serde(default)]
+    pub active_track: Option<DeckTrackMetadata>,
 }
 
 pub const L2_MIN_TARGET_BYTES: u64 = 524_288;
@@ -965,6 +985,15 @@ mod tests {
             DeckState::Recovering403
         );
 
+        let track_meta = DeckTrackMetadata {
+            track_id: "200".to_string(),
+            provider_id: "qobuz".to_string(),
+            title: "Track 200".to_string(),
+            artist: "Artist B".to_string(),
+            album: "Album B".to_string(),
+            cover_url: Some("https://cdn.example.com/200.jpg".to_string()),
+            duration_ms: 215_000,
+        };
         let snapshot = DualDeckStatusSnapshot {
             active_deck: DeckId::DeckB,
             deck_a_state: DeckState::StandbyReady,
@@ -975,10 +1004,29 @@ mod tests {
             gapless_transitions: 4,
             manual_zero_latency_switches: 2,
             format_mismatch_recoveries: 1,
+            swap_generation: 3,
+            playback_epoch: 7,
+            active_track: Some(track_meta),
         };
         let snap_json = serde_json::to_string(&snapshot).unwrap();
         let snap_back: DualDeckStatusSnapshot = serde_json::from_str(&snap_json).unwrap();
         assert_eq!(snap_back, snapshot);
+
+        let legacy_snap_json = r#"{
+            "active_deck": "deck_a",
+            "deck_a_state": "PLAYING",
+            "deck_b_state": "IDLE",
+            "deck_a_key": null,
+            "deck_b_key": null,
+            "standby_buffered_ms": 0,
+            "gapless_transitions": 0,
+            "manual_zero_latency_switches": 0,
+            "format_mismatch_recoveries": 0
+        }"#;
+        let legacy_back: DualDeckStatusSnapshot = serde_json::from_str(legacy_snap_json).unwrap();
+        assert_eq!(legacy_back.swap_generation, 0);
+        assert_eq!(legacy_back.playback_epoch, 0);
+        assert_eq!(legacy_back.active_track, None);
     }
 
     #[test]

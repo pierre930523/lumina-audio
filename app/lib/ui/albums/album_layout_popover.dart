@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../services/album_layout_settings_controller.dart';
 import '../../services/escape_dismiss_registry.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 import '../theme/responsive_layout.dart';
 
@@ -184,32 +185,35 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
                   ),
                   child: SizedBox(
                     width: clamp.width,
-                    child: Material(
-                      key: const Key('album_layout_popover'),
-                      color: LuminaTokens.cardElevatedBg,
-                      elevation: 16,
-                      shadowColor: const Color(0xAA000000),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(
-                          LuminaTokens.radiusMd,
-                        ),
-                        side: BorderSide(
-                          color: LuminaTokens.borderControl.withValues(
-                            alpha: 0.8,
-                          ),
-                        ),
+                    child: FrostedGlassContainer(
+                      blurSigma: LuminaTokens.glassDialogBlur,
+                      color: LuminaTokens.glassDialogBg,
+                      borderRadius: BorderRadius.circular(
+                        LuminaTokens.radiusLg,
                       ),
-                      clipBehavior: Clip.antiAlias,
-                      child: ListenableBuilder(
-                        listenable: widget.controller,
-                        builder: (context, _) {
-                          return SingleChildScrollView(
-                            padding: const EdgeInsets.all(
-                              LuminaTokens.spaceMd,
-                            ),
-                            child: _buildPopoverContent(context),
-                          );
-                        },
+                      border: Border.all(color: LuminaTokens.glassCardBorder),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x99000000),
+                          blurRadius: 28,
+                          offset: Offset(0, 12),
+                        ),
+                      ],
+                      child: Material(
+                        key: const Key('album_layout_popover'),
+                        type: MaterialType.transparency,
+                        clipBehavior: Clip.antiAlias,
+                        child: ListenableBuilder(
+                          listenable: widget.controller,
+                          builder: (context, _) {
+                            return SingleChildScrollView(
+                              padding: const EdgeInsets.all(
+                                LuminaTokens.spaceMd,
+                              ),
+                              child: _buildPopoverContent(context),
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
@@ -255,8 +259,8 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
               padding: EdgeInsets.zero,
               style: IconButton.styleFrom(
-                foregroundColor: LuminaTokens.textSecondary,
-                hoverColor: LuminaTokens.cardHoverBg,
+                foregroundColor: LuminaTokens.glassTextSecondary,
+                hoverColor: LuminaTokens.glassRowHoverBg,
                 focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
               ).copyWith(
                 mouseCursor: const WidgetStatePropertyAll(
@@ -269,7 +273,7 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
           ],
         ),
         const Divider(
-          color: LuminaTokens.borderSubtle,
+          color: LuminaTokens.glassCardDivider,
           height: LuminaTokens.spaceMd,
         ),
 
@@ -290,7 +294,7 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
                 '每行 $columnCount 欄',
                 key: const Key('text_album_layout_columns'),
                 style: const TextStyle(
-                  color: LuminaTokens.accentBlue,
+                  color: LuminaTokens.glassTextPrimary,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
@@ -340,9 +344,9 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
             Expanded(
               child: SliderTheme(
                 data: SliderTheme.of(context).copyWith(
-                  activeTrackColor: LuminaTokens.accentBlue,
-                  inactiveTrackColor: LuminaTokens.borderControl,
-                  thumbColor: LuminaTokens.textPrimary,
+                  activeTrackColor: LuminaTokens.glassTextPrimary,
+                  inactiveTrackColor: LuminaTokens.glassTrackUnplayed,
+                  thumbColor: Colors.white,
                   overlayColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
                   trackHeight: 3,
                   thumbShape: const RoundSliderThumbShape(
@@ -467,7 +471,7 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
           ],
         ),
         const Divider(
-          color: LuminaTokens.borderSubtle,
+          color: LuminaTokens.glassCardDivider,
           height: LuminaTokens.spaceLg,
         ),
 
@@ -490,15 +494,6 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
             Switch(
               key: const Key('switch_album_card_container'),
               value: controller.showCardContainer,
-              activeTrackColor: LuminaTokens.accentBlueStrong,
-              activeThumbColor: LuminaTokens.textPrimary,
-              inactiveThumbColor: LuminaTokens.textSecondary,
-              inactiveTrackColor: LuminaTokens.canvasBg,
-              trackOutlineColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.focused)
-                    ? LuminaTokens.focusRing
-                    : LuminaTokens.borderControl,
-              ),
               mouseCursor: SystemMouseCursors.click,
               onChanged: controller.setShowCardContainer,
             ),
@@ -510,8 +505,9 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
         OutlinedButton.icon(
           key: const Key('btn_album_layout_reset'),
           style: OutlinedButton.styleFrom(
-            foregroundColor: LuminaTokens.textPrimary,
-            side: const BorderSide(color: LuminaTokens.borderControl),
+            backgroundColor: LuminaTokens.glassPillBg,
+            foregroundColor: LuminaTokens.glassTextPrimary,
+            side: const BorderSide(color: LuminaTokens.glassPillBorder),
             padding: const EdgeInsets.symmetric(
               horizontal: LuminaTokens.spaceSm,
               vertical: LuminaTokens.spaceXs,
@@ -534,13 +530,13 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: _isOpen
-              ? LuminaTokens.accentBlue.withValues(alpha: 0.16)
-              : LuminaTokens.cardElevatedBg,
+              ? LuminaTokens.glassNavActiveBg
+              : LuminaTokens.glassPillBg,
           borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
           border: Border.all(
             color: _isOpen
-                ? LuminaTokens.accentBlue
-                : LuminaTokens.borderControl,
+                ? LuminaTokens.glassCoverRim
+                : LuminaTokens.glassPillBorder,
           ),
         ),
         child: IconButton(
@@ -551,9 +547,9 @@ class _AlbumLayoutSettingsButtonState extends State<AlbumLayoutSettingsButton>
           padding: EdgeInsets.zero,
           style: IconButton.styleFrom(
             foregroundColor: _isOpen
-                ? LuminaTokens.accentBlue
-                : LuminaTokens.textPrimary,
-            hoverColor: LuminaTokens.cardHoverBg,
+                ? Colors.white
+                : LuminaTokens.glassTextPrimary,
+            hoverColor: LuminaTokens.glassPillHoverBg,
             focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
@@ -617,17 +613,17 @@ class _PopoverPillButtonState extends State<_PopoverPillButton> {
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
             decoration: BoxDecoration(
               color: widget.selected
-                  ? LuminaTokens.accentBlueStrong.withValues(alpha: 0.24)
+                  ? LuminaTokens.glassSegmentSelectedBg
                   : (_hovered
-                        ? LuminaTokens.cardHoverBg
-                        : LuminaTokens.canvasBg),
+                        ? LuminaTokens.glassPillHoverBg
+                        : LuminaTokens.glassSegmentTrackBg),
               borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
               border: Border.all(
                 color: _focused
                     ? LuminaTokens.focusRing
                     : (widget.selected
-                          ? LuminaTokens.accentBlue
-                          : LuminaTokens.borderControl),
+                          ? LuminaTokens.glassSegmentSelectedBorder
+                          : LuminaTokens.glassSegmentTrackBorder),
                 width: 1,
               ),
             ),
@@ -640,8 +636,8 @@ class _PopoverPillButtonState extends State<_PopoverPillButton> {
                     widget.icon,
                     size: 14,
                     color: widget.selected
-                        ? LuminaTokens.accentBlue
-                        : LuminaTokens.textSecondary,
+                        ? Colors.white
+                        : LuminaTokens.glassTextSecondary,
                   ),
                   const SizedBox(width: 5),
                 ],
@@ -653,8 +649,8 @@ class _PopoverPillButtonState extends State<_PopoverPillButton> {
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: widget.selected
-                          ? LuminaTokens.textPrimary
-                          : LuminaTokens.textSecondary,
+                          ? Colors.white
+                          : LuminaTokens.glassTextSecondary,
                       fontSize: 12,
                       fontWeight: widget.selected
                           ? FontWeight.w600

@@ -378,14 +378,23 @@ impl ByteStreamSource for HybridSegmentedStream {
             // Straddling `local_end` (end of `seg_1` into `seg_2`): await primed remote proxy.
             return match self.await_proxy().await {
                 Ok(proxy) => {
+                    if self.cancel.is_cancelled() {
+                        return Err(StreamError::Cancelled);
+                    }
                     if self.delegated_after_seek.load(Ordering::SeqCst) {
                         return Ok(local_copied);
                     }
                     match proxy.read_at(self.local_end, &mut buf[local_copied..]).await {
                         Ok(remote_n) => Ok(local_copied + remote_n),
+                        Err(StreamError::Cancelled) => Err(StreamError::Cancelled),
+                        Err(_) if self.cancel.is_cancelled() => Err(StreamError::Cancelled),
                         Err(_) => Ok(local_copied),
                     }
                 }
+                Err(HybridDashFailure::Stream(StreamError::Cancelled)) => {
+                    Err(StreamError::Cancelled)
+                }
+                Err(_) if self.cancel.is_cancelled() => Err(StreamError::Cancelled),
                 Err(_) => Ok(local_copied),
             };
         }

@@ -20,9 +20,10 @@ pub use credential::KeyringStore;
 pub use error::{DbError, ProfileError, Result};
 pub use repository::{
     deterministic_artist_id, normalize_match_key, AlbumCredit, Artist, ArtworkCacheEntry,
-    ArtworkOverride, ImmediateTx, L1StreamCacheRepository, L1StreamUrlRecord, L2AccessUpdate,
-    L2HeadCacheRepository, L2HeadChunkRecord, LibraryRepository, PairedClient, PlayHistoryEntry,
-    ProfileFavorite, ProfileRepository, PruneLocalTracksReport, TrackFileCacheInfo,
+    ArtworkOverride, ImmediateTx, IngestionRepository, L1StreamCacheRepository, L1StreamUrlRecord,
+    L2AccessUpdate, L2HeadCacheRepository, L2HeadChunkRecord, LibraryRepository, PairedClient,
+    PlayHistoryEntry, ProfileFavorite, ProfileRepository, PruneLocalTracksReport, RelinkCandidate,
+    SidecarPlaylist, SidecarPlaylistEntry, TrackFileCacheInfo,
 };
 pub use search::{
     delete_fts_entry, rebuild_search_index, sanitize_fts5_query, search_library,

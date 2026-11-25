@@ -1,3 +1,4 @@
+use core_types::DeckTrackMetadata;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,12 @@ pub struct PlaybackStatePayload {
     pub track_id: Option<String>,
     pub position_ms: u64,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<DeckTrackMetadata>,
+    #[serde(default)]
+    pub swap_generation: u64,
+    #[serde(default)]
+    pub playback_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -70,6 +77,7 @@ mod tests {
                 track_id: Some("trk-001".to_string()),
                 position_ms: 12500,
                 duration_ms: 163000,
+                ..Default::default()
             },
         };
 

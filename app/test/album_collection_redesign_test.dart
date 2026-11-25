@@ -344,7 +344,7 @@ void main() {
           findsOneWidget,
         );
 
-        // Hover Play button specifically -> ScaleTransition scales to 1.08 and color -> accentBlue
+        // Hover Play button specifically -> ScaleTransition scales to 1.08 and color -> glassSwitchOnTrack
         await mouse.moveTo(tester.getCenter(playBtnFinder));
         await tester.pumpAndSettle();
 
@@ -363,7 +363,7 @@ void main() {
           ),
         );
         final playDec = playBgContainer.decoration! as BoxDecoration;
-        expect(playDec.color, LuminaTokens.accentBlue);
+        expect(playDec.color, LuminaTokens.glassSwitchOnTrack);
 
         final playIcon = tester.widget<Icon>(
           find.descendant(of: playBtnFinder, matching: find.byType(Icon)),
@@ -718,7 +718,7 @@ void main() {
         expect(cardContainer.padding, const EdgeInsets.all(10));
         expect(
           (cardContainer.decoration! as BoxDecoration).color,
-          LuminaTokens.cardBg,
+          LuminaTokens.glassCardBg,
         );
 
         // Switch to List View

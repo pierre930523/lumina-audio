@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:material_ui/material_ui.dart';
 
 import '../../services/streaming/yt_dlp_service.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 import 'settings_widgets.dart';
 
@@ -73,12 +74,9 @@ class _ThirdPartyLicensesDialogState extends State<ThirdPartyLicensesDialog> {
 
     return Dialog(
       key: const Key('third_party_licenses_dialog'),
-      backgroundColor: LuminaTokens.cardBg,
+      backgroundColor: Colors.transparent,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-        side: const BorderSide(color: LuminaTokens.borderControl),
-      ),
+      elevation: 0,
       child: ConstrainedBox(
         constraints: const BoxConstraints(
           maxWidth: 740,
@@ -86,147 +84,156 @@ class _ThirdPartyLicensesDialogState extends State<ThirdPartyLicensesDialog> {
           minWidth: 420,
           minHeight: 320,
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                LuminaTokens.spaceMd + LuminaTokens.space2xs,
-                LuminaTokens.spaceMd,
-                LuminaTokens.spaceSm,
-                LuminaTokens.spaceSm,
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: LuminaTokens.accentBlue.withValues(alpha: 0.16),
-                      borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusSm,
+        child: FrostedGlassContainer(
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  LuminaTokens.spaceMd + LuminaTokens.space2xs,
+                  LuminaTokens.spaceMd,
+                  LuminaTokens.spaceSm,
+                  LuminaTokens.spaceSm,
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: LuminaTokens.glassPillBg,
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusSm,
+                        ),
+                        border: Border.all(
+                          color: LuminaTokens.glassPillBorder,
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.description_outlined,
+                        size: 18,
+                        color: LuminaTokens.glassTextPrimary,
                       ),
                     ),
-                    child: const Icon(
-                      Icons.description_outlined,
-                      size: 18,
-                      color: LuminaTokens.accentBlue,
-                    ),
-                  ),
-                  const SizedBox(width: LuminaTokens.spaceSm),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          '第三方開源授權（yt-dlp / Deno / FFmpeg）',
-                          style: TextStyle(
-                            color: LuminaTokens.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          licensePath ?? '內建開源元件授權摘要',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: LuminaTokens.textMuted,
-                            fontSize: 11.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '關閉',
-                    onPressed: () => Navigator.of(context).pop(),
-                    style: LuminaSettingsStyles.iconButtonStyle(),
-                    icon: const Icon(Icons.close_rounded, size: 18),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(LuminaTokens.spaceMd),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: LuminaTokens.canvasBg,
-                    borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                    border: Border.all(color: LuminaTokens.borderSubtle),
-                  ),
-                  child: FutureBuilder<List<String>>(
-                    future: _chunksFuture,
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState != ConnectionState.done) {
-                        return const Center(
-                          child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: LuminaTokens.accentBlue,
+                    const SizedBox(width: LuminaTokens.spaceSm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            '第三方開源授權（yt-dlp / Deno / FFmpeg）',
+                            style: TextStyle(
+                              color: LuminaTokens.textPrimary,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                        );
-                      }
-
-                      final chunks =
-                          snapshot.data ?? const <String>['無法讀取開源授權內容。'];
-                      return Scrollbar(
-                        controller: _scrollController,
-                        thumbVisibility: true,
-                        child: SelectionArea(
-                          child: ListView.builder(
-                            key: const Key('third_party_licenses_list'),
-                            controller: _scrollController,
-                            padding: const EdgeInsets.all(LuminaTokens.spaceMd),
-                            itemCount: chunks.length,
-                            itemBuilder: (context, index) => Padding(
-                              padding: EdgeInsets.only(
-                                bottom: index + 1 < chunks.length ? 2 : 0,
+                          const SizedBox(height: 2),
+                          Text(
+                            licensePath ?? '內建開源元件授權摘要',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: LuminaTokens.textMuted,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '關閉',
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: LuminaSettingsStyles.iconButtonStyle(),
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(LuminaTokens.spaceMd),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0x660E1014),
+                      borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                      border: Border.all(color: LuminaTokens.glassCardBorder),
+                    ),
+                    child: FutureBuilder<List<String>>(
+                      future: _chunksFuture,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done) {
+                          return const Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: LuminaTokens.glassTextPrimary,
                               ),
-                              child: Text(
-                                chunks[index],
-                                style: const TextStyle(
-                                  color: LuminaTokens.textSecondary,
-                                  fontFamily: 'Consolas',
-                                  fontSize: 12,
-                                  height: 1.45,
+                            ),
+                          );
+                        }
+
+                        final chunks =
+                            snapshot.data ?? const <String>['無法讀取開源授權內容。'];
+                        return Scrollbar(
+                          controller: _scrollController,
+                          thumbVisibility: true,
+                          child: SelectionArea(
+                            child: ListView.builder(
+                              key: const Key('third_party_licenses_list'),
+                              controller: _scrollController,
+                              padding: const EdgeInsets.all(LuminaTokens.spaceMd),
+                              itemCount: chunks.length,
+                              itemBuilder: (context, index) => Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: index + 1 < chunks.length ? 2 : 0,
+                                ),
+                                child: Text(
+                                  chunks[index],
+                                  style: const TextStyle(
+                                    color: LuminaTokens.textSecondary,
+                                    fontFamily: 'Consolas',
+                                    fontSize: 12,
+                                    height: 1.45,
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
               ),
-            ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: LuminaTokens.spaceMd,
-                vertical: LuminaTokens.spaceSm,
+              const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: LuminaTokens.spaceMd,
+                  vertical: LuminaTokens.spaceSm,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    OutlinedButton(
+                      key: const Key('btn_close_licenses_dialog'),
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: LuminaSettingsStyles.outlinedButtonStyle(),
+                      child: const Text('關閉'),
+                    ),
+                  ],
+                ),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  OutlinedButton(
-                    key: const Key('btn_close_licenses_dialog'),
-                    onPressed: () => Navigator.of(context).pop(),
-                    style: LuminaSettingsStyles.outlinedButtonStyle(),
-                    child: const Text('關閉'),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

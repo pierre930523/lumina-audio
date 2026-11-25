@@ -141,7 +141,7 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (ctx) => Scaffold(
-          backgroundColor: const Color(0xFF141519),
+          backgroundColor: LuminaTokens.canvasBg,
           body: SafeArea(
             child: AlbumDetailPage(
               albumId: albumId,
@@ -340,23 +340,51 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         ChoiceChip(
-                          label: const Text('專輯與發行版本'),
+                          label: Text(
+                            '專輯與發行版本',
+                            style: TextStyle(
+                              color: !_showCreditsGraph
+                                  ? Colors.white
+                                  : LuminaTokens.glassTextSecondary,
+                              fontWeight: !_showCreditsGraph
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                            ),
+                          ),
                           selected: !_showCreditsGraph,
+                          showCheckmark: false,
+                          surfaceTintColor: Colors.transparent,
+                          backgroundColor: LuminaTokens.glassPillBg,
+                          selectedColor: LuminaTokens.glassSegmentSelectedBg,
                           side: BorderSide(
                             color: !_showCreditsGraph
-                                ? LuminaTokens.accentBlue
-                                : LuminaTokens.borderControl,
+                                ? LuminaTokens.glassSegmentSelectedBorder
+                                : LuminaTokens.glassPillBorder,
                           ),
                           onSelected: (_) =>
                               setState(() => _showCreditsGraph = false),
                         ),
                         ChoiceChip(
-                          label: const Text('製作人員關係圖'),
+                          label: Text(
+                            '製作人員關係圖',
+                            style: TextStyle(
+                              color: _showCreditsGraph
+                                  ? Colors.white
+                                  : LuminaTokens.glassTextSecondary,
+                              fontWeight: _showCreditsGraph
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                            ),
+                          ),
                           selected: _showCreditsGraph,
+                          showCheckmark: false,
+                          surfaceTintColor: Colors.transparent,
+                          backgroundColor: LuminaTokens.glassPillBg,
+                          selectedColor: LuminaTokens.glassSegmentSelectedBg,
                           side: BorderSide(
                             color: _showCreditsGraph
-                                ? LuminaTokens.accentBlue
-                                : LuminaTokens.borderControl,
+                                ? LuminaTokens.glassSegmentSelectedBorder
+                                : LuminaTokens.glassPillBorder,
                           ),
                           onSelected: (_) =>
                               setState(() => _showCreditsGraph = true),
@@ -364,9 +392,10 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                         OutlinedButton.icon(
                           key: const Key('btn_deduplicate_albums'),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: LuminaTokens.textPrimary,
+                            backgroundColor: LuminaTokens.glassPillBg,
+                            foregroundColor: LuminaTokens.glassTextPrimary,
                             side: const BorderSide(
-                              color: LuminaTokens.borderControl,
+                              color: LuminaTokens.glassPillBorder,
                             ),
                           ),
                           onPressed: _deduplicate,
@@ -376,9 +405,10 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                         OutlinedButton.icon(
                           key: const Key('btn_enrich_credits'),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: LuminaTokens.textPrimary,
+                            backgroundColor: LuminaTokens.glassPillBg,
+                            foregroundColor: LuminaTokens.glassTextPrimary,
                             side: const BorderSide(
-                              color: LuminaTokens.borderControl,
+                              color: LuminaTokens.glassPillBorder,
                             ),
                           ),
                           onPressed: _enrichCredits,
@@ -456,10 +486,10 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                 itemCount: _albums.length,
                 separatorBuilder: (context, index) => showCardContainer
                     ? const SizedBox(height: 8)
-                    : Divider(
+                    : const Divider(
                         height: 1,
                         thickness: 1,
-                        color: LuminaTokens.borderSubtle.withValues(alpha: 0.45),
+                        color: LuminaTokens.glassCardDivider,
                       ),
                 itemBuilder: (context, index) {
                   final album = _albums[index];
@@ -548,10 +578,10 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
         Container(
           padding: const EdgeInsets.all(LuminaTokens.spaceMd),
           decoration: BoxDecoration(
-            color: LuminaTokens.accentPurple.withValues(alpha: 0.16),
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+            color: LuminaTokens.glassCardBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
             border: Border.all(
-              color: LuminaTokens.accentPurple.withValues(alpha: 0.5),
+              color: LuminaTokens.glassCardBorder,
             ),
           ),
           child: Column(
@@ -560,7 +590,7 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
               Text(
                 artist?.name ?? _defaultArtistName ?? '藝術家與製作人員關係圖',
                 style: const TextStyle(
-                  color: LuminaTokens.textPrimary,
+                  color: LuminaTokens.glassTextPrimary,
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
                 ),
@@ -570,7 +600,7 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                 Text(
                   artist!.biography!,
                   style: const TextStyle(
-                    color: LuminaTokens.textSecondary,
+                    color: LuminaTokens.glassTextSecondary,
                     fontSize: 12,
                   ),
                 ),
@@ -591,9 +621,11 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
               child: Container(
                 padding: const EdgeInsets.all(LuminaTokens.spaceSm),
                 decoration: BoxDecoration(
-                  color: LuminaTokens.cardBg,
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                  border: Border.all(color: LuminaTokens.borderSubtle),
+                  color: LuminaTokens.glassCardBg,
+                  borderRadius: BorderRadius.circular(
+                    LuminaTokens.glassCardRadius,
+                  ),
+                  border: Border.all(color: LuminaTokens.glassCardBorder),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -601,7 +633,7 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                     Text(
                       entry.key,
                       style: const TextStyle(
-                        color: LuminaTokens.accentPurpleText,
+                        color: LuminaTokens.glassTextPrimary,
                         fontWeight: FontWeight.w700,
                         fontSize: 13,
                       ),
@@ -612,9 +644,19 @@ class _AlbumsAndCreditsViewState extends State<AlbumsAndCreditsView> {
                       runSpacing: LuminaTokens.spaceXs,
                       children: entry.value.map((credit) {
                         return ActionChip(
-                          avatar: const Icon(Icons.hub_rounded, size: 16),
+                          avatar: const Icon(
+                            Icons.hub_rounded,
+                            size: 16,
+                            color: LuminaTokens.glassTextSecondary,
+                          ),
+                          surfaceTintColor: Colors.transparent,
+                          backgroundColor: LuminaTokens.glassPillBg,
                           side: const BorderSide(
-                            color: LuminaTokens.borderControl,
+                            color: LuminaTokens.glassPillBorder,
+                          ),
+                          labelStyle: const TextStyle(
+                            color: LuminaTokens.glassTextPrimary,
+                            fontSize: 12.5,
                           ),
                           label: Text(
                             credit.albumTitle != null

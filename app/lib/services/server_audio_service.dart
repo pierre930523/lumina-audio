@@ -3,10 +3,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/audio_format.dart';
 import '../models/audio_output_info.dart';
+import '../models/ingestion_models.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
+import '../models/recommendation_models.dart';
 import '../models/signal_path.dart';
 import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
@@ -236,6 +240,8 @@ class ServerAudioService implements AudioService {
       StreamController<SignalPath>.broadcast();
   final StreamController<Duration> _positionController =
       StreamController<Duration>.broadcast();
+  final StreamController<ScanProgressEvent> _scanProgressController =
+      StreamController<ScanProgressEvent>.broadcast();
 
   WebSocket? _ws;
   StreamSubscription<dynamic>? _wsSub;
@@ -258,6 +264,20 @@ class ServerAudioService implements AudioService {
   String? _lastError;
   bool _needsLoadOnResume = false;
   int _activeEpoch = 0;
+  int _lastCancelledEpoch = 0;
+  int _lastObservedSwapGeneration = 0;
+  HttpClient? _activePlayHttpClient;
+  bool _disposed = false;
+
+  void _abortActivePlayRequest() {
+    final active = _activePlayHttpClient;
+    _activePlayHttpClient = null;
+    if (active != null) {
+      try {
+        active.close(force: true);
+      } catch (_) {}
+    }
+  }
 
   ServerAudioService({
     String baseUrl = 'http://127.0.0.1:9888',
@@ -300,11 +320,19 @@ class ServerAudioService implements AudioService {
     String path, {
     Map<String, dynamic>? body,
     bool authenticated = true,
+    bool trackAsPlayRequest = false,
+    Duration timeout = const Duration(seconds: 10),
   }) async {
+    if (trackAsPlayRequest) {
+      _abortActivePlayRequest();
+    }
     final client = _buildHttpClient();
+    if (trackAsPlayRequest) {
+      _activePlayHttpClient = client;
+    }
     try {
       final uri = Uri.parse('$_baseUrl$path');
-      final req = await client.openUrl(method, uri);
+      final req = await client.openUrl(method, uri).timeout(timeout);
       req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       if (authenticated && _bearerToken != null) {
         req.headers.set(
@@ -315,8 +343,8 @@ class ServerAudioService implements AudioService {
       if (body != null) {
         req.write(jsonEncode(body));
       }
-      final resp = await req.close();
-      final text = await utf8.decodeStream(resp);
+      final resp = await req.close().timeout(timeout);
+      final text = await utf8.decodeStream(resp).timeout(timeout);
       dynamic parsed;
       if (text.trim().isNotEmpty) {
         try {
@@ -327,6 +355,9 @@ class ServerAudioService implements AudioService {
       }
       return (resp.statusCode, parsed);
     } finally {
+      if (identical(_activePlayHttpClient, client)) {
+        _activePlayHttpClient = null;
+      }
       client.close(force: true);
     }
   }
@@ -365,39 +396,440 @@ class ServerAudioService implements AudioService {
     );
   }
 
+  @visibleForTesting
+  void handleWsMessageForTest(Map<String, dynamic> msg) =>
+      _handleWsMessage(msg);
+
+  static String? _nonEmptyString(dynamic raw) {
+    final s = raw?.toString().trim();
+    return (s != null && s.isNotEmpty) ? s : null;
+  }
+
+  static String _providerDisplayName(String? providerId) {
+    final normalized = providerId?.trim().toLowerCase() ?? '';
+    return switch (normalized) {
+      'qobuz' => 'Qobuz',
+      'tidal' => 'Tidal',
+      'deezer' => 'Deezer',
+      'youtube_music' || 'ytm' => 'YouTube Music',
+      'apple_music' || 'apple' => 'Apple Music',
+      'podcast_rss' || 'podcast' => 'Podcast',
+      'local' => 'Local Library',
+      _ => (providerId != null && providerId.trim().isNotEmpty)
+          ? providerId.trim()
+          : 'Remote Core',
+    };
+  }
+
+  static String _normalizedTrackKey(String rawId, {String? providerId}) {
+    final probe = TrackInfo(
+      id: rawId,
+      title: '',
+      artist: '',
+      album: '',
+      duration: Duration.zero,
+      format: const AudioFormat(
+        codec: AudioCodec.flac,
+        sampleRateHz: 44100,
+        bitDepth: 16,
+        channels: 2,
+      ),
+      providerName: _providerDisplayName(providerId),
+    );
+    final meta = TrackMetadata.fromTrackInfo(
+      probe,
+      providerIdOverride:
+          (providerId != null && providerId.trim().isNotEmpty)
+              ? providerId.trim()
+              : null,
+    );
+    return '${meta.providerId}:${meta.trackId}';
+  }
+
+  static bool _tracksReferToSame(TrackInfo? current, TrackInfo? incoming) {
+    if (current == null || incoming == null) return false;
+    if (current.id == incoming.id) return true;
+    if (current.id.isEmpty || incoming.id.isEmpty) return false;
+    return current.responsiveArtworkKey == incoming.responsiveArtworkKey;
+  }
+
+  static bool _trackMatchesId(
+    TrackInfo candidate,
+    String reportedId,
+    String? providerId,
+  ) {
+    if (candidate.id == reportedId) return true;
+    if (reportedId.isEmpty) return false;
+    return candidate.responsiveArtworkKey ==
+        _normalizedTrackKey(reportedId, providerId: providerId);
+  }
+
+  TrackInfo _parseTrackFromMap(
+    Map<String, dynamic> item, {
+    String defaultProvider = 'Remote Core',
+    int fallbackDurationMs = 0,
+  }) {
+    final rawId =
+        _nonEmptyString(item['track_id']) ??
+        _nonEmptyString(item['id']) ??
+        _nonEmptyString(item['external_track_id']) ??
+        '';
+    final providerId = _nonEmptyString(item['provider_id']);
+    final title = _nonEmptyString(item['title']) ?? '';
+    final artist =
+        _nonEmptyString(item['artist_name']) ??
+        _nonEmptyString(item['artist']) ??
+        '';
+    final album = _nonEmptyString(item['album']) ?? '';
+    final coverUrl =
+        _nonEmptyString(item['cover_url']) ??
+        _nonEmptyString(item['album_art_url']) ??
+        _nonEmptyString(item['artwork_url']);
+    final durMs = (item['duration_ms'] as num?)?.toInt() ?? fallbackDurationMs;
+    final canonicalId =
+        (providerId != null &&
+            providerId != 'local' &&
+            rawId.isNotEmpty &&
+            !rawId.contains(':'))
+        ? TrackMetadata(
+            providerId: providerId,
+            trackId: rawId,
+            title: title,
+            artist: artist,
+          ).toTrackInfo().id
+        : rawId;
+    final providerName =
+        _nonEmptyString(item['provider_name']) ??
+        (providerId != null ? _providerDisplayName(providerId) : defaultProvider);
+    return TrackInfo(
+      id: canonicalId,
+      title: title,
+      artist: artist,
+      album: album,
+      duration: Duration(milliseconds: durMs > 0 ? durMs : 0),
+      format: AudioFormat(
+        codec: AudioCodec.fromString(item['codec']?.toString()),
+        sampleRateHz: (item['sample_rate_hz'] as num?)?.toInt() ?? 44100,
+        bitDepth: (item['bit_depth'] as num?)?.toInt() ?? 16,
+        channels: (item['channels'] as num?)?.toInt() ?? 2,
+        isDsd: item['is_dsd'] == true,
+        bitrateKbps: _parseBitrateKbps(item),
+      ),
+      providerName: providerName,
+      filePath: _nonEmptyString(item['file_path']),
+      coverUrl: coverUrl,
+      albumArtUrl: coverUrl,
+      artworkCacheKey: _nonEmptyString(item['artwork_cache_key']),
+      hasLyrics: item['has_lyrics'] == true,
+    );
+  }
+
+  TrackInfo? _hydrateTrackFromPayload(
+    Map<String, dynamic> payload, {
+    int fallbackDurationMs = 0,
+  }) {
+    final rawTrackObj =
+        payload['track'] ?? payload['current_track'] ?? payload['active_track'];
+    final rawTrackMap = rawTrackObj is Map
+        ? Map<String, dynamic>.from(rawTrackObj)
+        : null;
+    final reportedId =
+        _nonEmptyString(rawTrackMap?['track_id']) ??
+        _nonEmptyString(rawTrackMap?['id']) ??
+        _nonEmptyString(payload['track_id']) ??
+        _nonEmptyString(payload['current_track_id']);
+    final reportedProviderId =
+        _nonEmptyString(rawTrackMap?['provider_id']) ??
+        _nonEmptyString(payload['provider_id']);
+    final mapDurMs =
+        (rawTrackMap?['duration_ms'] as num?)?.toInt() ??
+        (payload['duration_ms'] as num?)?.toInt() ??
+        fallbackDurationMs;
+
+    TrackInfo? baseMatch;
+    if (reportedId != null) {
+      for (final q in _queue) {
+        if (_trackMatchesId(q, reportedId, reportedProviderId)) {
+          baseMatch = q;
+          break;
+        }
+      }
+      if (baseMatch == null &&
+          _state.track != null &&
+          _trackMatchesId(_state.track!, reportedId, reportedProviderId)) {
+        baseMatch = _state.track;
+      }
+    }
+
+    TrackInfo? parsedPayloadTrack;
+    if (rawTrackMap != null) {
+      parsedPayloadTrack = _parseTrackFromMap(
+        rawTrackMap,
+        fallbackDurationMs: mapDurMs,
+      );
+    } else if (reportedId != null || _nonEmptyString(payload['title']) != null) {
+      parsedPayloadTrack = _parseTrackFromMap(<String, dynamic>{
+        'track_id': ?reportedId,
+        'provider_id': ?reportedProviderId,
+        if (payload['title'] != null) 'title': payload['title'],
+        if (payload['artist'] != null) 'artist': payload['artist'],
+        if (payload['album'] != null) 'album': payload['album'],
+        if (payload['cover_url'] != null) 'cover_url': payload['cover_url'],
+        if (payload['album_art_url'] != null)
+          'album_art_url': payload['album_art_url'],
+        if (mapDurMs > 0) 'duration_ms': mapDurMs,
+      }, fallbackDurationMs: mapDurMs);
+    }
+
+    if (baseMatch == null && parsedPayloadTrack == null) {
+      if (_state.track != null && mapDurMs > 0) {
+        return _state.track!.copyWith(
+          duration: Duration(milliseconds: mapDurMs),
+        );
+      }
+      return _state.track;
+    }
+    if (baseMatch == null) {
+      final p = parsedPayloadTrack!;
+      if (p.title.isEmpty) {
+        return p.copyWith(
+          title: p.id.isNotEmpty ? p.id : '未知曲目',
+          artist: p.artist.isEmpty ? '未知藝術家' : p.artist,
+        );
+      }
+      return p;
+    }
+    if (parsedPayloadTrack == null) {
+      return mapDurMs > 0
+          ? baseMatch.copyWith(duration: Duration(milliseconds: mapDurMs))
+          : baseMatch;
+    }
+
+    final mergedTitle = parsedPayloadTrack.title.isNotEmpty
+        ? parsedPayloadTrack.title
+        : baseMatch.title;
+    final mergedArtist = parsedPayloadTrack.artist.isNotEmpty
+        ? parsedPayloadTrack.artist
+        : baseMatch.artist;
+    final mergedAlbum = parsedPayloadTrack.album.isNotEmpty
+        ? parsedPayloadTrack.album
+        : baseMatch.album;
+    final mergedCover =
+        (parsedPayloadTrack.coverUrl != null &&
+            parsedPayloadTrack.coverUrl!.isNotEmpty)
+        ? parsedPayloadTrack.coverUrl
+        : baseMatch.coverUrl;
+    final mergedAlbumArt =
+        (parsedPayloadTrack.albumArtUrl != null &&
+            parsedPayloadTrack.albumArtUrl!.isNotEmpty)
+        ? parsedPayloadTrack.albumArtUrl
+        : (baseMatch.albumArtUrl ?? mergedCover);
+    final mergedDur = mapDurMs > 0
+        ? Duration(milliseconds: mapDurMs)
+        : (parsedPayloadTrack.duration > Duration.zero
+              ? parsedPayloadTrack.duration
+              : baseMatch.duration);
+    final mergedProvider = baseMatch.providerName.isNotEmpty &&
+            baseMatch.providerName != 'Remote Core'
+        ? baseMatch.providerName
+        : parsedPayloadTrack.providerName;
+
+    return baseMatch.copyWith(
+      title: mergedTitle,
+      artist: mergedArtist,
+      album: mergedAlbum,
+      coverUrl: mergedCover,
+      albumArtUrl: mergedAlbumArt,
+      duration: mergedDur,
+      providerName: mergedProvider,
+    );
+  }
+
+  static PlaybackStatus _parsePlaybackStatus(String? raw) {
+    return switch (raw?.trim().toLowerCase()) {
+      'playing' => PlaybackStatus.playing,
+      'paused' => PlaybackStatus.paused,
+      'error' => PlaybackStatus.error,
+      'loading' => PlaybackStatus.loading,
+      'seeking' => PlaybackStatus.seeking,
+      'buffering' => PlaybackStatus.buffering,
+      'ended' => PlaybackStatus.ended,
+      'uninitialized' => PlaybackStatus.uninitialized,
+      _ => PlaybackStatus.stopped,
+    };
+  }
+
+  Future<void> _refreshLyricsForTrack(TrackInfo track) async {
+    await _fetchLyrics(track.id, path: track.filePath);
+    if (_disposed) return;
+    if (_state.track?.id == track.id && !_stateController.isClosed) {
+      _stateController.add(_state);
+    }
+  }
+
   void _handleWsMessage(Map<String, dynamic> msg) {
     final type = msg['type']?.toString();
     if (type == 'PlaybackStateChanged') {
       final payload = msg['payload'] as Map<String, dynamic>? ?? const {};
-      final status = switch (payload['status']?.toString().toLowerCase()) {
-        'playing' => PlaybackStatus.playing,
-        'paused' => PlaybackStatus.paused,
-        'error' => PlaybackStatus.error,
-        'loading' => PlaybackStatus.loading,
-        'seeking' => PlaybackStatus.seeking,
-        'buffering' => PlaybackStatus.buffering,
-        'ended' => PlaybackStatus.ended,
-        'uninitialized' => PlaybackStatus.uninitialized,
-        _ => PlaybackStatus.stopped,
-      };
+      final msgEpoch = PlaybackState.parsePlaybackEpoch(payload);
+      if (_activeEpoch > 0 && msgEpoch < _activeEpoch) {
+        return;
+      }
+      final effectiveEpoch = msgEpoch > 0 ? msgEpoch : _activeEpoch;
+      final status = _parsePlaybackStatus(payload['status']?.toString());
       final posMs = (payload['position_ms'] as num?)?.toInt() ?? 0;
-      final seekEpoch = (payload['seek_epoch'] as num?)?.toInt() ?? _state.seekEpoch;
+      final durMs = (payload['duration_ms'] as num?)?.toInt() ?? 0;
+      final seekEpoch =
+          (payload['seek_epoch'] as num?)?.toInt() ?? _state.seekEpoch;
       final isSeeking = payload['is_seeking'] == true;
       final deviceLost = payload['device_lost'] == true;
       final lastErr = payload['last_error']?.toString();
       final clockSrc = payload['clock_source']?.toString() ?? _state.clockSource;
+      final swapGen =
+          (payload['swap_generation'] as num?)?.toInt() ??
+          (payload['swapGeneration'] as num?)?.toInt() ??
+          _state.swapGeneration;
+
+      final hydratedTrack = _hydrateTrackFromPayload(
+        payload,
+        fallbackDurationMs: durMs,
+      );
+      final swapIncremented =
+          swapGen > _lastObservedSwapGeneration && swapGen > 0;
+      final trackIdChanged =
+          hydratedTrack != null &&
+          !_tracksReferToSame(_state.track, hydratedTrack);
+      final trackChanged = swapIncremented || trackIdChanged;
+      final hadPreviousTrack = _state.track != null;
+      if (swapGen != _lastObservedSwapGeneration) {
+        _lastObservedSwapGeneration = swapGen;
+      }
+
+      final nextPos = (hadPreviousTrack && trackChanged)
+          ? Duration.zero
+          : Duration(milliseconds: posMs < 0 ? 0 : posMs);
+
+      if (trackChanged) {
+        _currentLyrics = const [];
+        if (hydratedTrack != null && status == PlaybackStatus.playing) {
+          unawaited(_refreshLyricsForTrack(hydratedTrack));
+        }
+      }
+
       _state = _state.copyWith(
         status: status,
-        position: Duration(milliseconds: posMs),
+        track: hydratedTrack,
+        position: nextPos,
         seekEpoch: seekEpoch,
         isSeeking: isSeeking,
         deviceLost: deviceLost,
         lastError: lastErr,
+        clearLastError: lastErr == null || lastErr.isEmpty,
         clockSource: clockSrc,
+        swapGeneration: swapGen,
+        playbackEpoch: effectiveEpoch,
       );
       if (!_stateController.isClosed) _stateController.add(_state);
       if (!_positionController.isClosed) {
         _positionController.add(_state.position);
+      }
+    } else if (type == 'event') {
+      final eventName = msg['event']?.toString();
+      final rawPayload = msg['payload'];
+      final payload = rawPayload is Map
+          ? Map<String, dynamic>.from(rawPayload)
+          : const <String, dynamic>{};
+      if (eventName == 'track_changed') {
+        final msgEpoch = PlaybackState.parsePlaybackEpoch(payload);
+        if (_activeEpoch > 0 && msgEpoch < _activeEpoch) {
+          return;
+        }
+        final effectiveEpoch = msgEpoch > 0 ? msgEpoch : _activeEpoch;
+        final swapGen =
+            (payload['swap_generation'] as num?)?.toInt() ??
+            (payload['swapGeneration'] as num?)?.toInt() ??
+            _state.swapGeneration;
+        final durMs = (payload['duration_ms'] as num?)?.toInt() ?? 0;
+        final hydratedTrack = _hydrateTrackFromPayload(
+          payload,
+          fallbackDurationMs: durMs,
+        );
+        final swapIncremented =
+            swapGen > _lastObservedSwapGeneration && swapGen > 0;
+        final trackIdChanged =
+            hydratedTrack != null &&
+            !_tracksReferToSame(_state.track, hydratedTrack);
+        final trackChanged = swapIncremented || trackIdChanged;
+        if (swapGen != _lastObservedSwapGeneration) {
+          _lastObservedSwapGeneration = swapGen;
+        }
+        final statusStr = _nonEmptyString(payload['status']);
+        final nextStatus = statusStr != null
+            ? _parsePlaybackStatus(statusStr)
+            : (_state.status == PlaybackStatus.paused
+                  ? PlaybackStatus.paused
+                  : PlaybackStatus.playing);
+
+        if (trackChanged) {
+          _currentLyrics = const [];
+          if (hydratedTrack != null && nextStatus == PlaybackStatus.playing) {
+            unawaited(_refreshLyricsForTrack(hydratedTrack));
+          }
+        }
+        _state = _state.copyWith(
+          status: nextStatus,
+          track: hydratedTrack,
+          position: Duration.zero,
+          swapGeneration: swapGen,
+          playbackEpoch: effectiveEpoch,
+          clearLastError: true,
+        );
+        _tracker.updateActiveDeviceState(_state);
+        if (!_stateController.isClosed) _stateController.add(_state);
+        if (!_positionController.isClosed) {
+          _positionController.add(Duration.zero);
+        }
+      } else if (eventName == 'queue_updated') {
+        final msgEpoch = PlaybackState.parsePlaybackEpoch(payload);
+        if (_activeEpoch > 0 && msgEpoch < _activeEpoch) {
+          return;
+        }
+        final rawQueue = payload['queue'] ?? payload['tracks'];
+        if (rawQueue is List) {
+          _queue = rawQueue
+              .whereType<Map>()
+              .map(
+                (item) => _parseTrackFromMap(
+                  Map<String, dynamic>.from(item),
+                ),
+              )
+              .toList();
+        }
+        final swapGen =
+            (payload['swap_generation'] as num?)?.toInt() ??
+            (payload['swapGeneration'] as num?)?.toInt() ??
+            _state.swapGeneration;
+        if (swapGen > _lastObservedSwapGeneration) {
+          _lastObservedSwapGeneration = swapGen;
+        }
+        final hydrated = _hydrateTrackFromPayload(payload);
+        final nextTrack =
+            (hydrated != null && _tracksReferToSame(_state.track, hydrated))
+            ? hydrated
+            : _state.track;
+        _state = _state.copyWith(
+          track: nextTrack,
+          swapGeneration: swapGen,
+          playbackEpoch: msgEpoch > 0 ? msgEpoch : _activeEpoch,
+        );
+        if (!_stateController.isClosed) _stateController.add(_state);
+      } else if (eventName == 'library.scan_progress') {
+        try {
+          final progress = ScanProgressEvent.fromJson(payload);
+          if (!_scanProgressController.isClosed) {
+            _scanProgressController.add(progress);
+          }
+        } catch (_) {}
       }
     } else if (type == 'SignalPathUpdated') {
       final payload = msg['payload'] as Map<String, dynamic>? ?? const {};
@@ -466,28 +898,19 @@ class ServerAudioService implements AudioService {
     if (trkCode == 200 && trkData is List) {
       _queue = trkData
           .whereType<Map<String, dynamic>>()
-          .map(
-            (item) => TrackInfo(
-              id: item['id']?.toString() ?? '',
-              title: item['title']?.toString() ?? '',
-              artist: item['artist']?.toString() ?? '',
-              album: item['album']?.toString() ?? '',
-              duration: Duration(
-                milliseconds: (item['duration_ms'] as num?)?.toInt() ?? 0,
-              ),
-              format: AudioFormat(
-                codec: AudioCodec.flac,
-                sampleRateHz: (item['sample_rate_hz'] as num?)?.toInt() ?? 44100,
-                bitDepth: (item['bit_depth'] as num?)?.toInt() ?? 16,
-                channels: (item['channels'] as num?)?.toInt() ?? 2,
-                isDsd: item['is_dsd'] == true,
-              ),
-              providerName: 'Remote Core',
-              filePath: item['file_path']?.toString(),
-            ),
-          )
+          .map(_parseTrackFromMap)
           .toList();
     }
+  }
+
+  int? _parseBitrateKbps(Map<String, dynamic> item) {
+    final kbps = (item['bitrate_kbps'] as num?)?.toInt();
+    if (kbps != null && kbps > 0) return kbps;
+    final raw =
+        (item['bitrate_bps'] as num?)?.toInt() ??
+        (item['bitrate'] as num?)?.toInt();
+    if (raw == null || raw <= 0) return null;
+    return raw > 10000 ? (raw / 1000.0).round() : raw;
   }
 
   @override
@@ -522,39 +945,43 @@ class ServerAudioService implements AudioService {
   List<LyricLine> get currentLyrics => _currentLyrics;
 
   Future<void> _fetchLyrics(String trackId, {String? path}) async {
-    final res = await getLyrics(trackId, path: path);
-    if (res != null && res['found'] == true && res['lines'] is List) {
-      final rawLines = res['lines'] as List;
-      final parsed = <LyricLine>[];
-      for (final l in rawLines) {
-        if (l is Map<String, dynamic>) {
-          final words = <LyricWord>[];
-          if (l['words'] is List) {
-            for (final w in l['words']) {
-              if (w is Map<String, dynamic>) {
-                words.add(
-                  LyricWord(
-                    text: w['text']?.toString() ?? '',
-                    start: Duration(milliseconds: (w['start_ms'] as num?)?.toInt() ?? 0),
-                    end: Duration(milliseconds: (w['end_ms'] as num?)?.toInt() ?? 0),
-                  ),
-                );
+    try {
+      final res = await getLyrics(trackId, path: path);
+      if (res != null && res['found'] == true && res['lines'] is List) {
+        final rawLines = res['lines'] as List;
+        final parsed = <LyricLine>[];
+        for (final l in rawLines) {
+          if (l is Map<String, dynamic>) {
+            final words = <LyricWord>[];
+            if (l['words'] is List) {
+              for (final w in l['words']) {
+                if (w is Map<String, dynamic>) {
+                  words.add(
+                    LyricWord(
+                      text: w['text']?.toString() ?? '',
+                      start: Duration(milliseconds: (w['start_ms'] as num?)?.toInt() ?? 0),
+                      end: Duration(milliseconds: (w['end_ms'] as num?)?.toInt() ?? 0),
+                    ),
+                  );
+                }
               }
             }
+            parsed.add(
+              LyricLine(
+                start: Duration(milliseconds: (l['start_ms'] as num?)?.toInt() ?? 0),
+                end: Duration(milliseconds: (l['end_ms'] as num?)?.toInt() ?? 0),
+                text: l['text']?.toString() ?? '',
+                words: words,
+                isSynced: l['start_ms'] != null || words.isNotEmpty,
+              ),
+            );
           }
-          parsed.add(
-            LyricLine(
-              start: Duration(milliseconds: (l['start_ms'] as num?)?.toInt() ?? 0),
-              end: Duration(milliseconds: (l['end_ms'] as num?)?.toInt() ?? 0),
-              text: l['text']?.toString() ?? '',
-              words: words,
-              isSynced: l['start_ms'] != null || words.isNotEmpty,
-            ),
-          );
         }
+        _currentLyrics = parsed;
+      } else {
+        _currentLyrics = const [];
       }
-      _currentLyrics = parsed;
-    } else {
+    } catch (_) {
       _currentLyrics = const [];
     }
   }
@@ -631,6 +1058,7 @@ class ServerAudioService implements AudioService {
       status: PlaybackStatus.loading,
       track: track,
       position: Duration.zero,
+      playbackEpoch: _activeEpoch,
       clearLastError: true,
     );
     final idx = PlaybackPersistenceService.findTrackIndex(_queue, track);
@@ -640,12 +1068,26 @@ class ServerAudioService implements AudioService {
   }
 
   @override
+  void beginOptimisticTrackLoadAtEpoch(
+    TrackInfo track, {
+    List<TrackInfo>? queue,
+    required int epoch,
+  }) {
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+      _abortActivePlayRequest();
+    }
+    beginOptimisticTrackLoad(track, queue: queue);
+  }
+
+  @override
   void failOptimisticTrackLoad(TrackInfo track, String message) {
     _lastError = message;
     _state = _state.copyWith(
       status: PlaybackStatus.error,
       track: track,
       position: Duration.zero,
+      playbackEpoch: _activeEpoch,
       lastError: message,
     );
     if (!_stateController.isClosed) _stateController.add(_state);
@@ -656,10 +1098,15 @@ class ServerAudioService implements AudioService {
     if (epoch > _activeEpoch) {
       _activeEpoch = epoch;
     }
+    if (epoch > 0) {
+      _lastCancelledEpoch = _activeEpoch;
+    }
+    _abortActivePlayRequest();
     if (_state.status == PlaybackStatus.loading) {
       _state = _state.copyWith(
         status: PlaybackStatus.stopped,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
       );
       if (!_stateController.isClosed) _stateController.add(_state);
     }
@@ -668,6 +1115,10 @@ class ServerAudioService implements AudioService {
   @override
   Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
       cancelPendingPlayback(epoch: epoch);
+
+  @override
+  Future<void> skipToTrack(TrackInfo track, {List<TrackInfo>? queueContext}) =>
+      play(track: track);
 
   @override
   Future<void> play({TrackInfo? track}) async {
@@ -690,9 +1141,14 @@ class ServerAudioService implements AudioService {
         return;
       }
     }
+    final opEpoch = ++_activeEpoch;
+    _lastCancelledEpoch = 0;
     _needsLoadOnResume = false;
     _currentLyrics = const [];
-    final body = <String, dynamic>{};
+    final body = <String, dynamic>{
+      'playback_epoch': opEpoch,
+      'epoch': opEpoch,
+    };
     if (track != null) {
       if (!AudioService.isStreamingTrackId(track.id)) {
         _playbackInterruptHandler?.call();
@@ -700,12 +1156,61 @@ class ServerAudioService implements AudioService {
       body['track_id'] = track.id;
       if (track.filePath != null) body['file_path'] = track.filePath;
       _needsLoadOnResume = false;
-    _state = _state.copyWith(track: track, clearLastError: true);
+      _state = _state.copyWith(
+        track: track,
+        playbackEpoch: opEpoch,
+        clearLastError: true,
+      );
+    }
+    final dynamic responseBody;
+    try {
+      final (_, data) = await _requestJson(
+        'POST',
+        '/api/v1/playback/play',
+        body: body,
+        trackAsPlayRequest: true,
+      );
+      responseBody = data;
+    } catch (_) {
+      if (_disposed || opEpoch != _activeEpoch) return;
+      rethrow;
+    }
+    _applyPlayResponse(responseBody, opEpoch: opEpoch, track: track);
+  }
+
+  void _applyPlayResponse(
+    dynamic responseBody, {
+    required int opEpoch,
+    TrackInfo? track,
+  }) {
+    if (_disposed || opEpoch != _activeEpoch) return;
+    final rawStatus = responseBody is Map
+        ? responseBody['status']?.toString().toLowerCase().trim()
+        : null;
+    if (rawStatus == 'ignored') {
+      return;
+    }
+    _lastError = null;
+    if (rawStatus == 'loading' || rawStatus == 'buffering') {
+      final nextStatus = rawStatus == 'buffering'
+          ? PlaybackStatus.buffering
+          : PlaybackStatus.loading;
+      _state = _state.copyWith(
+        status: nextStatus,
+        playbackEpoch: opEpoch,
+        clearLastError: true,
+      );
+      if (!_stateController.isClosed) _stateController.add(_state);
+      return;
+    }
+    if (track != null) {
       unawaited(_fetchLyrics(track.id, path: track.filePath));
     }
-    await _requestJson('POST', '/api/v1/playback/play', body: body);
-    _lastError = null;
-    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
+    _state = _state.copyWith(
+      status: PlaybackStatus.playing,
+      playbackEpoch: opEpoch,
+      clearLastError: true,
+    );
     if (!_stateController.isClosed) _stateController.add(_state);
   }
 
@@ -715,11 +1220,32 @@ class ServerAudioService implements AudioService {
     required String streamUrl,
     Map<String, String> headers = const {},
     String? hintExtension,
+  }) => _playStreamUrlInternal(
+    track: track,
+    streamUrl: streamUrl,
+    headers: headers,
+    hintExtension: hintExtension,
+    epoch: _activeEpoch + 1,
+  );
+
+  Future<void> _playStreamUrlInternal({
+    required TrackInfo track,
+    required String streamUrl,
+    Map<String, String> headers = const {},
+    String? hintExtension,
+    required int epoch,
+    bool debounced = false,
   }) async {
+    if (epoch < _activeEpoch) return;
+    _activeEpoch = epoch;
+    _lastCancelledEpoch = 0;
     _currentLyrics = const [];
     final body = <String, dynamic>{
       'track_id': track.id,
       'stream_url': streamUrl,
+      'playback_epoch': epoch,
+      'epoch': epoch,
+      if (debounced) 'debounced': true,
       if (track.filePath != null) 'file_path': track.filePath,
       if (headers.isNotEmpty) 'headers': headers,
       if (hintExtension != null && hintExtension.isNotEmpty)
@@ -727,12 +1253,25 @@ class ServerAudioService implements AudioService {
       'source': track.providerName,
     };
     _needsLoadOnResume = false;
-    _state = _state.copyWith(track: track, clearLastError: true);
-    unawaited(_fetchLyrics(track.id, path: track.filePath));
-    await _requestJson('POST', '/api/v1/playback/play', body: body);
-    _lastError = null;
-    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
-    if (!_stateController.isClosed) _stateController.add(_state);
+    _state = _state.copyWith(
+      track: track,
+      playbackEpoch: epoch,
+      clearLastError: true,
+    );
+    final dynamic responseBody;
+    try {
+      final (_, data) = await _requestJson(
+        'POST',
+        '/api/v1/playback/play',
+        body: body,
+        trackAsPlayRequest: true,
+      );
+      responseBody = data;
+    } catch (_) {
+      if (_disposed || epoch != _activeEpoch) return;
+      rethrow;
+    }
+    _applyPlayResponse(responseBody, opEpoch: epoch, track: track);
   }
 
   @override
@@ -743,12 +1282,15 @@ class ServerAudioService implements AudioService {
     String? hintExtension,
     required int requestId,
   }) {
-    _activeEpoch = requestId;
-    return playStreamUrl(
+    if (requestId > 0 && requestId < _activeEpoch) {
+      return Future<void>.value();
+    }
+    return _playStreamUrlInternal(
       track: track,
       streamUrl: streamUrl,
       headers: headers,
       hintExtension: hintExtension,
+      epoch: requestId > 0 ? requestId : (_activeEpoch + 1),
     );
   }
 
@@ -757,6 +1299,14 @@ class ServerAudioService implements AudioService {
     TrackInfo track,
     StreamSourceSpec spec, {
     required int epoch,
+  }) => playStreamSpecWithOptions(track, spec, epoch: epoch, debounced: false);
+
+  @override
+  Future<void> playStreamSpecWithOptions(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+    bool debounced = false,
   }) async {
     if (spec is ExternalBackendSpec) {
       throw StateError(
@@ -765,11 +1315,14 @@ class ServerAudioService implements AudioService {
     }
     if (epoch < _activeEpoch) return;
     _activeEpoch = epoch;
+    _lastCancelledEpoch = 0;
     _currentLyrics = const [];
 
     final body = <String, dynamic>{
       'track_id': track.id,
+      'playback_epoch': epoch,
       'epoch': epoch,
+      if (debounced) 'debounced': true,
       'source_spec': spec.toJson(),
       'source': track.providerName,
     };
@@ -797,13 +1350,25 @@ class ServerAudioService implements AudioService {
     }
 
     _needsLoadOnResume = false;
-    _state = _state.copyWith(track: track, clearLastError: true);
-    unawaited(_fetchLyrics(track.id, path: track.filePath));
-    await _requestJson('POST', '/api/v1/playback/play', body: body);
-    if (epoch != _activeEpoch) return;
-    _lastError = null;
-    _state = _state.copyWith(status: PlaybackStatus.playing, clearLastError: true);
-    if (!_stateController.isClosed) _stateController.add(_state);
+    _state = _state.copyWith(
+      track: track,
+      playbackEpoch: epoch,
+      clearLastError: true,
+    );
+    final dynamic responseBody;
+    try {
+      final (_, data) = await _requestJson(
+        'POST',
+        '/api/v1/playback/play',
+        body: body,
+        trackAsPlayRequest: true,
+      );
+      responseBody = data;
+    } catch (_) {
+      if (_disposed || epoch != _activeEpoch) return;
+      rethrow;
+    }
+    _applyPlayResponse(responseBody, opEpoch: epoch, track: track);
   }
 
   @override
@@ -992,11 +1557,18 @@ class ServerAudioService implements AudioService {
   @override
   Future<void> stop() async {
     _playbackInterruptHandler?.call();
-    _activeEpoch = 0;
+    _abortActivePlayRequest();
+    if (_activeEpoch > 0 && _activeEpoch != _lastCancelledEpoch) {
+      _activeEpoch++;
+    }
+    _lastCancelledEpoch = 0;
+    final stopEpoch = _activeEpoch;
     await _requestJson('POST', '/api/v1/playback/stop');
+    if (_disposed || stopEpoch != _activeEpoch) return;
     _state = _state.copyWith(
       status: PlaybackStatus.stopped,
       position: Duration.zero,
+      playbackEpoch: _activeEpoch,
     );
     if (!_stateController.isClosed) _stateController.add(_state);
   }
@@ -1585,12 +2157,200 @@ class ServerAudioService implements AudioService {
   }
 
   @override
+  Stream<ScanProgressEvent> get scanProgressStream =>
+      _scanProgressController.stream;
+
+  @override
+  Future<String?> startDirectoryScan(String path, {bool force = false}) async {
+    final (code, data) = await _requestJson(
+      'POST',
+      '/api/v1/library/scan/start',
+      body: <String, dynamic>{'dir_path': path, 'force': force},
+    );
+    if (code == 200 && data is Map) {
+      return data['scan_id']?.toString();
+    }
+    return null;
+  }
+
+  @override
+  Future<List<WatchedRootRecord>> listWatchedRoots() async {
+    final (code, data) = await _requestJson('GET', '/api/v1/library/watch');
+    if (code == 200 && data is List) {
+      return data
+          .whereType<Map>()
+          .map((e) => WatchedRootRecord.fromJson(Map<String, dynamic>.from(e)))
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  @override
+  Future<WatchedRootRecord?> addWatchedRoot(
+    String rootPath, {
+    WatchMode watchMode = WatchMode.nativeOs,
+    int pollIntervalSec = 300,
+  }) async {
+    final (code, data) = await _requestJson(
+      'POST',
+      '/api/v1/library/watch',
+      body: <String, dynamic>{
+        'root_path': rootPath,
+        'watch_mode': watchMode.toJson(),
+        'poll_interval_sec': pollIntervalSec,
+      },
+    );
+    if (code == 200 && data is Map) {
+      return WatchedRootRecord.fromJson(Map<String, dynamic>.from(data));
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> removeWatchedRoot(String rootPath) async {
+    final (code, data) = await _requestJson(
+      'DELETE',
+      '/api/v1/library/watch?root_path=${Uri.encodeQueryComponent(rootPath)}',
+    );
+    if (code == 200 || code == 204) {
+      if (data is Map) return data['ok'] != false;
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<List<SkippedFileRecord>> getSkippedFiles({
+    bool includeDismissed = false,
+  }) async {
+    final (code, data) = await _requestJson(
+      'GET',
+      '/api/v1/library/skipped?include_dismissed=$includeDismissed',
+    );
+    if (code == 200 && data is List) {
+      return data
+          .whereType<Map>()
+          .map((e) => SkippedFileRecord.fromJson(Map<String, dynamic>.from(e)))
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  @override
+  Future<bool> dismissSkippedFile(String skippedId) async {
+    final (code, data) = await _requestJson(
+      'POST',
+      '/api/v1/library/skipped/${Uri.encodeComponent(skippedId)}/dismiss',
+    );
+    if (code == 200) {
+      if (data is Map) return data['ok'] != false;
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<Map<String, dynamic>> retrySkippedFile(String skippedId) async {
+    final (code, data) = await _requestJson(
+      'POST',
+      '/api/v1/library/skipped/${Uri.encodeComponent(skippedId)}/retry',
+    );
+    if (code == 200 && data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return const <String, dynamic>{
+      'status': 'not_found',
+      'detail': 'Retry request failed',
+    };
+  }
+
+  @override
+  Future<bool> setMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+    dynamic value,
+  ) async {
+    final (code, data) = await _requestJson(
+      'PUT',
+      '/api/v1/library/overrides/${Uri.encodeComponent(entityType)}/${Uri.encodeComponent(entityId)}',
+      body: <String, dynamic>{
+        'field_name': fieldName,
+        'value_json': jsonEncode(value),
+      },
+    );
+    if (code == 200) {
+      if (data is Map) return data['ok'] != false;
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> clearMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+  ) async {
+    final (code, data) = await _requestJson(
+      'DELETE',
+      '/api/v1/library/overrides/${Uri.encodeComponent(entityType)}/${Uri.encodeComponent(entityId)}/${Uri.encodeComponent(fieldName)}',
+    );
+    if (code == 200 || code == 204) {
+      if (data is Map) return data['ok'] != false;
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<List<MetadataOverrideRecord>> getMetadataOverrides(
+    String entityType,
+    String entityId,
+  ) async {
+    final (code, data) = await _requestJson(
+      'GET',
+      '/api/v1/library/overrides/${Uri.encodeComponent(entityType)}/${Uri.encodeComponent(entityId)}',
+    );
+    if (code == 200 && data is List) {
+      return data
+          .whereType<Map>()
+          .map(
+            (e) => MetadataOverrideRecord.fromJson(Map<String, dynamic>.from(e)),
+          )
+          .toList(growable: false);
+    }
+    return const [];
+  }
+
+  @override
+  Future<Map<String, int>> ingestExternalCatalog(
+    ExternalCatalogIngestBatch batch,
+  ) async {
+    final (code, data) = await _requestJson(
+      'POST',
+      '/api/v1/library/ingest',
+      body: batch.toJson(),
+    );
+    if (code == 200 && data is Map) {
+      return <String, int>{
+        'albums_ingested': (data['albums_ingested'] as num?)?.toInt() ?? 0,
+        'tracks_ingested': (data['tracks_ingested'] as num?)?.toInt() ?? 0,
+      };
+    }
+    return const <String, int>{'albums_ingested': 0, 'tracks_ingested': 0};
+  }
+
+  @override
   void dispose() {
+    _disposed = true;
+    _abortActivePlayRequest();
     _wsSub?.cancel();
     _ws?.close();
     _stateController.close();
     _signalPathController.close();
     _positionController.close();
+    _scanProgressController.close();
   }
 }
 

@@ -46,7 +46,7 @@ pub extern "C" fn lumina_server_start(port: u16, enable_mdns: c_int) -> c_int {
         let state = Arc::new(app_state);
         engine.runtime.block_on(state.bootstrap_from_db());
 
-        let router = build_router(state);
+        let router = build_router(state.clone());
         let mdns = if enable_mdns != 0 {
             Some(MdnsService::new(MdnsConfig {
                 port: bound_port,
@@ -65,6 +65,7 @@ pub extern "C" fn lumina_server_start(port: u16, enable_mdns: c_int) -> c_int {
         engine.server_running.store(true, Ordering::SeqCst);
 
         engine.runtime.spawn(async move {
+            let watcher_handle = core_server::spawn_playback_transition_watcher(state);
             if let Some(ref svc) = mdns {
                 svc.start().await;
             }
@@ -72,6 +73,9 @@ pub extern "C" fn lumina_server_start(port: u16, enable_mdns: c_int) -> c_int {
                 let _ = shutdown_rx.await;
             })
             .await;
+            if let Some(handle) = watcher_handle {
+                handle.abort();
+            }
             if let Some(ref svc) = mdns {
                 svc.stop().await;
             }

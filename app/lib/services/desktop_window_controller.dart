@@ -430,6 +430,38 @@ class DesktopWindowController {
     } catch (_) {}
   }
 
+  Future<void> updateSystemMediaControls({
+    String? title,
+    String? artist,
+    String? album,
+    String? artworkUrl,
+    Duration? duration,
+    Duration? position,
+    bool isPlaying = false,
+    String? tooltip,
+    String? nowPlayingLabel,
+  }) async {
+    if (!isSupported) return;
+    await updateTray(
+      tooltip: tooltip,
+      nowPlayingLabel: nowPlayingLabel,
+      isPlaying: isPlaying,
+    );
+    try {
+      final args = <String, dynamic>{
+        'title': ?title,
+        'artist': ?artist,
+        'album': ?album,
+        if (artworkUrl != null && artworkUrl.trim().isNotEmpty)
+          'artworkUrl': artworkUrl.trim(),
+        if (duration != null) 'durationMs': duration.inMilliseconds,
+        if (position != null) 'positionMs': position.inMilliseconds,
+        'isPlaying': isPlaying,
+      };
+      await channel.invokeMethod('mediaUpdateMetadata', args);
+    } catch (_) {}
+  }
+
   Future<void> destroyTray() async {
     if (!isSupported) return;
     try {

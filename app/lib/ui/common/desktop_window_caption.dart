@@ -113,7 +113,7 @@ class _DesktopWindowCaptionButtonsState
       return const SizedBox.shrink();
     }
 
-    final defaultColor = widget.color ?? LuminaTokens.textSecondary;
+    final defaultColor = widget.color ?? LuminaTokens.glassTextSecondary;
 
     return SizedBox(
       height: widget.height,
@@ -127,7 +127,7 @@ class _DesktopWindowCaptionButtonsState
             icon: Icons.remove_rounded,
             iconSize: 15,
             defaultColor: defaultColor,
-            hoverColor: Colors.white.withValues(alpha: 0.12),
+            hoverColor: LuminaTokens.glassPillHoverBg,
             onTap: () {
               widget.audioService?.setWindowMinimized(true);
               _controller.minimize();
@@ -141,7 +141,7 @@ class _DesktopWindowCaptionButtonsState
                 : Icons.fullscreen_rounded,
             iconSize: 17,
             defaultColor: defaultColor,
-            hoverColor: Colors.white.withValues(alpha: 0.12),
+            hoverColor: LuminaTokens.glassPillHoverBg,
             onTap: () async {
               await _controller.toggleFullScreen();
               await _checkWindowState();
@@ -157,7 +157,7 @@ class _DesktopWindowCaptionButtonsState
                 : Icons.crop_square_rounded,
             iconSize: 13,
             defaultColor: defaultColor,
-            hoverColor: Colors.white.withValues(alpha: 0.12),
+            hoverColor: LuminaTokens.glassPillHoverBg,
             onTap: () async {
               if (_isFullScreen) {
                 await _controller.setFullScreen(false);
@@ -213,7 +213,7 @@ class _CaptionButtonState extends State<_CaptionButton> {
   @override
   Widget build(BuildContext context) {
     final iconColor = _hovered
-        ? (widget.hoverIconColor ?? LuminaTokens.textPrimary)
+        ? (widget.hoverIconColor ?? LuminaTokens.glassTextPrimary)
         : widget.defaultColor;
 
     return Tooltip(

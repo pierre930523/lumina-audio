@@ -13,6 +13,7 @@ use discovery::{MdnsConfig, MdnsService};
 use routes::build_router;
 use sqlx::SqlitePool;
 use state::AppState;
+pub use state::spawn_playback_transition_watcher;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
@@ -75,16 +76,21 @@ impl AppServer {
         info!("Lumina Server listening on http://{}", self.config.bind_addr);
 
         let listener = tokio::net::TcpListener::bind(self.config.bind_addr).await?;
-        axum::serve(
+        let watcher_handle = spawn_playback_transition_watcher(self.state.clone());
+        let serve_res = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .await?;
+        .await;
 
+        if let Some(handle) = watcher_handle {
+            handle.abort();
+        }
         if let Some(mdns) = &self.mdns {
             mdns.stop().await;
         }
 
+        serve_res?;
         Ok(())
     }
 }

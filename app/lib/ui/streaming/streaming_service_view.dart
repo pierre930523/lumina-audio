@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:material_ui/material_ui.dart';
 
@@ -10,6 +9,7 @@ import '../../services/audio_service.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../../services/streaming/streaming_provider.dart';
 import '../artwork/streaming_cover_image.dart';
+import '../common/frosted_glass_container.dart';
 import '../common/track_hover_prefetch.dart';
 import '../settings/streaming_login_dialog.dart';
 import '../theme/lumina_tokens.dart';
@@ -48,11 +48,6 @@ class StreamingServiceView extends StatefulWidget {
 
 class _StreamingServiceViewState extends State<StreamingServiceView> {
   static const double _toolbarHeight = 54.0;
-  static const Color _toolbarGlassBg = Color(0xD81B2030);
-  static const List<Color> _accentPillGradient = <Color>[
-    Color(0xFF5264DF),
-    Color(0xFF6B60EA),
-  ];
 
   static const List<({int idx, String keyName, String label, IconData icon})>
       _tabs = <({int idx, String keyName, String label, IconData icon})>[
@@ -175,7 +170,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       messenger?.showSnackBar(
         SnackBar(
           key: Key('streaming_rec_toast_error_$kind'),
-          backgroundColor: LuminaTokens.statusErrorBg,
+          backgroundColor: LuminaTokens.glassDialogBg,
           content: Text(
             '${widget.provider.name} 重新整理推薦失敗：${err.trim()}',
             style: const TextStyle(color: LuminaTokens.textPrimary),
@@ -247,7 +242,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
           ),
           action: SnackBarAction(
             label: '前往登入',
-            textColor: LuminaTokens.accentBlue,
+            textColor: LuminaTokens.glassTextPrimary,
             onPressed: widget.onOpenProviderSettings,
           ),
         ),
@@ -425,7 +420,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
     final statusDotColor = isAuthRequired
         ? LuminaTokens.statusError
         : (isGuest
-              ? LuminaTokens.accentBlue
+              ? LuminaTokens.glassTextSecondary
               : switch (liveProvider?.authState) {
                   null || StreamingAuthState.connected =>
                     LuminaTokens.statusSuccess,
@@ -479,101 +474,92 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
     final isCompactSync = availW < 620;
     final horizontalPad = availW < 620 ? 10.0 : 12.0;
 
-    return ClipRRect(
+    return FrostedGlassContainer(
       key: const Key('streaming_compact_toolbar'),
+      height: _toolbarHeight,
+      blurSigma: LuminaTokens.glassPillBlur,
+      color: LuminaTokens.glassSidebarBg,
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          height: _toolbarHeight,
-          padding: EdgeInsets.symmetric(horizontal: horizontalPad),
-          decoration: BoxDecoration(
-            color: _toolbarGlassBg,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.12),
+      border: Border.all(color: LuminaTokens.glassSidebarBorder),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPad),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.28),
+          blurRadius: 16,
+          offset: const Offset(0, 6),
+        ),
+      ],
+      child: Row(
+        children: [
+          if (isExpandedCompactSearch) ...[
+            _buildToolbarLeft(
+              subtitleLine: subtitleLine,
+              statusDotColor: statusDotColor,
+              maxWidth: availW < 540 ? 128.0 : 170.0,
             ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.28),
-                blurRadius: 16,
-                offset: const Offset(0, 6),
+            const SizedBox(width: 8),
+            Expanded(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                height: 34,
+                child: _buildCompactFilterField(),
               ),
-            ],
-          ),
-          child: Row(
-            children: [
-              if (isExpandedCompactSearch) ...[
-                _buildToolbarLeft(
+            ),
+            const SizedBox(width: 6),
+            _buildFilterToggleButton(expanded: true),
+            const SizedBox(width: 6),
+            _buildSyncPillButton(iconOnly: true),
+            const SizedBox(width: 6),
+            _buildSettingsIconButton(),
+          ] else if (availW < 540) ...[
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: _buildToolbarLeft(
                   subtitleLine: subtitleLine,
                   statusDotColor: statusDotColor,
-                  maxWidth: availW < 540 ? 128.0 : 170.0,
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    height: 34,
-                    child: _buildCompactFilterField(),
-                  ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: _buildSegmentedTabPill(availW: availW),
+              ),
+            ),
+            const SizedBox(width: 6),
+            _buildToolbarRight(
+              availW: availW,
+              showInlineFilter: false,
+              iconOnlySync: isCompactSync,
+            ),
+          ] else ...[
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: _buildToolbarLeft(
+                  subtitleLine: subtitleLine,
+                  statusDotColor: statusDotColor,
                 ),
-                const SizedBox(width: 6),
-                _buildFilterToggleButton(expanded: true),
-                const SizedBox(width: 6),
-                _buildSyncPillButton(iconOnly: true),
-                const SizedBox(width: 6),
-                _buildSettingsIconButton(),
-              ] else if (availW < 540) ...[
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _buildToolbarLeft(
-                      subtitleLine: subtitleLine,
-                      statusDotColor: statusDotColor,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: _buildSegmentedTabPill(availW: availW),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                _buildToolbarRight(
+              ),
+            ),
+            const SizedBox(width: 8),
+            _buildSegmentedTabPill(availW: availW),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: _buildToolbarRight(
                   availW: availW,
-                  showInlineFilter: false,
+                  showInlineFilter: isWideInlineFilter,
                   iconOnlySync: isCompactSync,
                 ),
-              ] else ...[
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: _buildToolbarLeft(
-                      subtitleLine: subtitleLine,
-                      statusDotColor: statusDotColor,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                _buildSegmentedTabPill(availW: availW),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: _buildToolbarRight(
-                      availW: availW,
-                      showInlineFilter: isWideInlineFilter,
-                      iconOnlySync: isCompactSync,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -667,10 +653,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       tooltip: '切換串流服務',
       padding: EdgeInsets.zero,
       offset: const Offset(0, 44),
-      color: LuminaTokens.cardElevatedBg,
+      color: LuminaTokens.glassMenuBg,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
-        side: const BorderSide(color: LuminaTokens.borderSubtle),
+        side: const BorderSide(color: LuminaTokens.glassPillBorder),
       ),
       onSelected: (kind) {
         if (kind != widget.provider.kind) {
@@ -693,8 +679,8 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: p.kind == widget.provider.kind
-                          ? LuminaTokens.accentBlue
-                          : LuminaTokens.textPrimary,
+                          ? Colors.white
+                          : LuminaTokens.glassTextSecondary,
                       fontSize: 13,
                       fontWeight: p.kind == widget.provider.kind
                           ? FontWeight.w600
@@ -706,7 +692,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                   const Icon(
                     Icons.check_rounded,
                     size: 16,
-                    color: LuminaTokens.accentBlue,
+                    color: Colors.white,
                   ),
               ],
             ),
@@ -733,9 +719,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       height: 36,
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.28),
+        color: LuminaTokens.glassSegmentTrackBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        border: Border.all(color: LuminaTokens.glassSegmentTrackBorder),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -779,8 +765,11 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
           padding: EdgeInsets.symmetric(horizontal: horizontalPad),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            gradient: selected
-                ? const LinearGradient(colors: _accentPillGradient)
+            color: selected
+                ? LuminaTokens.glassSegmentSelectedBg
+                : Colors.transparent,
+            border: selected
+                ? Border.all(color: LuminaTokens.glassSegmentSelectedBorder)
                 : null,
           ),
           child: Row(
@@ -791,14 +780,18 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                 Icon(
                   tab.icon,
                   size: 14,
-                  color: selected ? Colors.white : LuminaTokens.textSecondary,
+                  color: selected
+                      ? Colors.white
+                      : LuminaTokens.glassTextSecondary,
                 ),
                 const SizedBox(width: 5),
               ],
               Text(
                 tab.label,
                 style: TextStyle(
-                  color: selected ? Colors.white : LuminaTokens.textSecondary,
+                  color: selected
+                      ? Colors.white
+                      : LuminaTokens.glassTextSecondary,
                   fontSize: fontSize,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
                 ),
@@ -841,12 +834,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
     return Container(
       height: 34,
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.28),
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
         border: Border.all(
-          color: hasFocus
-              ? LuminaTokens.focusRing
-              : Colors.white.withValues(alpha: 0.10),
+          color: hasFocus ? LuminaTokens.focusRing : LuminaTokens.glassPillBorder,
           width: hasFocus ? 1.3 : 1.0,
         ),
       ),
@@ -868,7 +859,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               onChanged: (_) => setState(() {}),
               maxLines: 1,
               textAlignVertical: TextAlignVertical.center,
-              cursorColor: LuminaTokens.accentBlue,
+              cursorColor: LuminaTokens.glassTextPrimary,
               style: const TextStyle(
                 color: LuminaTokens.textPrimary,
                 fontSize: 12.5,
@@ -921,12 +912,12 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: expanded || hasQuery
-            ? LuminaTokens.accentBlue.withValues(alpha: 0.16)
-            : Colors.black.withValues(alpha: 0.26),
+            ? LuminaTokens.glassNavActiveBg
+            : LuminaTokens.glassPillBg,
         border: Border.all(
           color: expanded || hasQuery
-              ? LuminaTokens.accentBlue.withValues(alpha: 0.65)
-              : Colors.white.withValues(alpha: 0.10),
+              ? LuminaTokens.glassCoverRim
+              : LuminaTokens.glassPillBorder,
         ),
       ),
       child: IconButton(
@@ -941,8 +932,8 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               : (hasQuery ? Icons.filter_alt_rounded : Icons.search_rounded),
           size: 16,
           color: expanded || hasQuery
-              ? LuminaTokens.accentBlue
-              : LuminaTokens.textSecondary,
+              ? Colors.white
+              : LuminaTokens.glassTextSecondary,
         ),
         onPressed: () {
           setState(() {
@@ -964,21 +955,21 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       child: InkWell(
         key: const Key('btn_sync_streaming_provider'),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+        hoverColor: LuminaTokens.glassPillHoverBg,
         onTap: _syncing ? null : _syncCatalog,
         child: Ink(
           height: 34,
           padding: EdgeInsets.symmetric(horizontal: iconOnly ? 10 : 13),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            gradient: LinearGradient(
-              colors: _syncing
-                  ? <Color>[
-                      const Color(0xFF5264DF).withValues(alpha: 0.55),
-                      const Color(0xFF6B60EA).withValues(alpha: 0.55),
-                    ]
-                  : _accentPillGradient,
+            color: _syncing
+                ? LuminaTokens.glassNavActiveBg
+                : LuminaTokens.glassPillBg,
+            border: Border.all(
+              color: _syncing
+                  ? LuminaTokens.glassCoverRim
+                  : LuminaTokens.glassPillBorder,
             ),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1028,8 +1019,8 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       height: 34,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: Colors.white.withValues(alpha: 0.06),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+        color: LuminaTokens.glassPillBg,
+        border: Border.all(color: LuminaTokens.glassPillBorder),
       ),
       child: IconButton(
         key: const Key('btn_streaming_open_settings'),
@@ -1040,7 +1031,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
         icon: const Icon(
           Icons.settings_outlined,
           size: 17,
-          color: LuminaTokens.textSecondary,
+          color: LuminaTokens.glassTextSecondary,
         ),
         onPressed: widget.onOpenProviderSettings,
       ),
@@ -1128,9 +1119,11 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: Key('streaming_auth_required_banner_$kind'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: LuminaTokens.statusErrorBg,
+        color: LuminaTokens.statusError.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.statusError),
+        border: Border.all(
+          color: LuminaTokens.statusError.withValues(alpha: 0.45),
+        ),
       ),
       child: Row(
         children: [
@@ -1191,10 +1184,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: const Key('streaming_drm_notice_banner'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
-        color: const Color(0xFF2B2112),
+        color: LuminaTokens.statusWarning.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
-          color: LuminaTokens.statusWarning.withValues(alpha: 0.55),
+          color: LuminaTokens.statusWarning.withValues(alpha: 0.45),
         ),
       ),
       child: Row(
@@ -1227,7 +1220,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: const Key('streaming_sync_notice_banner'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF152622),
+        color: LuminaTokens.statusSuccess.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
           color: LuminaTokens.statusSuccess.withValues(alpha: 0.45),
@@ -1275,9 +1268,11 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: const Key('streaming_error_banner'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
-        color: LuminaTokens.statusErrorBg,
+        color: LuminaTokens.statusError.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.statusError),
+        border: Border.all(
+          color: LuminaTokens.statusError.withValues(alpha: 0.45),
+        ),
       ),
       child: Row(
         children: [
@@ -1383,7 +1378,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
           child: _buildCompactBanner(
             bannerKey: const Key('streaming_explore_empty_banner'),
             icon: Icons.explore_outlined,
-            iconColor: LuminaTokens.accentBlue,
+            iconColor: LuminaTokens.glassTextSecondary,
             title: query.isNotEmpty
                 ? '找不到符合「${_filterCtrl.text.trim()}」的推薦內容'
                 : '尚無 ${widget.provider.name} 個人化推薦項目',
@@ -1515,7 +1510,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               ? _buildCompactBanner(
                   bannerKey: const Key('streaming_guest_login_banner'),
                   icon: Icons.person_outline_rounded,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '目前為 ${widget.provider.name} 免登入瀏覽模式',
                   subtitle: '您可自由使用「探索推薦」、搜尋與播放；登入帳號後即可同步個人收藏曲目。',
                   actionLabel: '前往登入',
@@ -1524,7 +1519,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               : _buildCompactBanner(
                   bannerKey: const Key('streaming_empty_sync_banner'),
                   icon: Icons.library_music_outlined,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '目前尚無已同步的 ${widget.provider.name} 收藏曲目',
                   subtitle: '點擊右側「立即同步」即可匯入您的串流收藏與高解析曲目。',
                   actionLabel: '立即同步',
@@ -1651,7 +1646,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               height: 12,
               child: CircularProgressIndicator(
                 strokeWidth: 1.8,
-                color: LuminaTokens.accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
             )
           : const Icon(Icons.refresh_rounded, size: 15),
@@ -1674,10 +1669,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: Key('rec_error_banner_$kind'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
       decoration: BoxDecoration(
-        color: LuminaTokens.statusErrorBg,
+        color: LuminaTokens.statusError.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
-          color: LuminaTokens.statusError.withValues(alpha: 0.65),
+          color: LuminaTokens.statusError.withValues(alpha: 0.45),
         ),
       ),
       child: Row(
@@ -1731,7 +1726,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               child: const Text(
                 '帳號設定',
                 style: TextStyle(
-                  color: Color(0xFF93C5FD),
+                  color: LuminaTokens.glassTextPrimary,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1858,8 +1853,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                     _playlistError = null;
                   }),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: LuminaTokens.textPrimary,
-                    side: const BorderSide(color: LuminaTokens.borderControl),
+                    foregroundColor: LuminaTokens.glassTextPrimary,
+                    backgroundColor: LuminaTokens.glassPillBg,
+                    side: const BorderSide(color: LuminaTokens.glassPillBorder),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
@@ -1904,7 +1900,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
             child: Padding(
               padding: EdgeInsets.symmetric(vertical: 36),
               child: Center(
-                child: CircularProgressIndicator(color: LuminaTokens.accentBlue),
+                child: CircularProgressIndicator(
+                  color: LuminaTokens.glassTextPrimary,
+                ),
               ),
             ),
           ),
@@ -1964,7 +1962,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               ? _buildCompactBanner(
                   bannerKey: const Key('streaming_guest_login_banner'),
                   icon: Icons.person_outline_rounded,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '登入 ${widget.provider.name} 以存取個人歌單',
                   subtitle: '免登入模式仍可於「探索推薦」與搜尋直接播放曲目。',
                   actionLabel: '前往登入',
@@ -1973,7 +1971,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               : _buildCompactBanner(
                   bannerKey: const Key('streaming_playlists_empty_banner'),
                   icon: Icons.queue_music_rounded,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '目前尚無已同步的 ${widget.provider.name} 歌單',
                   subtitle: '點擊右側「立即同步」以載入您的線上歌單。',
                   actionLabel: '立即同步',
@@ -2019,7 +2017,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               child: InkWell(
                 key: Key('streaming_playlist_${pl.id}'),
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
+                hoverColor: LuminaTokens.glassRowHoverBg,
                 onTap: () => _openPlaylist(pl),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
@@ -2103,7 +2101,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               ? _buildCompactBanner(
                   bannerKey: const Key('streaming_guest_login_banner'),
                   icon: Icons.person_outline_rounded,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '登入 ${widget.provider.name} 以同步收藏專輯',
                   subtitle: '免登入模式仍可自由瀏覽並播放下方推薦專輯。',
                   actionLabel: '前往登入',
@@ -2112,7 +2110,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
               : _buildCompactBanner(
                   bannerKey: const Key('streaming_albums_empty_banner'),
                   icon: Icons.album_outlined,
-                  iconColor: LuminaTokens.accentBlue,
+                  iconColor: LuminaTokens.glassTextSecondary,
                   title: '目前尚無已同步的 ${widget.provider.name} 專輯',
                   subtitle: '點擊右側「立即同步」以載入您收藏的串流專輯。',
                   actionLabel: '立即同步',
@@ -2184,13 +2182,14 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
               decoration: BoxDecoration(
-                color: LuminaTokens.cardElevatedBg,
+                color: LuminaTokens.glassPillBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+                border: Border.all(color: LuminaTokens.glassPillBorder),
               ),
               child: Text(
                 '$count',
                 style: const TextStyle(
-                  color: LuminaTokens.textSecondary,
+                  color: LuminaTokens.glassTextSecondary,
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),
@@ -2278,7 +2277,7 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       child: InkWell(
         key: cardKey,
         borderRadius: BorderRadius.circular(10),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.45),
+        hoverColor: LuminaTokens.glassRowHoverBg,
         onTap: widget.onOpenStreamingAlbum != null
             ? () => widget.onOpenStreamingAlbum!(album)
             : null,
@@ -2315,10 +2314,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                                   vertical: 3,
                                 ),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xDC0E111A),
+                                  color: LuminaTokens.glassDialogBg,
                                   borderRadius: BorderRadius.circular(6),
                                   border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.14),
+                                    color: LuminaTokens.glassPillBorder,
                                   ),
                                 ),
                                 child: Text(
@@ -2372,8 +2371,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
 
   Widget _buildAlbumCoverFallback() {
     return Container(
-      decoration: const BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
+      decoration: BoxDecoration(
+        color: LuminaTokens.glassPillBg,
+        border: Border.all(color: LuminaTokens.glassSidebarBorder),
       ),
       child: const Center(
         child: Icon(
@@ -2402,71 +2402,118 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
         type: MaterialType.transparency,
         child: InkWell(
           key: Key('streaming_track_${item.id}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
-        onTap: () => _playTrack(item, queueContext: queueContext),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? LuminaTokens.accentBlue.withValues(alpha: 0.10)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-          ),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 40,
-                height: 40,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _buildThumbnail(
-                      item.coverUrl ?? item.albumArtUrl,
-                      size: 40,
-                      fallbackIcon: Icons.music_note_rounded,
-                    ),
-                    if (isSelected)
-                      Container(
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.52),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Center(
-                          child: Icon(
-                            Icons.equalizer_rounded,
-                            color: LuminaTokens.accentBlue,
-                            size: 19,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () => _playTrack(item, queueContext: queueContext),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? LuminaTokens.glassNavActiveBg
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+            ),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _buildThumbnail(
+                        item.coverUrl ?? item.albumArtUrl,
+                        size: 40,
+                        fallbackIcon: Icons.music_note_rounded,
+                      ),
+                      if (isSelected)
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.52),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Center(
+                            child: Icon(
+                              Icons.equalizer_rounded,
+                              color: Colors.white,
+                              size: 19,
+                            ),
                           ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              if (isWideRow) ...[
-                Expanded(
-                  flex: 5,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        item.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isSelected
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.textPrimary,
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
+                const SizedBox(width: 12),
+                if (isWideRow) ...[
+                  Expanded(
+                    flex: 5,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          item.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: isSelected
+                                ? Colors.white
+                                : LuminaTokens.glassTextPrimary,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
+                        if (albumSub.isNotEmpty && albumSub != item.title) ...[
+                          const SizedBox(height: 1),
+                          Text(
+                            albumSub,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: LuminaTokens.textMuted,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 3,
+                    child: Text(
+                      item.artist,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: LuminaTokens.textMuted,
+                        fontSize: 12.5,
                       ),
-                      if (albumSub.isNotEmpty && albumSub != item.title) ...[
+                    ),
+                  ),
+                ] else
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          item.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: isSelected
+                                ? Colors.white
+                                : LuminaTokens.glassTextPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                         const SizedBox(height: 1),
                         Text(
-                          albumSub,
+                          albumSub.isNotEmpty
+                              ? '${item.artist} · $albumSub'
+                              : item.artist,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -2475,103 +2522,56 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
                           ),
                         ),
                       ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 3,
-                  child: Text(
-                    item.artist,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: LuminaTokens.textMuted,
-                      fontSize: 12.5,
                     ),
                   ),
-                ),
-              ] else
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        item.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isSelected
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.textPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
+                if (showQuality) ...[
+                  const SizedBox(width: 10),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: isWideRow ? 170 : 128,
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 3.5,
                       ),
-                      const SizedBox(height: 1),
-                      Text(
-                        albumSub.isNotEmpty
-                            ? '${item.artist} · $albumSub'
-                            : item.artist,
+                      decoration: BoxDecoration(
+                        color: LuminaTokens.glassPillBg,
+                        borderRadius: BorderRadius.circular(
+                          LuminaTokens.radiusPill,
+                        ),
+                        border: Border.all(color: LuminaTokens.glassPillBorder),
+                      ),
+                      child: Text(
+                        item.format.label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: LuminaTokens.textMuted,
-                          fontSize: 11.5,
+                          color: LuminaTokens.glassTextSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              if (showQuality) ...[
-                const SizedBox(width: 10),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: isWideRow ? 170 : 128,
-                  ),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 3.5,
                     ),
-                    decoration: BoxDecoration(
-                      color: LuminaTokens.cardElevatedBg,
-                      borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusPill,
-                      ),
-                      border: Border.all(color: LuminaTokens.borderSubtle),
-                    ),
-                    child: Text(
-                      item.format.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: LuminaTokens.textSecondary,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                      ),
+                  ),
+                ],
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 44,
+                  child: Text(
+                    durationLabel,
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                      color: LuminaTokens.textMuted,
+                      fontSize: 12,
+                      fontFeatures: [FontFeature.tabularFigures()],
                     ),
                   ),
                 ),
               ],
-              const SizedBox(width: 12),
-              SizedBox(
-                width: 44,
-                child: Text(
-                  durationLabel,
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: LuminaTokens.textMuted,
-                    fontSize: 12,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -2585,12 +2585,13 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: LuminaTokens.glassSidebarBorder),
       ),
       child: Icon(
         fallbackIcon,
-        color: LuminaTokens.textSecondary,
+        color: LuminaTokens.glassTextSecondary,
         size: size * 0.52,
       ),
     );
@@ -2620,9 +2621,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
       key: bannerKey,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Row(
         children: [
@@ -2630,8 +2631,9 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
             width: 34,
             height: 34,
             decoration: BoxDecoration(
-              color: LuminaTokens.cardElevatedBg,
+              color: LuminaTokens.glassPillBg,
               borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: LuminaTokens.glassPillBorder),
             ),
             child: Icon(icon, size: 18, color: iconColor),
           ),
@@ -2669,8 +2671,10 @@ class _StreamingServiceViewState extends State<StreamingServiceView> {
             FilledButton(
               onPressed: onAction,
               style: FilledButton.styleFrom(
-                backgroundColor: LuminaTokens.accentBlue,
+                backgroundColor: LuminaTokens.glassSwitchOnTrack,
                 foregroundColor: LuminaTokens.onAccentDark,
+                disabledBackgroundColor: LuminaTokens.glassPillBg,
+                disabledForegroundColor: LuminaTokens.textDisabled,
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
                   vertical: 8,

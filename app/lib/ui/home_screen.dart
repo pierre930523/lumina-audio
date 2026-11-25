@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 import '../models/nav_entry.dart';
 import '../models/playback_state.dart';
 import '../models/podcast_models.dart';
+import '../models/smart_playlist.dart';
 import '../models/streaming_models.dart';
 import '../models/streaming_provider_meta.dart';
 import '../models/studio_models.dart';
@@ -24,10 +25,15 @@ import '../services/library_settings_controller.dart';
 import '../services/now_playing_view_controller.dart';
 import '../services/playback_persistence_service.dart';
 import '../services/podcast_store.dart';
+import '../services/recommendation_settings_controller.dart';
 import '../services/smart_playlist_service.dart';
+import '../services/streaming/autoplay_controller.dart';
+import '../services/streaming/cross_platform_track_router.dart';
+import '../services/streaming/external_recommendation_providers.dart';
 import '../services/streaming/l1_stream_cache.dart';
 import '../services/streaming/oauth_helper.dart';
 import '../services/streaming/pot_sidecar_manager.dart';
+import '../services/streaming/recommendation_provider.dart';
 import '../services/streaming/secure_credential_store.dart';
 import '../services/streaming/streaming_manager.dart';
 import '../services/streaming/streaming_playback_coordinator.dart';
@@ -39,7 +45,9 @@ import 'albums/albums_and_credits_view.dart';
 import 'artists/artist_detail_page.dart';
 import 'artists/artists_view.dart';
 import 'audiobooks/audiobooks_view.dart';
+import 'common/ambient_dynamic_background.dart';
 import 'common/desktop_window_caption.dart';
+import 'common/frosted_glass_container.dart';
 import 'common/track_hover_prefetch.dart';
 import 'common/window_drag_bar.dart';
 import 'dsp/dsp_control_panel.dart';
@@ -90,6 +98,8 @@ class HomeScreen extends StatefulWidget {
   final StreamingManager? streamingManager;
   final PlaybackPersistenceService? playbackPersistenceService;
   final PodcastStore? podcastStore;
+  final RecommendationSettingsController? recommendationSettings;
+  final AutoplayController? autoplayController;
 
   const HomeScreen({
     super.key,
@@ -103,6 +113,8 @@ class HomeScreen extends StatefulWidget {
     this.streamingManager,
     this.playbackPersistenceService,
     this.podcastStore,
+    this.recommendationSettings,
+    this.autoplayController,
   });
 
   @override
@@ -114,10 +126,6 @@ class _HomeScreenState extends State<HomeScreen>
   late final DesktopWindowController _windowController =
       widget.windowController ?? DesktopWindowController.instance;
   static const _canvasBg = LuminaTokens.canvasBg;
-  static const _sidebarBg = LuminaTokens.sidebarBg;
-  static const _settingsRailBg = LuminaTokens.sidebarBg;
-  static const _dividerColor = LuminaTokens.borderSubtle;
-  static const _accentBlue = LuminaTokens.accentBlue;
 
   static const List<_NavItemSpec> _browseNavItems = [
     _NavItemSpec(
@@ -252,6 +260,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool _sidebarCollapsed = false;
   bool _isNowPlayingExpanded = false;
   bool _hasEverExpandedNowPlaying = false;
+  final ValueNotifier<double?> _measuredMiniPlayerHeight =
+      ValueNotifier<double?>(null);
+  double? _lastReportedMiniPlayerHeight;
   final TextEditingController _topSearchController = TextEditingController();
   final FocusNode _topSearchFocusNode = FocusNode();
   bool _topSearchExpanded = false;
@@ -285,10 +296,19 @@ class _HomeScreenState extends State<HomeScreen>
   late final PodcastPlaybackTracker _podcastPlaybackTracker;
   late final StreamingManager _streamingManager;
   late final bool _ownsStreamingManager;
+  late final RecommendationSettingsController _recommendationSettings;
+  late final bool _ownsRecommendationSettings;
+  late final LastFmRecommendationProvider? _lastFmProvider;
+  late final ListenBrainzRecommendationProvider? _listenBrainzProvider;
+  late final LocalLibraryTrackMatcher? _localTrackMatcher;
+  late final CrossPlatformTrackRouter? _trackRouter;
+  late final AutoplayController _autoplayController;
+  late final bool _ownsAutoplayController;
   late final StreamingPlaybackCoordinator _streamingCoordinator;
   late final CoordinatingAudioService _effectiveAudioService;
   late final UnifiedSearchController _searchController;
   StreamSubscription<PlaybackState>? _playbackStateSub;
+  StreamSubscription<TrackInfo>? _trackChangedSub;
 
   bool _isStartupRestoring = true;
   bool _isHiddenToTray = false;
@@ -388,9 +408,65 @@ class _HomeScreenState extends State<HomeScreen>
       );
     }
     _syncStreamingProvidersFromManager(notify: false);
+    _ownsRecommendationSettings = widget.recommendationSettings == null;
+    _recommendationSettings = widget.recommendationSettings ??
+        RecommendationSettingsController(
+          credentialStore: _streamingManager.credentialStore,
+        );
+    if (_ownsRecommendationSettings) {
+      unawaited(_recommendationSettings.load());
+    }
+    _ownsAutoplayController = widget.autoplayController == null;
+    if (_ownsAutoplayController) {
+      _lastFmProvider = LastFmRecommendationProvider(
+        apiKeyProvider: () => _recommendationSettings.lastFmApiKey,
+      );
+      _listenBrainzProvider = ListenBrainzRecommendationProvider(
+        enabledProvider: () => _recommendationSettings.listenBrainzEnabled,
+      );
+      _localTrackMatcher = LocalLibraryTrackMatcher(
+        searchLibrary: widget.audioService.searchLibrary,
+      );
+      _trackRouter = CrossPlatformTrackRouter(
+        providerLookup: _streamingManager.recommendationProviderFor,
+        authStateLookup: (pid) =>
+            _streamingManager.providerFor(pid)?.authState ??
+            StreamingAuthState.disconnected,
+        isAuthRequiredLookup: _streamingManager.authManager.isAuthRequired,
+        isPlaybackAuthBlockedLookup:
+            _streamingManager.authManager.isPlaybackAuthBlocked,
+        isGuestCapableLookup:
+            _streamingManager.authManager.isGuestPlaybackCapable,
+        localMatcher: _localTrackMatcher!.matchTrack,
+        priorityOrderProvider: () => _recommendationSettings.platformPriority,
+      );
+      _autoplayController = AutoplayController(
+        providerLookup: _streamingManager.recommendationProviderFor,
+        externalProviders: <RecommendationProvider>[
+          _lastFmProvider!,
+          _listenBrainzProvider!,
+        ],
+        trackRouter: _trackRouter,
+        settings: _recommendationSettings,
+        isAuthRequiredLookup: _streamingManager.authManager.isAuthRequired,
+        isGuestCapableLookup:
+            _streamingManager.authManager.isGuestPlaybackCapable,
+        authStateLookup: (pid) =>
+            _streamingManager.providerFor(pid)?.authState ??
+            StreamingAuthState.disconnected,
+        allowBackgroundRefill: !isTestEnv || widget.streamingManager != null,
+      );
+    } else {
+      _lastFmProvider = null;
+      _listenBrainzProvider = null;
+      _localTrackMatcher = null;
+      _trackRouter = null;
+      _autoplayController = widget.autoplayController!;
+    }
     _streamingCoordinator = StreamingPlaybackCoordinator(
       audioService: widget.audioService,
       streamingManager: _streamingManager,
+      autoplayController: _autoplayController,
       onNotice: _showStreamingNoticeSnackBar,
       onError: _showStreamingErrorSnackBar,
     );
@@ -437,6 +513,8 @@ class _HomeScreenState extends State<HomeScreen>
     );
 
     _playbackStateSub = _effectiveAudioService.stateStream.listen(_onPlaybackState);
+    _trackChangedSub =
+        _effectiveAudioService.trackChangedStream.listen(_onTrackChanged);
     _topSearchFocusNode.addListener(_onTopSearchFocusChanged);
     EscapeDismissRegistry.instance.registerGlobalHost();
     HardwareKeyboard.instance.addHandler(_handleHardwareKey);
@@ -525,7 +603,7 @@ class _HomeScreenState extends State<HomeScreen>
   String _trayTrackKeyFor(PlaybackState state) {
     final t = state.track;
     if (t == null) return 'none';
-    return '${t.id}|${t.title}|${t.artist}';
+    return '${t.id}|${t.title}|${t.artist}|${t.album}|${t.artworkUrl ?? ''}|${t.duration.inMilliseconds}';
   }
 
   ({String tooltip, String nowPlayingLabel, bool isPlaying}) _trayInfoFor(
@@ -560,13 +638,28 @@ class _HomeScreenState extends State<HomeScreen>
     _lastTrayPlaying = isPlaying;
     _lastTrayIdle = isIdle;
     final info = _trayInfoFor(state);
+    final track = state.track;
     unawaited(
-      _windowController.updateTray(
+      _windowController.updateSystemMediaControls(
+        title: isIdle ? null : track?.title,
+        artist: isIdle ? null : track?.artist,
+        album: isIdle ? null : track?.album,
+        artworkUrl: isIdle ? null : track?.artworkUrl,
+        duration: isIdle ? null : track?.duration,
+        position: isIdle ? null : state.position,
+        isPlaying: info.isPlaying,
         tooltip: info.tooltip,
         nowPlayingLabel: info.nowPlayingLabel,
-        isPlaying: info.isPlaying,
       ),
     );
+  }
+
+  void _onTrackChanged(TrackInfo track) {
+    final cur = _effectiveAudioService.currentState;
+    final effective = cur.track?.id == track.id
+        ? cur
+        : cur.copyWith(track: track, position: Duration.zero);
+    _onPlaybackState(effective);
   }
 
   void _onPlaybackState(PlaybackState state) {
@@ -583,7 +676,7 @@ class _HomeScreenState extends State<HomeScreen>
     _lastPersistedStatus = state.status;
     _lastPersistedTrackId = state.track?.id;
 
-    if (isPlaying) {
+    if (isPlaying || state.status == PlaybackStatus.loading) {
       final snapshot = _playbackPersistenceService.buildSnapshot(
         state: state,
         queue: _effectiveAudioService.queue,
@@ -717,8 +810,13 @@ class _HomeScreenState extends State<HomeScreen>
 
       await _playbackStateSub?.cancel();
       _playbackStateSub = null;
+      await _trackChangedSub?.cancel();
+      _trackChangedSub = null;
       _streamingCoordinator.dispose();
       _effectiveAudioService.dispose();
+      if (_ownsAutoplayController) {
+        _autoplayController.dispose();
+      }
       await _streamingCoordinator.ytDlpService.stopAll();
       if (widget.audioService is FfiAudioService) {
         (widget.audioService as FfiAudioService).detachStreamingManager();
@@ -1003,6 +1101,7 @@ class _HomeScreenState extends State<HomeScreen>
     _topSearchFocusNode.dispose();
     _topSearchController.dispose();
     _searchController.dispose();
+    _measuredMiniPlayerHeight.dispose();
     if (_windowController.onWindowClose == _handleWindowClose) {
       _windowController.onWindowClose = null;
     }
@@ -1033,6 +1132,12 @@ class _HomeScreenState extends State<HomeScreen>
     WidgetsBinding.instance.removeObserver(this);
     _streamingCoordinator.dispose();
     _effectiveAudioService.dispose();
+    if (_ownsAutoplayController) {
+      _autoplayController.dispose();
+    }
+    if (_ownsRecommendationSettings) {
+      _recommendationSettings.dispose();
+    }
     if (widget.audioService is FfiAudioService) {
       (widget.audioService as FfiAudioService).detachStreamingManager();
     }
@@ -1064,6 +1169,8 @@ class _HomeScreenState extends State<HomeScreen>
     _podcastPlaybackTracker.dispose();
     _playbackStateSub?.cancel();
     _playbackStateSub = null;
+    _trackChangedSub?.cancel();
+    _trackChangedSub = null;
     if (!_isExiting) {
       unawaited(_playbackPersistenceService.flush(syncFlush: true));
     }
@@ -1087,6 +1194,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _setNowPlayingExpanded(bool expanded) {
     if (_isNowPlayingExpanded == expanded) return;
+    if (!expanded && _nowPlayingController.queueDrawerOpen) {
+      _nowPlayingController.setQueueDrawerOpen(false);
+    }
     setState(() {
       _isNowPlayingExpanded = expanded;
       if (expanded) {
@@ -1211,7 +1321,31 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _toggleNowPlaying() {
-    _setNowPlayingExpanded(!_isNowPlayingExpanded);
+    if (_isNowPlayingExpanded) {
+      _setNowPlayingExpanded(false);
+      return;
+    }
+    _nowPlayingController.setQueueDrawerOpen(false);
+    _nowPlayingController.setMode(NowPlayingViewMode.cover);
+    _setNowPlayingExpanded(true);
+  }
+
+  void _toggleNowPlayingWithLyrics() {
+    if (_isNowPlayingExpanded) {
+      _setNowPlayingExpanded(false);
+      return;
+    }
+    _nowPlayingController.setQueueDrawerOpen(false);
+    _nowPlayingController.setMode(NowPlayingViewMode.split);
+    _setNowPlayingExpanded(true);
+  }
+
+  void _toggleNowPlayingLyricsMode() {
+    _nowPlayingController.setQueueDrawerOpen(false);
+    final next = _nowPlayingController.mode == NowPlayingViewMode.cover
+        ? NowPlayingViewMode.split
+        : NowPlayingViewMode.cover;
+    _nowPlayingController.setMode(next);
   }
 
   bool _isTextEditingFocused() {
@@ -1420,6 +1554,21 @@ class _HomeScreenState extends State<HomeScreen>
     return false;
   }
 
+  void _handleMiniPlayerHeightMeasured(double height) {
+    if (_lastReportedMiniPlayerHeight != null &&
+        (height - _lastReportedMiniPlayerHeight!).abs() <= 0.5) {
+      return;
+    }
+    _lastReportedMiniPlayerHeight = height;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final current = _measuredMiniPlayerHeight.value;
+      if (current == null || (current - height).abs() > 0.5) {
+        _measuredMiniPlayerHeight.value = height;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return TrackPrefetchScope(
@@ -1432,165 +1581,263 @@ class _HomeScreenState extends State<HomeScreen>
         onKeyEvent: _handleGlobalKeyEvent,
         child: FocusScope(
           child: Scaffold(
-            backgroundColor: _canvasBg,
-            body: TickerMode(
-              enabled: !_isHiddenToTray,
-              child: SafeArea(
-                child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final availWidth = constraints.maxWidth;
-                  final isDesktop =
-                      LuminaResponsive.showDesktopSidebar(availWidth);
-                  final sidebarWidth =
-                      LuminaResponsive.sidebarWidth(availWidth);
-                  final miniPlayerClearance = availWidth >= 740
-                      ? 99.0
-                      : (availWidth >= 480 ? 116.0 : 138.0);
-                  final showOverlay = _hasEverExpandedNowPlaying &&
-                      (_isNowPlayingExpanded ||
-                          !_nowPlayingAnimController.isDismissed);
-                  final isNowPlayingFullyCovered = _isNowPlayingExpanded &&
-                      _nowPlayingAnimController.isCompleted &&
-                      !_isHiddenToTray;
+            backgroundColor: Colors.transparent,
+            body: ColoredBox(
+              color: _canvasBg,
+              child: TickerMode(
+                enabled: !_isHiddenToTray,
+                child: SafeArea(
+                  child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final availWidth = constraints.maxWidth;
+                    final isDesktop =
+                        LuminaResponsive.showDesktopSidebar(availWidth);
+                    final sidebarWidth = math.max(
+                      220.0,
+                      LuminaResponsive.sidebarWidth(availWidth),
+                    );
+                    final fallbackMiniPlayerClearance = availWidth >= 740
+                        ? 84.0
+                        : (availWidth >= 480 ? 99.0 : 114.0);
+                    final showOverlay = _hasEverExpandedNowPlaying &&
+                        (_isNowPlayingExpanded ||
+                            !_nowPlayingAnimController.isDismissed);
+                    final isNowPlayingFullyCovered = _isNowPlayingExpanded &&
+                        _nowPlayingAnimController.isCompleted &&
+                        !_isHiddenToTray;
 
-                  return Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      // Layer 0: Persistent Workspace (never torn down on Now Playing open/close)
-                      Positioned.fill(
-                        key: const ValueKey('home_workspace_layer'),
-                        child: RepaintBoundary(
-                          key: const Key('workspace_repaint_boundary'),
-                          child: TickerMode(
-                            enabled:
-                                !_isHiddenToTray && !isNowPlayingFullyCovered,
-                            child: Visibility(
-                              visible: !isNowPlayingFullyCovered,
-                              maintainState: true,
-                              maintainAnimation: true,
-                              maintainSize: true,
-                              child: IgnorePointer(
-                                ignoring: _isNowPlayingExpanded,
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    bottom: miniPlayerClearance,
-                                  ),
-                                  child: Column(
-                                    children: [
-                                      _buildTopBar(
-                                        isDesktop: isDesktop,
-                                        availWidth: availWidth,
-                                        sidebarWidth: sidebarWidth,
-                                      ),
-                                      Expanded(
-                                        child: KeyedSubtree(
-                                          key: const ValueKey('workspace_stage'),
-                                          child: isDesktop
-                                              ? Row(
-                                                  children: [
-                                                    ClipRect(
-                                                      child: AnimatedAlign(
-                                                        duration: const Duration(
-                                                          milliseconds: 220,
-                                                        ),
-                                                        curve: Curves.easeOutCubic,
-                                                        alignment:
-                                                            Alignment.centerRight,
-                                                        widthFactor:
-                                                            _sidebarCollapsed
-                                                                ? 0.0
-                                                                : 1.0,
-                                                        child: _buildSidebar(
-                                                          width: sidebarWidth,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    Expanded(
-                                                      child: _buildMainColumn(
-                                                        isDesktop: true,
-                                                        availWidth: availWidth -
-                                                            (_sidebarCollapsed
-                                                                ? 0.0
-                                                                : sidebarWidth),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                )
-                                              : _buildMainColumn(
-                                                  isDesktop: false,
-                                                  availWidth: availWidth,
-                                                ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-
-                      // Layer 1: Fullscreen NowPlayingOverlay (spans 100% height from top: 0 to bottom: 0)
-                      if (showOverlay)
+                    return Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Layer -1: Single global ambient dynamic artwork/fluid background
                         Positioned.fill(
-                          key: const ValueKey('home_now_playing_layer'),
-                          child: RepaintBoundary(
-                            key: const Key(
-                              'now_playing_overlay_repaint_boundary',
+                          child: AmbientDynamicBackground(
+                            key: const ValueKey('home_ambient_bg_layer'),
+                            repaintBoundaryKey: const Key(
+                              'home_bg_repaint_boundary',
                             ),
-                            child: SlideTransition(
-                              position: _nowPlayingSlideAnim,
-                              child: FadeTransition(
-                                opacity: _nowPlayingCurvedAnim,
-                                child: NowPlayingOverlay(
-                                  key: const ValueKey('now_playing_stage'),
-                                  audioService: _effectiveAudioService,
-                                  libraryCache: _libraryCache,
-                                  controller: _nowPlayingController,
-                                  windowController: _windowController,
-                                  paletteService: _paletteService,
-                                  meshFluidProgram: _shaders.meshFluidProgram,
-                                  isVisible:
-                                      _isNowPlayingExpanded && !_isHiddenToTray,
-                                  isTransitionSettled:
-                                      isNowPlayingFullyCovered,
-                                  bottomClearance: miniPlayerClearance,
-                                  onCollapse: () =>
-                                      _setNowPlayingExpanded(false),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-
-                      // Layer 2: Single persistent floating capsule mini player pinned at bottom edge
-                      Positioned(
-                        key: const ValueKey('home_mini_player_layer'),
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: RepaintBoundary(
-                          key: const Key('mini_player_repaint_boundary'),
-                          child: FloatingCapsuleMiniPlayer(
+                            meshPainterKey: const Key('home_ambient_bg'),
                             audioService: _effectiveAudioService,
                             libraryCache: _libraryCache,
-                            uiScaleController: _scaleController,
-                            showLyrics: _isNowPlayingExpanded,
-                            isNowPlayingExpanded: _isNowPlayingExpanded,
-                            glassShader: _glassShader,
-                            backdropImage: _shaders.backdropImage,
-                            onToggleLyrics: _toggleNowPlaying,
-                            onToggleNowPlaying: _toggleNowPlaying,
-                            onOpenZones: () => _selectTab(HomeTab.zones),
-                            onOpenLibrary: () => _selectTab(HomeTab.library),
+                            paletteService: _paletteService,
+                            meshFluidProgram: _shaders.meshFluidProgram,
+                            enabled: !_isHiddenToTray,
                           ),
                         ),
-                      ),
-                    ],
-                  );
-                },
-              ),
+
+                        // Layers 0..2: Coupled shell layout so workspace abuts the
+                        // docked mini-player with 0.0px gap & 0.0px overlap while
+                        // preserving Element/RenderObject/State identity across
+                        // Now Playing open/close transitions.
+                        Positioned.fill(
+                          child: CustomMultiChildLayout(
+                            delegate: _HomeShellLayoutDelegate(
+                              onMiniPlayerHeightMeasured:
+                                  _handleMiniPlayerHeightMeasured,
+                            ),
+                            children: [
+                              // Layer 0: Persistent Workspace (never torn down on Now Playing open/close)
+                              LayoutId(
+                                key: const ValueKey('home_workspace_layer'),
+                                id: _HomeShellSlot.workspace,
+                                child: RepaintBoundary(
+                                  key: const Key('workspace_repaint_boundary'),
+                                  child: TickerMode(
+                                    enabled: !_isHiddenToTray &&
+                                        !isNowPlayingFullyCovered,
+                                    child: Visibility(
+                                      visible: !isNowPlayingFullyCovered,
+                                      maintainState: true,
+                                      maintainAnimation: true,
+                                      maintainSize: true,
+                                      child: IgnorePointer(
+                                        ignoring: _isNowPlayingExpanded,
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            Positioned.fill(
+                                              child: KeyedSubtree(
+                                                key: const ValueKey(
+                                                  'workspace_stage',
+                                                ),
+                                                child: isDesktop
+                                                    ? Row(
+                                                        crossAxisAlignment:
+                                                            CrossAxisAlignment
+                                                                .stretch,
+                                                        children: [
+                                                          ClipRect(
+                                                            child:
+                                                                AnimatedAlign(
+                                                              duration:
+                                                                  const Duration(
+                                                                milliseconds:
+                                                                    220,
+                                                              ),
+                                                              curve: Curves
+                                                                  .easeOutCubic,
+                                                              alignment:
+                                                                  Alignment
+                                                                      .centerRight,
+                                                              widthFactor:
+                                                                  _sidebarCollapsed
+                                                                      ? 0.0
+                                                                      : 1.0,
+                                                              child:
+                                                                  _buildSidebar(
+                                                                width:
+                                                                    sidebarWidth,
+                                                                collapsed:
+                                                                    _sidebarCollapsed,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          Expanded(
+                                                            child:
+                                                                _buildMainColumn(
+                                                              isDesktop: true,
+                                                              availWidth: availWidth -
+                                                                  (_sidebarCollapsed
+                                                                      ? 0.0
+                                                                      : sidebarWidth),
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      )
+                                                    : _buildMainColumn(
+                                                        isDesktop: false,
+                                                        availWidth: availWidth,
+                                                      ),
+                                              ),
+                                            ),
+                                            Positioned(
+                                              top: 0,
+                                              left: 0,
+                                              right: 0,
+                                              height:
+                                                  WindowDragBar.kDefaultHeight,
+                                              child: _buildTopBar(
+                                                isDesktop: isDesktop,
+                                                availWidth: availWidth,
+                                                sidebarWidth: sidebarWidth,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+
+                              // Layer 1: Fullscreen NowPlayingOverlay (spans 100% height from top: 0 to bottom: 0)
+                              if (showOverlay)
+                                LayoutId(
+                                  key: const ValueKey('home_now_playing_layer'),
+                                  id: _HomeShellSlot.nowPlaying,
+                                  child: RepaintBoundary(
+                                    key: const Key(
+                                      'now_playing_overlay_repaint_boundary',
+                                    ),
+                                    child: SlideTransition(
+                                      position: _nowPlayingSlideAnim,
+                                      child: FadeTransition(
+                                        opacity: _nowPlayingCurvedAnim,
+                                        child: ValueListenableBuilder<double?>(
+                                          valueListenable:
+                                              _measuredMiniPlayerHeight,
+                                          builder:
+                                              (context, measuredHeight, _) {
+                                            return NowPlayingOverlay(
+                                              key: const ValueKey(
+                                                'now_playing_stage',
+                                              ),
+                                              audioService:
+                                                  _effectiveAudioService,
+                                              libraryCache: _libraryCache,
+                                              controller: _nowPlayingController,
+                                              windowController:
+                                                  _windowController,
+                                              paletteService: _paletteService,
+                                              meshFluidProgram:
+                                                  _shaders.meshFluidProgram,
+                                              isVisible:
+                                                  _isNowPlayingExpanded &&
+                                                      !_isHiddenToTray,
+                                              isTransitionSettled:
+                                                  isNowPlayingFullyCovered,
+                                              bottomClearance:
+                                                  measuredHeight ??
+                                                      fallbackMiniPlayerClearance,
+                                              hasHostControls: true,
+                                              recommendationSettings:
+                                                  _recommendationSettings,
+                                              onOpenDsp: () {
+                                                _setNowPlayingExpanded(false);
+                                                _selectTab(HomeTab.dsp);
+                                              },
+                                              onCollapse: () =>
+                                                  _setNowPlayingExpanded(false),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+
+                              // Layer 2: Single persistent docked mini player pinned flush to bottom edge
+                              LayoutId(
+                                key: const ValueKey('home_mini_player_layer'),
+                                id: _HomeShellSlot.miniPlayer,
+                                child: RepaintBoundary(
+                                  key:
+                                      const Key('mini_player_repaint_boundary'),
+                                  child: ListenableBuilder(
+                                    listenable: _nowPlayingController,
+                                    builder: (context, _) {
+                                      return FloatingCapsuleMiniPlayer(
+                                        audioService: _effectiveAudioService,
+                                        libraryCache: _libraryCache,
+                                        uiScaleController: _scaleController,
+                                        recommendationSettings:
+                                            _recommendationSettings,
+                                        showLyrics: _isNowPlayingExpanded &&
+                                            _nowPlayingController.mode !=
+                                                NowPlayingViewMode.cover,
+                                        isNowPlayingExpanded:
+                                            _isNowPlayingExpanded,
+                                        isQueueDrawerOpen:
+                                            _isNowPlayingExpanded &&
+                                                _nowPlayingController
+                                                    .queueDrawerOpen,
+                                        glassShader: _glassShader,
+                                        backdropImage: _shaders.backdropImage,
+                                        onToggleLyrics:
+                                            _toggleNowPlayingWithLyrics,
+                                        onToggleNowPlaying: _toggleNowPlaying,
+                                        onToggleNowPlayingLyrics:
+                                            _toggleNowPlayingLyricsMode,
+                                        onToggleNowPlayingQueue:
+                                            _nowPlayingController
+                                                .toggleQueueDrawer,
+                                        onOpenZones: () =>
+                                            _selectTab(HomeTab.zones),
+                                        onOpenLibrary: () =>
+                                            _selectTab(HomeTab.library),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                ),
               ),
             ),
           ),
@@ -1600,136 +1847,170 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildSidebar({required double width}) {
-    return Container(
+  Widget _buildSidebar({required double width, required bool collapsed}) {
+    return FrostedGlassContainer(
+      key: const Key('main_sidebar_glass_container'),
       width: width,
-      decoration: const BoxDecoration(
-        color: _sidebarBg,
-        border: Border(right: BorderSide(color: _dividerColor, width: 1)),
+      color: LuminaTokens.glassSidebarBg,
+      blurSigma: LuminaTokens.glassSidebarBlur,
+      enableBackdropBlur: !collapsed,
+      border: const Border(
+        right: BorderSide(color: LuminaTokens.glassSidebarBorder, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          IgnorePointer(
+            child: SizedBox(
+              key: const Key('sidebar_brand_header'),
+              width: width,
+              height: WindowDragBar.kDefaultHeight,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 18),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Lumina Audio',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
           const SizedBox(height: 8),
           Expanded(
-            child: ListenableBuilder(
-              listenable: _playlistService,
-              builder: (context, _) {
-                final smartPlaylists = _playlistService.playlists;
-                return SingleChildScrollView(
-                  padding: const EdgeInsets.only(
-                    bottom: LuminaTokens.bottomScrollClearance,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildSidebarSectionLabel('瀏覽'),
-                      for (final item in _browseNavItems)
-                        _buildSidebarTile(item),
-                      const SizedBox(height: LuminaTokens.spaceSm),
-                      _buildSidebarSectionLabel('我的音樂資料庫'),
-                      for (final item in _libraryNavItems)
-                        _buildSidebarTile(item),
-                      const SizedBox(height: LuminaTokens.spaceSm),
-                      _buildSidebarSectionLabel('媒體'),
-                      for (final item in _mediaNavItems)
-                        _buildSidebarTile(item),
-                      if (_loggedInStreamingProviders.isNotEmpty) ...[
+            child: _BottomEdgeFadeMask(
+              fadeHeight: 28.0,
+              child: ListenableBuilder(
+                listenable: _playlistService,
+                builder: (context, _) {
+                  final smartPlaylists = _playlistService.playlists;
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.only(
+                      bottom: LuminaTokens.bottomScrollClearance,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildSidebarSectionLabel('瀏覽'),
+                        for (final item in _browseNavItems)
+                          _buildSidebarTile(item),
                         const SizedBox(height: LuminaTokens.spaceSm),
-                        _buildSidebarSectionLabel('串流服務'),
-                        for (final p in _loggedInStreamingProviders)
-                          if (StreamingProviderMeta.byKind(p.kind)
-                              case final meta?)
-                            _buildStreamingSidebarTile(meta),
+                        _buildSidebarSectionLabel('我的音樂資料庫'),
+                        for (final item in _libraryNavItems)
+                          _buildSidebarTile(item),
+                        const SizedBox(height: LuminaTokens.spaceSm),
+                        _buildSidebarSectionLabel('媒體'),
+                        for (final item in _mediaNavItems)
+                          _buildSidebarTile(item),
+                        if (_loggedInStreamingProviders.isNotEmpty) ...[
+                          const SizedBox(height: LuminaTokens.spaceSm),
+                          _buildSidebarSectionLabel('串流服務'),
+                          for (final p in _loggedInStreamingProviders)
+                            if (StreamingProviderMeta.byKind(p.kind)
+                                case final meta?)
+                              _buildStreamingSidebarTile(meta),
+                        ],
+                        const SizedBox(height: LuminaTokens.spaceMd),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(18, 0, 10, 4),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                '智慧播放清單',
+                                style: TextStyle(
+                                  color: LuminaTokens.glassTextTertiary,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0.4,
+                                ),
+                              ),
+                              IconButton(
+                                key: const Key('btn_sidebar_new_smart_playlist'),
+                                tooltip: '新增智慧歌單',
+                                visualDensity: VisualDensity.compact,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 28,
+                                  minHeight: 28,
+                                ),
+                                icon: const Icon(
+                                  Icons.add_rounded,
+                                  size: 16,
+                                  color: LuminaTokens.glassTextSecondary,
+                                ),
+                                onPressed: _promptCreateSmartPlaylist,
+                              ),
+                            ],
+                          ),
+                        ),
+                        for (final sp in smartPlaylists)
+                          _buildSmartPlaylistSidebarTile(sp),
                       ],
-                      const SizedBox(height: LuminaTokens.spaceMd),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(18, 0, 10, 4),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text(
-                              '智慧播放清單',
-                              style: TextStyle(
-                                color: LuminaTokens.textMuted,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 0.4,
-                              ),
-                            ),
-                            IconButton(
-                              key: const Key('btn_sidebar_new_smart_playlist'),
-                              tooltip: '新增智慧歌單',
-                              visualDensity: VisualDensity.compact,
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(
-                                minWidth: 28,
-                                minHeight: 28,
-                              ),
-                              icon: const Icon(
-                                Icons.add_rounded,
-                                size: 16,
-                                color: LuminaTokens.textSecondary,
-                              ),
-                              onPressed: _promptCreateSmartPlaylist,
-                            ),
-                          ],
-                        ),
-                      ),
-                      for (final sp in smartPlaylists)
-                        InkWell(
-                          hoverColor: LuminaTokens.cardHoverBg.withValues(
-                            alpha: 0.7,
-                          ),
-                          onTap: () => _openSmartPlaylist(sp.id),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 18,
-                              vertical: 6,
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.auto_awesome_rounded,
-                                  size: 13,
-                                  color: (_activeTab ==
-                                              HomeTab.smartPlaylists &&
-                                          _selectedSmartPlaylistId == sp.id)
-                                      ? _accentBlue
-                                      : LuminaTokens.textMuted,
-                                ),
-                                const SizedBox(width: LuminaTokens.spaceXs),
-                                Expanded(
-                                  child: Text(
-                                    sp.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: (_activeTab ==
-                                                  HomeTab.smartPlaylists &&
-                                              _selectedSmartPlaylistId == sp.id)
-                                          ? _accentBlue
-                                          : LuminaTokens.textSecondary,
-                                      fontSize: 12,
-                                      fontWeight: (_activeTab ==
-                                                  HomeTab.smartPlaylists &&
-                                              _selectedSmartPlaylistId == sp.id)
-                                          ? FontWeight.w600
-                                          : FontWeight.w400,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                );
-              },
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSmartPlaylistSidebarTile(SmartPlaylist sp) {
+    final isSelected =
+        _activeTab == HomeTab.smartPlaylists &&
+        _selectedSmartPlaylistId == sp.id;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
+      child: Material(
+        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () => _openSmartPlaylist(sp.id),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 13,
+                  color: isSelected
+                      ? LuminaTokens.glassTextPrimary
+                      : LuminaTokens.glassTextSecondary,
+                ),
+                const SizedBox(width: LuminaTokens.spaceXs),
+                Expanded(
+                  child: Text(
+                    sp.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected
+                          ? LuminaTokens.glassTextPrimary
+                          : LuminaTokens.glassTextSecondary,
+                      fontSize: 12,
+                      fontWeight: isSelected
+                          ? FontWeight.w600
+                          : FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1740,7 +2021,7 @@ class _HomeScreenState extends State<HomeScreen>
       child: Text(
         title,
         style: const TextStyle(
-          color: LuminaTokens.textMuted,
+          color: LuminaTokens.glassTextTertiary,
           fontSize: 11,
           fontWeight: FontWeight.w600,
           letterSpacing: 0.4,
@@ -1767,14 +2048,12 @@ class _HomeScreenState extends State<HomeScreen>
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
       child: Material(
-        color: isSelected
-            ? _accentBlue.withValues(alpha: 0.12)
-            : Colors.transparent,
-        borderRadius: BorderRadius.circular(6),
+        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
         child: InkWell(
           key: Key('nav_streaming_${meta.kind}'),
-          borderRadius: BorderRadius.circular(6),
-          hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: LuminaTokens.glassRowHoverBg,
           onTap: () => _openStreamingProvider(meta.kind),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -1789,8 +2068,8 @@ class _HomeScreenState extends State<HomeScreen>
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: isSelected
-                          ? _accentBlue
-                          : LuminaTokens.textPrimary,
+                          ? LuminaTokens.glassTextPrimary
+                          : LuminaTokens.glassTextSecondary,
                       fontSize: 13,
                       fontWeight: isSelected
                           ? FontWeight.w600
@@ -1824,16 +2103,14 @@ class _HomeScreenState extends State<HomeScreen>
     final isSelected = _activeTab == item.tab ||
         (item.tab == HomeTab.podcasts && _activeTab == HomeTab.podcastDetail);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1.5),
       child: Material(
-        color: isSelected
-            ? _accentBlue.withValues(alpha: 0.12)
-            : Colors.transparent,
-        borderRadius: BorderRadius.circular(6),
+        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
         child: InkWell(
           key: Key(item.keyName),
-          borderRadius: BorderRadius.circular(6),
-          hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: LuminaTokens.glassRowHoverBg,
           onTap: () => _selectTab(item.tab),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -1842,7 +2119,9 @@ class _HomeScreenState extends State<HomeScreen>
                 Icon(
                   isSelected ? item.activeIcon : item.icon,
                   size: 17,
-                  color: isSelected ? _accentBlue : LuminaTokens.textSecondary,
+                  color: isSelected
+                      ? LuminaTokens.glassTextPrimary
+                      : LuminaTokens.glassTextSecondary,
                 ),
                 const SizedBox(width: 11),
                 Expanded(
@@ -1852,8 +2131,8 @@ class _HomeScreenState extends State<HomeScreen>
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: isSelected
-                          ? _accentBlue
-                          : LuminaTokens.textPrimary,
+                          ? LuminaTokens.glassTextPrimary
+                          : LuminaTokens.glassTextSecondary,
                       fontSize: 13,
                       fontWeight: isSelected
                           ? FontWeight.w600
@@ -1871,33 +2150,63 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildMainColumn({required bool isDesktop, required double availWidth}) {
     final currentEntry = _navController.current;
+    final inSettings = _isSettingsTab(_activeTab);
+
+    final Widget stageChild;
+    if (inSettings) {
+      stageChild = _buildSettingsWorkspace(
+        isDesktop: isDesktop,
+        availWidth: availWidth,
+        topBarHeight: isDesktop ? WindowDragBar.kDefaultHeight : 0.0,
+      );
+    } else {
+      final maskedContent = _BottomEdgeFadeMask(
+        key: const Key('main_content_bottom_fade_mask'),
+        fadeHeight: 28.0,
+        child: _buildActiveContent(
+          isDesktop: isDesktop,
+          availWidth: availWidth,
+        ),
+      );
+      stageChild = isDesktop
+          ? Column(
+              children: [
+                const SizedBox(height: WindowDragBar.kDefaultHeight),
+                Expanded(child: maskedContent),
+              ],
+            )
+          : maskedContent;
+    }
+
+    final switcher = AnimatedSwitcher(
+      duration: const Duration(milliseconds: 120),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final slide = Tween<Offset>(
+          begin: const Offset(0.008, 0),
+          end: Offset.zero,
+        ).animate(animation);
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(position: slide, child: child),
+        );
+      },
+      child: KeyedSubtree(
+        key: ValueKey('stage_${currentEntry.effectiveId}'),
+        child: stageChild,
+      ),
+    );
+
+    if (isDesktop) {
+      return switcher;
+    }
+
     return Column(
       children: [
-        if (!isDesktop) _buildCompactNavStrip(),
-        Expanded(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 120),
-            switchInCurve: Curves.easeOutCubic,
-            switchOutCurve: Curves.easeInCubic,
-            transitionBuilder: (child, animation) {
-              final slide = Tween<Offset>(
-                begin: const Offset(0.008, 0),
-                end: Offset.zero,
-              ).animate(animation);
-              return FadeTransition(
-                opacity: animation,
-                child: SlideTransition(position: slide, child: child),
-              );
-            },
-            child: KeyedSubtree(
-              key: ValueKey('stage_${currentEntry.effectiveId}'),
-              child: _buildActiveContent(
-                isDesktop: isDesktop,
-                availWidth: availWidth,
-              ),
-            ),
-          ),
-        ),
+        const SizedBox(height: WindowDragBar.kDefaultHeight),
+        _buildCompactNavStrip(),
+        Expanded(child: switcher),
       ],
     );
   }
@@ -1909,7 +2218,7 @@ class _HomeScreenState extends State<HomeScreen>
         return PopupMenuButton<double>(
           key: const Key('btn_quick_scale_menu'),
           tooltip: '快速調整介面縮放（Ctrl + +/- / 0）',
-          color: _sidebarBg,
+          color: LuminaTokens.glassMenuBg,
           onSelected: (val) {
             if (val < 0) {
               _selectTab(HomeTab.appearance);
@@ -1930,8 +2239,8 @@ class _HomeScreenState extends State<HomeScreen>
                           : Icons.crop_free_rounded,
                       size: 16,
                       color: (_scaleController.scale - preset).abs() < 0.02
-                          ? _accentBlue
-                          : LuminaTokens.textMuted,
+                          ? LuminaTokens.glassTextPrimary
+                          : LuminaTokens.glassTextTertiary,
                     ),
                     const SizedBox(width: 8),
                     Text(
@@ -1939,7 +2248,7 @@ class _HomeScreenState extends State<HomeScreen>
                           ? '100% (預設)'
                           : '${(preset * 100).round()}%',
                       style: const TextStyle(
-                        color: LuminaTokens.textPrimary,
+                        color: LuminaTokens.glassTextPrimary,
                         fontSize: 13,
                       ),
                     ),
@@ -1951,30 +2260,33 @@ class _HomeScreenState extends State<HomeScreen>
               value: -1.0,
               child: Text(
                 '開啟外觀與縮放微調面板...',
-                style: TextStyle(color: _accentBlue, fontSize: 12.5),
+                style: TextStyle(
+                  color: LuminaTokens.glassTextPrimary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: LuminaTokens.cardElevatedBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-              border: Border.all(color: LuminaTokens.borderControl),
-            ),
+          child: FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassPillBlur,
+            color: LuminaTokens.glassPillBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+            border: Border.all(color: LuminaTokens.glassPillBorder),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(
                   Icons.aspect_ratio_rounded,
                   size: 14,
-                  color: LuminaTokens.textSecondary,
+                  color: LuminaTokens.glassTextSecondary,
                 ),
                 const SizedBox(width: 4),
                 Text(
                   '${_scaleController.percentage}%',
                   style: const TextStyle(
-                    color: LuminaTokens.textSecondary,
+                    color: LuminaTokens.glassTextPrimary,
                     fontSize: 11.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -1999,46 +2311,30 @@ class _HomeScreenState extends State<HomeScreen>
         availWidth - (isDesktop && !_sidebarCollapsed ? sidebarWidth : 0.0);
     final isCompactTopBar = contentAvailWidth < 480;
     final isCompactProfile = contentAvailWidth < (isDesktop ? 720 : 520);
+    final showScaleMenu = isDesktop && contentAvailWidth >= 760;
+    final showDspQuickBtn = contentAvailWidth >= 600;
+    final isDspSelected = _activeTab == HomeTab.dsp;
 
     return WindowDragBar(
       controller: _windowController,
-      height: 48.0,
-      border: inSettings
-          ? const Border(
-              bottom: BorderSide(color: _dividerColor, width: 1),
-            )
-          : null,
+      height: WindowDragBar.kDefaultHeight,
+      backgroundColor: Colors.transparent,
+      border: null,
       child: Row(
         children: [
           if (isDesktop)
             IgnorePointer(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                width: _sidebarCollapsed ? 0.0 : sidebarWidth,
-                decoration: BoxDecoration(
-                  color: _sidebarBg,
-                  border: _sidebarCollapsed
-                      ? null
-                      : const Border(
-                          right: BorderSide(color: _dividerColor, width: 1),
-                        ),
+              child: ClipRect(
+                child: AnimatedAlign(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.centerRight,
+                  widthFactor: _sidebarCollapsed ? 0.0 : 1.0,
+                  child: SizedBox(
+                    width: sidebarWidth,
+                    height: WindowDragBar.kDefaultHeight,
+                  ),
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 18),
-                alignment: Alignment.centerLeft,
-                child: _sidebarCollapsed
-                    ? null
-                    : const Text(
-                        'Lumina Audio',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: -0.3,
-                        ),
-                      ),
               ),
             ),
           if (isDesktop) const SizedBox(width: 8),
@@ -2048,12 +2344,13 @@ class _HomeScreenState extends State<HomeScreen>
               visualDensity: VisualDensity.compact,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               padding: EdgeInsets.zero,
+              hoverColor: LuminaTokens.glassPillHoverBg,
               icon: Icon(
                 _sidebarCollapsed
                     ? Icons.menu_rounded
                     : Icons.menu_open_rounded,
                 size: 19,
-                color: LuminaTokens.textSecondary,
+                color: LuminaTokens.glassTextSecondary,
               ),
               onPressed: () {
                 setState(() => _sidebarCollapsed = !_sidebarCollapsed);
@@ -2065,12 +2362,13 @@ class _HomeScreenState extends State<HomeScreen>
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             padding: EdgeInsets.zero,
+            hoverColor: LuminaTokens.glassPillHoverBg,
             disabledColor: LuminaTokens.textDisabled,
             icon: Icon(
               Icons.chevron_left_rounded,
               size: 22,
               color: canGoBack
-                  ? LuminaTokens.textPrimary
+                  ? LuminaTokens.glassTextPrimary
                   : LuminaTokens.textDisabled,
             ),
             onPressed: canGoBack ? _goBack : null,
@@ -2081,12 +2379,13 @@ class _HomeScreenState extends State<HomeScreen>
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
             padding: EdgeInsets.zero,
+            hoverColor: LuminaTokens.glassPillHoverBg,
             disabledColor: LuminaTokens.textDisabled,
             icon: Icon(
               Icons.chevron_right_rounded,
               size: 22,
               color: canGoForward
-                  ? LuminaTokens.textPrimary
+                  ? LuminaTokens.glassTextPrimary
                   : LuminaTokens.textDisabled,
             ),
             onPressed: canGoForward ? _goForward : null,
@@ -2095,24 +2394,40 @@ class _HomeScreenState extends State<HomeScreen>
             isDesktop: isDesktop,
             isCompactTopBar: isCompactTopBar,
           ),
-          if (isDesktop && contentAvailWidth >= 760) ...[
+          if (showScaleMenu) ...[
             _buildQuickScaleMenu(),
             const SizedBox(width: 6),
-            IconButton(
-              tooltip: '專輯典藏',
-              visualDensity: VisualDensity.compact,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              padding: EdgeInsets.zero,
-              icon: Icon(
-                Icons.bookmark_border_rounded,
-                size: 19,
-                color: _activeTab == HomeTab.albums
-                    ? _accentBlue
-                    : LuminaTokens.textSecondary,
+          ],
+          if (showDspQuickBtn) ...[
+            FrostedGlassContainer(
+              blurSigma: LuminaTokens.glassPillBlur,
+              color: isDspSelected
+                  ? LuminaTokens.glassNavActiveBg
+                  : LuminaTokens.glassPillBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+              border: Border.all(
+                color: isDspSelected
+                    ? LuminaTokens.glassCoverRim
+                    : LuminaTokens.glassPillBorder,
               ),
-              onPressed: () => _selectTab(HomeTab.albums),
+              child: IconButton(
+                key: const Key('btn_topbar_dsp'),
+                tooltip: '64-bit DSP 音訊引擎',
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                padding: EdgeInsets.zero,
+                hoverColor: LuminaTokens.glassPillHoverBg,
+                icon: Icon(
+                  Icons.graphic_eq_rounded,
+                  size: 18,
+                  color: isDspSelected
+                      ? LuminaTokens.glassTextPrimary
+                      : LuminaTokens.glassTextSecondary,
+                ),
+                onPressed: () => _selectTab(HomeTab.dsp),
+              ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 6),
           ],
           _buildCollapsibleTopSearch(
             contentAvailWidth,
@@ -2120,18 +2435,17 @@ class _HomeScreenState extends State<HomeScreen>
             isCompactTopBar: isCompactTopBar,
             isCompactProfile: isCompactProfile,
           ),
-          const SizedBox(width: 2),
-          Container(
-            decoration: BoxDecoration(
+          const SizedBox(width: 6),
+          FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassPillBlur,
+            color: inSettings
+                ? LuminaTokens.glassNavActiveBg
+                : LuminaTokens.glassPillBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+            border: Border.all(
               color: inSettings
-                  ? _accentBlue.withValues(alpha: 0.16)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-              border: Border.all(
-                color: inSettings
-                    ? _accentBlue.withValues(alpha: 0.7)
-                    : Colors.transparent,
-              ),
+                  ? LuminaTokens.glassCoverRim
+                  : LuminaTokens.glassPillBorder,
             ),
             child: IconButton(
               key: const Key('btn_open_settings_hub'),
@@ -2139,16 +2453,19 @@ class _HomeScreenState extends State<HomeScreen>
               visualDensity: VisualDensity.compact,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               padding: EdgeInsets.zero,
+              hoverColor: LuminaTokens.glassPillHoverBg,
               icon: Icon(
                 inSettings ? Icons.settings_rounded : Icons.settings_outlined,
-                size: 19,
-                color: inSettings ? _accentBlue : LuminaTokens.textSecondary,
+                size: 18,
+                color: inSettings
+                    ? LuminaTokens.glassTextPrimary
+                    : LuminaTokens.glassTextSecondary,
               ),
               onPressed: () => _selectTab(_lastSettingsTab),
             ),
           ),
           if (contentAvailWidth >= 380) ...[
-            SizedBox(width: isCompactTopBar ? 2 : 6),
+            SizedBox(width: isCompactTopBar ? 4 : 6),
             ProfileSwitcherBar(
               audioService: _effectiveAudioService,
               compact: isCompactProfile,
@@ -2173,16 +2490,18 @@ class _HomeScreenState extends State<HomeScreen>
     required bool isCompactTopBar,
     required bool isCompactProfile,
   }) {
-    final showDesktopQuickActions = isDesktop && contentAvailWidth >= 760;
+    final showScaleMenu = isDesktop && contentAvailWidth >= 760;
+    final showDspQuickBtn = contentAvailWidth >= 600;
     final showProfile = contentAvailWidth >= 380;
     final reservedWidth =
         (isDesktop ? 48.0 : 0.0) + // sidebar toggle + spacing
         80.0 + // back + forward buttons
         (isDesktop ? 56.0 : 28.0) + // minimum drag bar / title breathing room
-        (showDesktopQuickActions ? 126.0 : 0.0) + // scale menu + bookmark
-        44.0 + // settings button + spacing
+        (showScaleMenu ? 90.0 : 0.0) + // quick scale pill + spacing
+        (showDspQuickBtn ? 42.0 : 0.0) + // dsp quick button + spacing
+        46.0 + // settings pill + spacing
         (showProfile
-            ? ((isCompactTopBar ? 2.0 : 6.0) + (isCompactProfile ? 34.0 : 138.0))
+            ? ((isCompactTopBar ? 4.0 : 6.0) + (isCompactProfile ? 38.0 : 142.0))
             : 0.0) +
         (isDesktop ? 184.0 : 0.0); // desktop window caption buttons + spacing
 
@@ -2208,21 +2527,17 @@ class _HomeScreenState extends State<HomeScreen>
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
         width: boxWidth,
-        height: 32.0,
+        height: 34.0,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: _topSearchExpanded
-              ? LuminaTokens.cardElevatedBg
-              : Colors.transparent,
+          color: LuminaTokens.glassPillBg,
           borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-          border: _topSearchExpanded
-              ? Border.all(
-                  color: hasFocus
-                      ? LuminaTokens.focusRing
-                      : LuminaTokens.borderControl,
-                  width: hasFocus ? 1.4 : 1.0,
-                )
-              : null,
+          border: Border.all(
+            color: (_topSearchExpanded && hasFocus)
+                ? LuminaTokens.focusRing
+                : LuminaTokens.glassPillBorder,
+            width: (_topSearchExpanded && hasFocus) ? 1.4 : 1.0,
+          ),
         ),
         child: _topSearchExpanded
             ? OverflowBox(
@@ -2239,7 +2554,7 @@ class _HomeScreenState extends State<HomeScreen>
                         child: Icon(
                           Icons.search_rounded,
                           size: 16,
-                          color: LuminaTokens.textSecondary,
+                          color: LuminaTokens.glassTextSecondary,
                         ),
                       ),
                     ),
@@ -2253,7 +2568,7 @@ class _HomeScreenState extends State<HomeScreen>
                         maxLines: 1,
                         textAlignVertical: TextAlignVertical.center,
                         style: const TextStyle(
-                          color: LuminaTokens.textPrimary,
+                          color: LuminaTokens.glassTextPrimary,
                           fontSize: 13,
                           height: 1.2,
                         ),
@@ -2266,7 +2581,7 @@ class _HomeScreenState extends State<HomeScreen>
                           focusedBorder: InputBorder.none,
                           hintText: '搜尋曲庫與串流...',
                           hintStyle: TextStyle(
-                            color: LuminaTokens.textMuted,
+                            color: LuminaTokens.glassTextTertiary,
                             fontSize: 12.5,
                           ),
                           contentPadding: EdgeInsets.symmetric(vertical: 4),
@@ -2288,7 +2603,7 @@ class _HomeScreenState extends State<HomeScreen>
                       icon: const Icon(
                         Icons.close_rounded,
                         size: 15,
-                        color: LuminaTokens.textSecondary,
+                        color: LuminaTokens.glassTextSecondary,
                       ),
                       onPressed: _handleTopSearchClearPressed,
                     ),
@@ -2306,13 +2621,14 @@ class _HomeScreenState extends State<HomeScreen>
                     minHeight: 32,
                   ),
                   padding: EdgeInsets.zero,
+                  hoverColor: LuminaTokens.glassPillHoverBg,
                   style: IconButton.styleFrom(
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                   icon: const Icon(
                     Icons.search_rounded,
-                    size: 19,
-                    color: LuminaTokens.textSecondary,
+                    size: 18,
+                    color: LuminaTokens.glassTextSecondary,
                   ),
                   onPressed: _expandTopSearch,
                 ),
@@ -2351,7 +2667,7 @@ class _HomeScreenState extends State<HomeScreen>
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: LuminaTokens.textPrimary,
+                          color: LuminaTokens.glassTextPrimary,
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
                         ),
@@ -2369,7 +2685,7 @@ class _HomeScreenState extends State<HomeScreen>
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: LuminaTokens.textPrimary,
+                          color: LuminaTokens.glassTextPrimary,
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
                           letterSpacing: -0.2,
@@ -2404,20 +2720,21 @@ class _HomeScreenState extends State<HomeScreen>
                 key: Key(item.keyName),
                 selected: _activeTab == item.tab,
                 onSelected: (_) => _selectTab(item.tab),
-                backgroundColor: _sidebarBg,
-                selectedColor: _accentBlue.withValues(alpha: 0.2),
+                backgroundColor: LuminaTokens.glassPillBg,
+                selectedColor: LuminaTokens.glassSegmentSelectedBg,
+                checkmarkColor: Colors.white,
                 side: BorderSide(
                   color: _activeTab == item.tab
-                      ? _accentBlue
-                      : LuminaTokens.borderControl,
+                      ? LuminaTokens.glassSegmentSelectedBorder
+                      : LuminaTokens.glassPillBorder,
                 ),
                 label: Text(
                   item.label,
                   style: TextStyle(
                     fontSize: 12,
                     color: _activeTab == item.tab
-                        ? _accentBlue
-                        : LuminaTokens.textSecondary,
+                        ? Colors.white
+                        : LuminaTokens.glassTextSecondary,
                     fontWeight: _activeTab == item.tab
                         ? FontWeight.w600
                         : FontWeight.w400,
@@ -2435,13 +2752,14 @@ class _HomeScreenState extends State<HomeScreen>
                       _activeTab == HomeTab.streamingProvider &&
                       _selectedStreamingKind == meta.kind,
                   onSelected: (_) => _openStreamingProvider(meta.kind),
-                  backgroundColor: _sidebarBg,
-                  selectedColor: _accentBlue.withValues(alpha: 0.2),
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  selectedColor: LuminaTokens.glassSegmentSelectedBg,
+                  checkmarkColor: Colors.white,
                   side: BorderSide(
                     color: (_activeTab == HomeTab.streamingProvider &&
                             _selectedStreamingKind == meta.kind)
-                        ? _accentBlue
-                        : LuminaTokens.borderControl,
+                        ? LuminaTokens.glassSegmentSelectedBorder
+                        : LuminaTokens.glassPillBorder,
                   ),
                   label: Text(
                     meta.name,
@@ -2449,8 +2767,8 @@ class _HomeScreenState extends State<HomeScreen>
                       fontSize: 12,
                       color: (_activeTab == HomeTab.streamingProvider &&
                               _selectedStreamingKind == meta.kind)
-                          ? _accentBlue
-                          : LuminaTokens.textSecondary,
+                          ? Colors.white
+                          : LuminaTokens.glassTextSecondary,
                     ),
                   ),
                 ),
@@ -2463,6 +2781,7 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _buildSettingsWorkspace({
     required bool isDesktop,
     required double availWidth,
+    double topBarHeight = 0.0,
   }) {
     final activeSpec = _settingsSubTabs.firstWhere(
       (s) => s.tab == _activeTab,
@@ -2476,6 +2795,7 @@ class _HomeScreenState extends State<HomeScreen>
       HomeTab.general => GeneralSettingsPanel(
         audioService: _effectiveAudioService,
         scaleController: _scaleController,
+        recommendationSettings: _recommendationSettings,
       ),
       HomeTab.appearance => AppearanceAndScalePanel(
         scaleController: _scaleController,
@@ -2506,20 +2826,30 @@ class _HomeScreenState extends State<HomeScreen>
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
+              FrostedGlassContainer(
+                key: const Key('settings_secondary_rail'),
                 width: railWidth,
-                decoration: const BoxDecoration(
-                  color: _settingsRailBg,
-                  border: Border(
-                    right: BorderSide(color: _dividerColor, width: 1),
+                blurSigma: LuminaTokens.glassSettingsRailBlur,
+                color: LuminaTokens.glassSettingsRailBg,
+                enableBackdropBlur: true,
+                border: const Border(
+                  right: BorderSide(
+                    color: LuminaTokens.glassSettingsRailBorder,
+                    width: 1,
                   ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(20, 18, 16, 12),
-                      child: Text(
+                    if (topBarHeight > 0) SizedBox(height: topBarHeight),
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        20,
+                        topBarHeight > 0 ? 10 : 18,
+                        16,
+                        12,
+                      ),
+                      child: const Text(
                         '設定',
                         style: TextStyle(
                           color: Colors.white,
@@ -2529,17 +2859,23 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ),
                     Expanded(
-                      child: ListView(
-                        padding: const EdgeInsets.only(
-                          bottom: LuminaTokens.bottomScrollClearance,
+                      child: _BottomEdgeFadeMask(
+                        fadeHeight: 28.0,
+                        child: ListView(
+                          padding: const EdgeInsets.only(
+                            bottom: LuminaTokens.bottomScrollClearance,
+                          ),
+                          children: [
+                            for (final spec in _settingsSubTabs)
+                              _buildSettingsRailItem(spec),
+                          ],
                         ),
-                        children: [
-                          for (final spec in _settingsSubTabs)
-                            _buildSettingsRailItem(spec),
-                        ],
                       ),
                     ),
-                    const Divider(color: _dividerColor, height: 1),
+                    const Divider(
+                      color: LuminaTokens.glassCardDivider,
+                      height: 1,
+                    ),
                     const Padding(
                       padding: EdgeInsets.symmetric(
                         horizontal: 18,
@@ -2550,13 +2886,13 @@ class _HomeScreenState extends State<HomeScreen>
                           Icon(
                             Icons.translate_rounded,
                             size: 15,
-                            color: LuminaTokens.textMuted,
+                            color: LuminaTokens.glassTextTertiary,
                           ),
                           SizedBox(width: 8),
                           Text(
                             '繁體中文',
                             style: TextStyle(
-                              color: LuminaTokens.textMuted,
+                              color: LuminaTokens.glassTextTertiary,
                               fontSize: 12,
                             ),
                           ),
@@ -2570,9 +2906,9 @@ class _HomeScreenState extends State<HomeScreen>
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(
                     contentHorizontalPad,
-                    22,
+                    topBarHeight + 18,
                     contentHorizontalPad,
-                    12,
+                    0,
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2586,7 +2922,13 @@ class _HomeScreenState extends State<HomeScreen>
                         ),
                       ),
                       const SizedBox(height: 18),
-                      Expanded(child: detailBody),
+                      Expanded(
+                        child: _BottomEdgeFadeMask(
+                          key: const Key('main_content_bottom_fade_mask'),
+                          fadeHeight: 28.0,
+                          child: detailBody,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -2598,6 +2940,7 @@ class _HomeScreenState extends State<HomeScreen>
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (topBarHeight > 0) SizedBox(height: topBarHeight),
             SizedBox(
               height: 44,
               child: ListView(
@@ -2611,20 +2954,24 @@ class _HomeScreenState extends State<HomeScreen>
                         key: Key(spec.keyName),
                         selected: _activeTab == spec.tab,
                         onSelected: (_) => _selectTab(spec.tab),
-                        backgroundColor: _sidebarBg,
-                        selectedColor: _accentBlue.withValues(alpha: 0.22),
+                        backgroundColor: LuminaTokens.glassPillBg,
+                        selectedColor: LuminaTokens.glassSegmentSelectedBg,
+                        checkmarkColor: Colors.white,
                         side: BorderSide(
                           color: _activeTab == spec.tab
-                              ? _accentBlue
-                              : LuminaTokens.borderControl,
+                              ? LuminaTokens.glassSegmentSelectedBorder
+                              : LuminaTokens.glassPillBorder,
                         ),
                         label: Text(
                           spec.label,
                           style: TextStyle(
                             fontSize: 12,
                             color: _activeTab == spec.tab
-                                ? _accentBlue
-                                : LuminaTokens.textSecondary,
+                                ? Colors.white
+                                : LuminaTokens.glassTextSecondary,
+                            fontWeight: _activeTab == spec.tab
+                                ? FontWeight.w600
+                                : FontWeight.w400,
                           ),
                         ),
                       ),
@@ -2632,16 +2979,20 @@ class _HomeScreenState extends State<HomeScreen>
                 ],
               ),
             ),
-            const Divider(color: _dividerColor, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             Expanded(
               child: Padding(
                 padding: EdgeInsets.fromLTRB(
                   contentHorizontalPad,
                   10,
                   contentHorizontalPad,
-                  8,
+                  0,
                 ),
-                child: detailBody,
+                child: _BottomEdgeFadeMask(
+                  key: const Key('main_content_bottom_fade_mask'),
+                  fadeHeight: 28.0,
+                  child: detailBody,
+                ),
               ),
             ),
           ],
@@ -2652,32 +3003,29 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildSettingsRailItem(_NavItemSpec spec) {
     final isSelected = _activeTab == spec.tab;
-    return Material(
-      color: isSelected ? LuminaTokens.cardElevatedBg : Colors.transparent,
-      child: InkWell(
-        key: Key(spec.keyName),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
-        onTap: () => _selectTab(spec.tab),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(
-                color: isSelected ? _accentBlue : Colors.transparent,
-                width: 3,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1.5),
+      child: Material(
+        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+        child: InkWell(
+          key: Key(spec.keyName),
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () => _selectTab(spec.tab),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Text(
+              spec.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: isSelected
+                    ? Colors.white
+                    : LuminaTokens.glassTextSecondary,
+                fontSize: 13.5,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
               ),
-            ),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 11),
-          child: Text(
-            spec.label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: isSelected
-                  ? LuminaTokens.textPrimary
-                  : LuminaTokens.textSecondary,
-              fontSize: 13.5,
-              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
             ),
           ),
         ),
@@ -2697,20 +3045,28 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (_activeTab == HomeTab.home) {
-      return HomeDashboardView(
-        audioService: _effectiveAudioService,
-        libraryCache: _libraryCache,
-        initialScrollOffset: savedOffset,
-        onScrollOffsetChanged: onOffsetChanged,
-        onOpenAlbums: () => _selectTab(HomeTab.albums),
-        onOpenLibrary: () => _selectTab(HomeTab.library),
-        onOpenCredits: () => _openArtistCredits(null),
-        onOpenDsp: () => _selectTab(HomeTab.dsp),
-        onOpenZones: () => _selectTab(HomeTab.zones),
-        onOpenAppearance: () => _selectTab(HomeTab.appearance),
-        onOpenLibrarySettings: () => _selectTab(HomeTab.librarySettings),
-        onOpenProviderSettings: () => _selectTab(HomeTab.settings),
-        onOpenAlbumDetail: _openAlbumDetail,
+      return ListenableBuilder(
+        listenable: _playlistService,
+        builder: (context, _) {
+          return HomeDashboardView(
+            audioService: _effectiveAudioService,
+            libraryCache: _libraryCache,
+            smartPlaylists: _playlistService.playlists,
+            initialScrollOffset: savedOffset,
+            onScrollOffsetChanged: onOffsetChanged,
+            onOpenAlbums: () => _selectTab(HomeTab.albums),
+            onOpenLibrary: () => _selectTab(HomeTab.library),
+            onOpenCredits: () => _openArtistCredits(null),
+            onOpenDsp: () => _selectTab(HomeTab.dsp),
+            onOpenZones: () => _selectTab(HomeTab.zones),
+            onOpenAppearance: () => _selectTab(HomeTab.appearance),
+            onOpenLibrarySettings: () => _selectTab(HomeTab.librarySettings),
+            onOpenProviderSettings: () => _selectTab(HomeTab.settings),
+            onOpenAlbumDetail: _openAlbumDetail,
+            onOpenSmartPlaylist: _openSmartPlaylist,
+            onOpenSmartPlaylists: () => _selectTab(HomeTab.smartPlaylists),
+          );
+        },
       );
     }
 
@@ -2721,10 +3077,8 @@ class _HomeScreenState extends State<HomeScreen>
       );
     }
 
-    final pad = EdgeInsets.symmetric(
-      horizontal: LuminaResponsive.contentHorizontalPadding(availWidth),
-      vertical: 8,
-    );
+    final hPad = LuminaResponsive.contentHorizontalPadding(availWidth);
+    final pad = EdgeInsets.fromLTRB(hPad, 8, hPad, 0);
 
     return Padding(
       padding: pad,
@@ -2884,6 +3238,101 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         _ => const SizedBox.shrink(),
       },
+    );
+  }
+}
+
+enum _HomeShellSlot { workspace, nowPlaying, miniPlayer }
+
+/// Single-pass shell layout delegate that lays out the docked mini-player first
+/// at its exact intrinsic height, then sizes the workspace tightly to
+/// `size.height - miniSize.height` so sidebar and main content abut the top edge
+/// of the player bar with 0.0px gap and 0.0px overlap across all viewports.
+class _HomeShellLayoutDelegate extends MultiChildLayoutDelegate {
+  final ValueChanged<double>? onMiniPlayerHeightMeasured;
+
+  _HomeShellLayoutDelegate({this.onMiniPlayerHeightMeasured});
+
+  @override
+  void performLayout(Size size) {
+    Size miniSize = Size.zero;
+    if (hasChild(_HomeShellSlot.miniPlayer)) {
+      // Unbounded maxHeight matches Positioned(left: 0, right: 0, bottom: 0)
+      // so Container(alignment: Alignment.center) inside FloatingCapsuleMiniPlayer
+      // shrink-wraps to its intrinsic docked bar height (84px wide) instead of
+      // expanding to fill the entire viewport height.
+      miniSize = layoutChild(
+        _HomeShellSlot.miniPlayer,
+        BoxConstraints(
+          minWidth: size.width,
+          maxWidth: size.width,
+          minHeight: 0.0,
+          maxHeight: double.infinity,
+        ),
+      );
+      final clampedMiniHeight = miniSize.height.clamp(0.0, size.height);
+      positionChild(
+        _HomeShellSlot.miniPlayer,
+        Offset(0.0, size.height - clampedMiniHeight),
+      );
+      onMiniPlayerHeightMeasured?.call(clampedMiniHeight);
+      miniSize = Size(miniSize.width, clampedMiniHeight);
+    }
+
+    if (hasChild(_HomeShellSlot.workspace)) {
+      final workspaceHeight = math.max(0.0, size.height - miniSize.height);
+      layoutChild(
+        _HomeShellSlot.workspace,
+        BoxConstraints.tightFor(
+          width: size.width,
+          height: workspaceHeight,
+        ),
+      );
+      positionChild(_HomeShellSlot.workspace, Offset.zero);
+    }
+
+    if (hasChild(_HomeShellSlot.nowPlaying)) {
+      layoutChild(_HomeShellSlot.nowPlaying, BoxConstraints.tight(size));
+      positionChild(_HomeShellSlot.nowPlaying, Offset.zero);
+    }
+  }
+
+  @override
+  bool shouldRelayout(covariant _HomeShellLayoutDelegate oldDelegate) => false;
+}
+
+/// Applies a soft bottom alpha fade (`BlendMode.dstIn`) over the bottom
+/// [fadeHeight] logical pixels of scrollable content so scrolled rows fade
+/// smoothly into the global ambient background instead of hard-clipping.
+class _BottomEdgeFadeMask extends StatelessWidget {
+  final double fadeHeight;
+  final Widget child;
+
+  const _BottomEdgeFadeMask({
+    super.key,
+    this.fadeHeight = 28.0,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (Rect bounds) {
+        if (bounds.height <= 0.0 || fadeHeight <= 0.0) {
+          return const LinearGradient(
+            colors: [Colors.white, Colors.white],
+          ).createShader(bounds);
+        }
+        final stop = (1.0 - (fadeHeight / bounds.height)).clamp(0.0, 1.0);
+        return LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: const [Colors.white, Colors.white, Colors.transparent],
+          stops: [0.0, stop, 1.0],
+        ).createShader(bounds);
+      },
+      child: child,
     );
   }
 }

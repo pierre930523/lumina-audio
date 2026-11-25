@@ -502,10 +502,10 @@ class FfmpegAudioProxy {
     var headersSent = false;
     var loggedStderr = false;
     try {
-      // Abort immediately if the client disconnects abruptly.
+      // Abort immediately if the client disconnects (either cleanly or with error).
       unawaited(
         response.done.then(
-          (_) {},
+          (_) => active.abort(),
           onError: (_) => active.abort(),
         ),
       );

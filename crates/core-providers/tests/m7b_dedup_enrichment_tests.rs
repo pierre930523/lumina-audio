@@ -166,6 +166,7 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
         alb_local.id.clone(),
         AlbumSyncMetadata {
             upc: Some("5099902987620".to_string()),
+            ..Default::default()
         },
     );
     LibrarySyncService::persist_sync_result_with_metadata(
@@ -256,6 +257,7 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
         alb_qb.id.clone(),
         AlbumSyncMetadata {
             upc: Some("5099902987620".to_string()),
+            ..Default::default()
         },
     );
     LibrarySyncService::persist_sync_result_with_metadata(

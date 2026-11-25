@@ -5,8 +5,8 @@ use crate::error::{
 };
 use core_db::{open_test_database, SqlitePool};
 use core_providers::{
-    parse_remote_share_uri, DeezerConfig, LibrarySyncService, LocalProviderConfig, QobuzConfig,
-    SmbConfig, TidalConfig, WebDavConfig,
+    parse_remote_share_uri, DeezerConfig, LibrarySyncService, LocalProviderConfig,
+    ProviderRegistry, QobuzConfig, SmbConfig, TidalConfig, WebDavConfig,
 };
 use core_types::{ProviderKind, QobuzAuthMode};
 use serde::Deserialize;
@@ -167,6 +167,12 @@ pub extern "C" fn lumina_provider_configure(
                         )
                         .await;
                 }
+                ProviderKind::AppleMusic | ProviderKind::YouTubeMusic => {
+                    return Err(anyhow::anyhow!(
+                        "Provider '{}' is configured via client streaming adapters",
+                        kind
+                    ));
+                }
             }
             Ok::<_, anyhow::Error>(())
         })?;
@@ -259,4 +265,40 @@ pub extern "C" fn lumina_provider_tidal_pkce_complete(exchange_json: *const c_ch
             Ok(string_to_c_char(&json_str))
         },
     )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lumina_provider_list() -> *mut c_char {
+    catch_unwind_ffi(std::ptr::null_mut(), "lumina_provider_list", || {
+        let engine = get_engine();
+        let items: Vec<serde_json::Value> = engine.runtime.block_on(async {
+            let summaries = engine.provider_manager.summaries().await;
+            if !summaries.is_empty() {
+                return summaries
+                    .into_iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "provider_kind": s.kind.as_str(),
+                            "is_configured": true,
+                            "is_online": s.is_authenticated,
+                        })
+                    })
+                    .collect();
+            }
+            let registry = ProviderRegistry::new();
+            let providers = registry.list_all().await;
+            let mut out = Vec::with_capacity(providers.len());
+            for p in providers {
+                let is_auth = p.is_authenticated().await;
+                out.push(serde_json::json!({
+                    "provider_kind": p.kind().as_str(),
+                    "is_configured": true,
+                    "is_online": is_auth,
+                }));
+            }
+            out
+        });
+        let json_str = serde_json::to_string(&items)?;
+        Ok(string_to_c_char(&json_str))
+    })
 }

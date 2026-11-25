@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../../models/audio_format.dart';
 import '../../models/playback_state.dart';
 import '../../models/podcast_models.dart';
+import '../../models/recommendation_models.dart';
 import '../../models/stream_source_spec.dart';
 import '../../models/streaming_models.dart';
 import '../../models/streaming_provider_meta.dart';
@@ -21,6 +22,7 @@ import 'providers/deezer_provider.dart';
 import 'providers/qobuz_provider.dart';
 import 'providers/tidal_provider.dart';
 import 'providers/youtube_music_provider.dart';
+import 'recommendation_provider.dart';
 import 'secure_credential_store.dart';
 import 'single_flight_resolver.dart';
 import 'stream_resolver.dart';
@@ -320,12 +322,86 @@ class StreamingManager extends ChangeNotifier {
       .where(_isBrowsable)
       .toList(growable: false);
 
+  /// Optional best-effort callback invoked after [syncProvider] succeeds so
+  /// lightweight streaming catalog metadata can be persisted to canonical DB
+  /// without ever carrying expiring audio stream URLs.
+  Future<void> Function(String providerId, StreamingCatalog catalog)?
+      onCatalogSynced;
+
   bool _isBrowsable(StreamingProvider? provider) =>
       provider != null &&
       (provider.authState == StreamingAuthState.connected ||
           provider.supportsGuestMode);
 
   StreamingProvider? providerFor(String kind) => _providers[kind];
+
+  RecommendationProvider? recommendationProviderFor(String kind) {
+    final provider = _providers[kind];
+    return provider is RecommendationProvider
+        ? provider as RecommendationProvider
+        : null;
+  }
+
+  Map<String, RecommendationProvider> get recommendationProviders {
+    final map = <String, RecommendationProvider>{};
+    for (final kind in providerOrder) {
+      final rec = recommendationProviderFor(kind);
+      if (rec != null) {
+        map[kind] = rec;
+      }
+    }
+    for (final entry in _providers.entries) {
+      final rec = entry.value;
+      if (!map.containsKey(entry.key) && rec is RecommendationProvider) {
+        map[entry.key] = rec as RecommendationProvider;
+      }
+    }
+    return Map<String, RecommendationProvider>.unmodifiable(map);
+  }
+
+  Future<List<FeedSection>> fetchPersonalizedFeeds({
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    final orderedKinds = <String>[
+      ...providerOrder,
+      ..._providers.keys.where((k) => !providerOrder.contains(k)),
+    ];
+    final targets = <RecommendationProvider>[];
+    for (final kind in orderedKinds) {
+      final provider = _providers[kind];
+      if (provider == null) continue;
+      if (provider.authState != StreamingAuthState.connected) continue;
+      if (authManager.isAuthRequired(kind)) continue;
+      if (provider is RecommendationProvider) {
+        final rec = provider as RecommendationProvider;
+        if (rec.capabilities.supportsPersonalFeed) {
+          targets.add(rec);
+        }
+      }
+    }
+    if (targets.isEmpty) return const <FeedSection>[];
+
+    final perProviderSections = await Future.wait(
+      targets.map((rec) async {
+        try {
+          return await rec.getPersonalizedFeed(cancel: cancel);
+        } on RecError catch (e) {
+          if (e.kind == RecErrorKind.cancelled) rethrow;
+          return const <FeedSection>[];
+        } on StreamingException catch (e) {
+          if (e.isCancelled) rethrow;
+          return const <FeedSection>[];
+        } catch (_) {
+          return const <FeedSection>[];
+        }
+      }),
+    );
+
+    return List<FeedSection>.unmodifiable(
+      perProviderSections.expand((sections) => sections),
+    );
+  }
 
   bool isAuthenticating(String kind) =>
       _activeCancellations.containsKey(kind) ||
@@ -1167,6 +1243,12 @@ class StreamingManager extends ChangeNotifier {
       try {
         final catalog = await provider.syncLibrary(cancel: cancel);
         _safeNotify();
+        final hook = onCatalogSynced;
+        if (hook != null && !catalog.isEmpty) {
+          unawaited(
+            Future<void>.sync(() => hook(kind, catalog)).catchError((_) {}),
+          );
+        }
         return catalog;
       } on StreamingException catch (e) {
         if (!e.isCancelled && AuthManager.isUnauthorizedError(e)) {

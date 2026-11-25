@@ -34,11 +34,11 @@ Future<void> _showAlbumContextMenu({
   final action = await showMenu<String>(
     context: buttonContext,
     position: position,
-    color: LuminaTokens.cardElevatedBg,
+    color: LuminaTokens.glassMenuBg,
     elevation: 12,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-      side: const BorderSide(color: LuminaTokens.borderSubtle),
+      side: const BorderSide(color: LuminaTokens.glassCardBorder),
     ),
     items: [
       _buildAlbumMenuItem('play', Icons.play_arrow_rounded, '播放專輯'),
@@ -373,13 +373,13 @@ class _AlbumCollectionCardState extends State<AlbumCollectionCard>
                     builder: (context, _) {
                       final t = _playHoverCurve.value;
                       final bgColor = Color.lerp(
-                        const Color(0x991C1E26),
-                        LuminaTokens.accentBlue,
+                        LuminaTokens.glassDrawerBg,
+                        LuminaTokens.glassSwitchOnTrack,
                         t,
                       )!;
                       final borderColor = Color.lerp(
-                        Colors.white.withValues(alpha: 0.22),
-                        LuminaTokens.accentBlue,
+                        LuminaTokens.glassCoverRim,
+                        LuminaTokens.glassSwitchOnTrack,
                         t,
                       )!;
                       final iconColor = t >= 0.5
@@ -434,12 +434,12 @@ class _AlbumCollectionCardState extends State<AlbumCollectionCard>
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: _moreHovered
-                          ? const Color(0xCC282C38)
-                          : const Color(0x991C1E26),
+                          ? LuminaTokens.glassPillHoverBg
+                          : LuminaTokens.glassDrawerBg,
                       border: Border.all(
-                        color: Colors.white.withValues(
-                          alpha: _moreHovered ? 0.36 : 0.22,
-                        ),
+                        color: _moreHovered
+                            ? LuminaTokens.glassSegmentSelectedBorder
+                            : LuminaTokens.glassCoverRim,
                         width: 1.0,
                       ),
                     ),
@@ -643,9 +643,9 @@ class _AlbumCollectionCardState extends State<AlbumCollectionCard>
             key: Key('album_surface_${album.id}'),
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: LuminaTokens.cardBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-              border: Border.all(color: LuminaTokens.borderSubtle),
+              color: LuminaTokens.glassCardBg,
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+              border: Border.all(color: LuminaTokens.glassCardBorder),
             ),
             child: content,
           )
@@ -786,12 +786,12 @@ class _AlbumCollectionListTileState extends State<AlbumCollectionListTile> {
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: _playHovered
-                        ? LuminaTokens.accentBlue
-                        : LuminaTokens.cardElevatedBg,
+                        ? LuminaTokens.glassSwitchOnTrack
+                        : LuminaTokens.glassPillBg,
                     border: Border.all(
                       color: _playHovered
-                          ? LuminaTokens.accentBlue
-                          : LuminaTokens.borderControl,
+                          ? LuminaTokens.glassSwitchOnTrack
+                          : LuminaTokens.glassPillBorder,
                     ),
                   ),
                   child: Icon(
@@ -799,7 +799,7 @@ class _AlbumCollectionListTileState extends State<AlbumCollectionListTile> {
                     size: 19,
                     color: _playHovered
                         ? LuminaTokens.onAccentDark
-                        : LuminaTokens.textPrimary,
+                        : LuminaTokens.glassTextPrimary,
                   ),
                 ),
               ),
@@ -833,14 +833,14 @@ class _AlbumCollectionListTileState extends State<AlbumCollectionListTile> {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: _moreHovered
-                          ? LuminaTokens.cardHoverBg
-                          : LuminaTokens.cardElevatedBg,
-                      border: Border.all(color: LuminaTokens.borderControl),
+                          ? LuminaTokens.glassPillHoverBg
+                          : LuminaTokens.glassPillBg,
+                      border: Border.all(color: LuminaTokens.glassPillBorder),
                     ),
                     child: const Icon(
                       Icons.more_horiz_rounded,
                       size: 18,
-                      color: LuminaTokens.textPrimary,
+                      color: LuminaTokens.glassTextPrimary,
                     ),
                   ),
                 ),
@@ -857,9 +857,11 @@ class _AlbumCollectionListTileState extends State<AlbumCollectionListTile> {
               key: Key('album_surface_${album.id}'),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
-                color: LuminaTokens.cardBg,
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                border: Border.all(color: LuminaTokens.borderSubtle),
+                color: LuminaTokens.glassCardBg,
+                borderRadius: BorderRadius.circular(
+                  LuminaTokens.glassCardRadius,
+                ),
+                border: Border.all(color: LuminaTokens.glassCardBorder),
               ),
               child: rowContent,
             )

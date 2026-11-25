@@ -4,6 +4,7 @@ import '../../models/playback_state.dart';
 import '../../models/smart_playlist.dart';
 import '../../services/audio_service.dart';
 import '../../services/smart_playlist_service.dart';
+import '../common/frosted_glass_container.dart';
 import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
@@ -29,6 +30,7 @@ class SmartPlaylistsView extends StatefulWidget {
   }) {
     return showDialog<SmartPlaylist>(
       context: context,
+      barrierColor: LuminaTokens.scrimBg,
       builder: (ctx) => _SmartPlaylistEditorDialog(
         service: service,
         libraryTracks: libraryTracks,
@@ -42,10 +44,6 @@ class SmartPlaylistsView extends StatefulWidget {
 }
 
 class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
-  static const _accentBlue = LuminaTokens.accentBlue;
-  static const _cardBg = LuminaTokens.cardBg;
-  static const _borderColor = LuminaTokens.borderSubtle;
-
   late String _activeId;
 
   @override
@@ -95,7 +93,7 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                     children: [
                       Icon(
                         Icons.auto_awesome_rounded,
-                        color: _accentBlue,
+                        color: LuminaTokens.glassTextPrimary,
                         size: 20,
                       ),
                       SizedBox(width: 8),
@@ -111,6 +109,10 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                   ),
                   FilledButton.icon(
                     key: const Key('btn_create_smart_playlist'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                      foregroundColor: LuminaTokens.onAccentDark,
+                    ),
                     onPressed: () async {
                       final created =
                           await SmartPlaylistsView.showCreateDialog(
@@ -133,9 +135,11 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
             final playlistRail = Container(
               width: isWide ? 248 : double.infinity,
               decoration: BoxDecoration(
-                color: _cardBg,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: _borderColor),
+                color: LuminaTokens.glassCardBg,
+                borderRadius: BorderRadius.circular(
+                  LuminaTokens.glassCardRadius,
+                ),
+                border: Border.all(color: LuminaTokens.glassCardBorder),
               ),
               child: isWide
                   ? ListView.builder(
@@ -169,10 +173,15 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                             child: ChoiceChip(
                               key: Key('smart_playlist_item_${sp.id}'),
                               selected: selected,
+                              showCheckmark: false,
+                              surfaceTintColor: Colors.transparent,
+                              backgroundColor: LuminaTokens.glassPillBg,
+                              selectedColor:
+                                  LuminaTokens.glassSegmentSelectedBg,
                               side: BorderSide(
                                 color: selected
-                                    ? _accentBlue
-                                    : LuminaTokens.borderControl,
+                                    ? LuminaTokens.glassSegmentSelectedBorder
+                                    : LuminaTokens.glassPillBorder,
                               ),
                               onSelected: (_) {
                                 setState(() => _activeId = sp.id);
@@ -183,8 +192,11 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: selected
-                                      ? LuminaTokens.textPrimary
-                                      : LuminaTokens.textSecondary,
+                                      ? Colors.white
+                                      : LuminaTokens.glassTextSecondary,
+                                  fontWeight: selected
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
                                 ),
                               ),
                             ),
@@ -204,11 +216,11 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                 : Container(
                     padding: const EdgeInsets.all(LuminaTokens.spaceMd),
                     decoration: BoxDecoration(
-                      color: _cardBg,
+                      color: LuminaTokens.glassCardBg,
                       borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusMd,
+                        LuminaTokens.glassCardRadius,
                       ),
-                      border: Border.all(color: _borderColor),
+                      border: Border.all(color: LuminaTokens.glassCardBorder),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -251,7 +263,8 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                                 FilledButton.icon(
                                   key: const Key('btn_play_smart_playlist'),
                                   style: FilledButton.styleFrom(
-                                    backgroundColor: _accentBlue,
+                                    backgroundColor:
+                                        LuminaTokens.glassSwitchOnTrack,
                                     foregroundColor: LuminaTokens.onAccentDark,
                                   ),
                                   onPressed: matchedTracks.isEmpty
@@ -267,9 +280,11 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                                 ),
                                 OutlinedButton.icon(
                                   style: OutlinedButton.styleFrom(
-                                    foregroundColor: LuminaTokens.textPrimary,
+                                    backgroundColor: LuminaTokens.glassPillBg,
+                                    foregroundColor:
+                                        LuminaTokens.glassTextPrimary,
                                     side: const BorderSide(
-                                      color: LuminaTokens.borderControl,
+                                      color: LuminaTokens.glassPillBorder,
                                     ),
                                   ),
                                   onPressed: () async {
@@ -317,15 +332,15 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                               .map(
                                 (tag) => Chip(
                                   visualDensity: VisualDensity.compact,
-                                  backgroundColor:
-                                      _accentBlue.withValues(alpha: 0.14),
-                                  side: BorderSide(
-                                    color: _accentBlue.withValues(alpha: 0.55),
+                                  surfaceTintColor: Colors.transparent,
+                                  backgroundColor: LuminaTokens.glassPillBg,
+                                  side: const BorderSide(
+                                    color: LuminaTokens.glassPillBorder,
                                   ),
                                   label: Text(
                                     tag,
                                     style: const TextStyle(
-                                      color: LuminaTokens.textPrimary,
+                                      color: LuminaTokens.glassTextPrimary,
                                       fontSize: 11.5,
                                     ),
                                   ),
@@ -333,7 +348,10 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                               )
                               .toList(),
                         ),
-                        const Divider(color: _borderColor, height: 22),
+                        const Divider(
+                          color: LuminaTokens.glassCardDivider,
+                          height: 22,
+                        ),
                         Expanded(
                           child: matchedTracks.isEmpty
                               ? const Center(
@@ -362,8 +380,8 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
                                               LuminaTokens.radiusSm,
                                             ),
                                           ),
-                                          hoverColor: LuminaTokens.cardHoverBg
-                                              .withValues(alpha: 0.6),
+                                          hoverColor:
+                                              LuminaTokens.glassRowHoverBg,
                                           leading: const Icon(
                                             Icons.music_note_rounded,
                                             color: LuminaTokens.textSecondary,
@@ -436,62 +454,61 @@ class _SmartPlaylistsViewState extends State<SmartPlaylistsView> {
     bool selected,
   ) {
     final count = sp.evaluate(allTracks).length;
-    return Material(
-      color: selected
-          ? _accentBlue.withValues(alpha: 0.14)
-          : Colors.transparent,
-      child: InkWell(
-        key: Key('smart_playlist_item_${sp.id}'),
-        onTap: () {
-          setState(() => _activeId = sp.id);
-          widget.onSelectPlaylist?.call(sp.id);
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          decoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(
-                color: selected ? _accentBlue : Colors.transparent,
-                width: 3,
-              ),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.auto_awesome_rounded,
-                size: 16,
-                color: selected ? _accentBlue : LuminaTokens.textSecondary,
-              ),
-              const SizedBox(width: LuminaTokens.spaceSm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      sp.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: selected
-                            ? LuminaTokens.textPrimary
-                            : LuminaTokens.textSecondary,
-                        fontSize: 13.5,
-                        fontWeight:
-                            selected ? FontWeight.w600 : FontWeight.w400,
-                      ),
-                    ),
-                    Text(
-                      '$count 首符合',
-                      style: const TextStyle(
-                        color: LuminaTokens.textMuted,
-                        fontSize: 11.5,
-                      ),
-                    ),
-                  ],
+    final radius = BorderRadius.circular(LuminaTokens.radiusSm);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      child: Material(
+        color: selected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: radius,
+        child: InkWell(
+          key: Key('smart_playlist_item_${sp.id}'),
+          borderRadius: radius,
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () {
+            setState(() => _activeId = sp.id);
+            widget.onSelectPlaylist?.call(sp.id);
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 16,
+                  color: selected
+                      ? Colors.white
+                      : LuminaTokens.glassTextSecondary,
                 ),
-              ),
-            ],
+                const SizedBox(width: LuminaTokens.spaceSm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        sp.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: selected
+                              ? Colors.white
+                              : LuminaTokens.glassTextSecondary,
+                          fontSize: 13.5,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                      ),
+                      Text(
+                        '$count 首符合',
+                        style: const TextStyle(
+                          color: LuminaTokens.textMuted,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -560,169 +577,230 @@ class _SmartPlaylistEditorDialogState
   Widget build(BuildContext context) {
     final previewCount = _buildDraft().evaluate(widget.libraryTracks).length;
 
-    return AlertDialog(
-      backgroundColor: LuminaTokens.cardElevatedBg,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        side: const BorderSide(color: LuminaTokens.borderControl),
+    InputDecoration fieldDecoration({
+      required String labelText,
+      required String hintText,
+    }) => InputDecoration(
+      labelText: labelText,
+      hintText: hintText,
+      labelStyle: const TextStyle(color: LuminaTokens.glassTextSecondary),
+      hintStyle: const TextStyle(color: LuminaTokens.textMuted),
+      filled: true,
+      fillColor: LuminaTokens.glassPillBg,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+        borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
       ),
-      title: Text(
-        widget.editing == null ? '新增智慧播放清單' : '編輯智慧播放清單條件',
-        style: const TextStyle(color: LuminaTokens.textPrimary),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+        borderSide: const BorderSide(color: LuminaTokens.glassPillBorder),
       ),
-      content: SizedBox(
-        width: 380,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                key: const Key('input_smart_playlist_name'),
-                controller: _nameCtrl,
-                onChanged: (_) => setState(() {}),
-                style: const TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontSize: 13.5,
-                ),
-                decoration: const InputDecoration(
-                  labelText: '歌單名稱',
-                  hintText: '例如：96kHz 搖滾精選',
-                  labelStyle: TextStyle(color: LuminaTokens.textSecondary),
-                  hintStyle: TextStyle(color: LuminaTokens.textMuted),
-                  enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: LuminaTokens.borderControl),
-                  ),
-                ),
-              ),
-              const SizedBox(height: LuminaTokens.spaceSm),
-              TextField(
-                key: const Key('input_smart_playlist_keyword'),
-                controller: _keywordCtrl,
-                onChanged: (_) => setState(() {}),
-                style: const TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontSize: 13.5,
-                ),
-                decoration: const InputDecoration(
-                  labelText: '關鍵字過濾（藝術家 / 專輯 / 曲名）',
-                  hintText: '留白代表全部',
-                  labelStyle: TextStyle(color: LuminaTokens.textSecondary),
-                  hintStyle: TextStyle(color: LuminaTokens.textMuted),
-                  enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: LuminaTokens.borderControl),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              SwitchListTile(
-                key: const Key('switch_smart_lossless'),
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  '僅納入無損格式（FLAC / ALAC / WAV / DSD）',
-                  style: TextStyle(color: Colors.white, fontSize: 13),
-                ),
-                value: _losslessOnly,
-                onChanged: (v) => setState(() => _losslessOnly = v),
-              ),
-              SwitchListTile(
-                key: const Key('switch_smart_dsd'),
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  '僅限 DSD 位元流',
-                  style: TextStyle(color: Colors.white, fontSize: 13),
-                ),
-                value: _dsdOnly,
-                onChanged: (v) => setState(() => _dsdOnly = v),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+        borderSide: const BorderSide(
+          color: LuminaTokens.focusRing,
+          width: 1.5,
+        ),
+      ),
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: LuminaTokens.spaceSm,
+        vertical: LuminaTokens.spaceSm,
+      ),
+    );
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: FrostedGlassContainer(
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x88000000),
+              blurRadius: 32,
+              offset: Offset(0, 14),
+            ),
+          ],
+          padding: const EdgeInsets.all(LuminaTokens.spaceLg),
+          child: Material(
+            type: MaterialType.transparency,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
-                    '最低取樣率：',
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
+                  Text(
+                    widget.editing == null ? '新增智慧播放清單' : '編輯智慧播放清單條件',
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                  DropdownButton<int>(
-                    key: const Key('dropdown_smart_sample_rate'),
-                    value: _minSampleRate,
-                    dropdownColor: const Color(0xFF1F2127),
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
-                    items: const [
-                      DropdownMenuItem(value: 0, child: Text('不限')),
-                      DropdownMenuItem(value: 44100, child: Text('44.1 kHz+')),
-                      DropdownMenuItem(value: 96000, child: Text('96 kHz+')),
-                      DropdownMenuItem(value: 192000, child: Text('192 kHz+')),
+                  const SizedBox(height: LuminaTokens.spaceMd),
+                  TextField(
+                    key: const Key('input_smart_playlist_name'),
+                    controller: _nameCtrl,
+                    onChanged: (_) => setState(() {}),
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 13.5,
+                    ),
+                    decoration: fieldDecoration(
+                      labelText: '歌單名稱',
+                      hintText: '例如：96kHz 搖滾精選',
+                    ),
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceSm),
+                  TextField(
+                    key: const Key('input_smart_playlist_keyword'),
+                    controller: _keywordCtrl,
+                    onChanged: (_) => setState(() {}),
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextPrimary,
+                      fontSize: 13.5,
+                    ),
+                    decoration: fieldDecoration(
+                      labelText: '關鍵字過濾（藝術家 / 專輯 / 曲名）',
+                      hintText: '留白代表全部',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SwitchListTile(
+                    key: const Key('switch_smart_lossless'),
+                    contentPadding: EdgeInsets.zero,
+                    hoverColor: LuminaTokens.glassRowHoverBg,
+                    title: const Text(
+                      '僅納入無損格式（FLAC / ALAC / WAV / DSD）',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                    value: _losslessOnly,
+                    onChanged: (v) => setState(() => _losslessOnly = v),
+                  ),
+                  SwitchListTile(
+                    key: const Key('switch_smart_dsd'),
+                    contentPadding: EdgeInsets.zero,
+                    hoverColor: LuminaTokens.glassRowHoverBg,
+                    title: const Text(
+                      '僅限 DSD 位元流',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                    value: _dsdOnly,
+                    onChanged: (v) => setState(() => _dsdOnly = v),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '最低取樣率：',
+                        style: TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                      DropdownButton<int>(
+                        key: const Key('dropdown_smart_sample_rate'),
+                        value: _minSampleRate,
+                        dropdownColor: LuminaTokens.glassMenuBg,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 0, child: Text('不限')),
+                          DropdownMenuItem(value: 44100, child: Text('44.1 kHz+')),
+                          DropdownMenuItem(value: 96000, child: Text('96 kHz+')),
+                          DropdownMenuItem(value: 192000, child: Text('192 kHz+')),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) setState(() => _minSampleRate = v);
+                        },
+                      ),
                     ],
-                    onChanged: (v) {
-                      if (v != null) setState(() => _minSampleRate = v);
-                    },
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '最低位元深度：',
+                        style: TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                      DropdownButton<int>(
+                        key: const Key('dropdown_smart_bit_depth'),
+                        value: _minBitDepth,
+                        dropdownColor: LuminaTokens.glassMenuBg,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 0, child: Text('不限')),
+                          DropdownMenuItem(value: 16, child: Text('16-bit+')),
+                          DropdownMenuItem(value: 24, child: Text('24-bit+')),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) setState(() => _minBitDepth = v);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '即時預覽：目前曲庫有 $previewCount 首符合條件',
+                    style: const TextStyle(
+                      color: LuminaTokens.glassTextSecondary,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceLg),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: LuminaTokens.glassTextSecondary,
+                        ),
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: LuminaTokens.spaceXs),
+                      FilledButton(
+                        key: const Key('btn_save_smart_playlist'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                          foregroundColor: LuminaTokens.onAccentDark,
+                        ),
+                        onPressed: () {
+                          final draft = _buildDraft();
+                          if (widget.editing == null) {
+                            final created = widget.service.createPlaylist(
+                              name: draft.name,
+                              losslessOnly: draft.losslessOnly,
+                              dsdOnly: draft.dsdOnly,
+                              minSampleRateHz: draft.minSampleRateHz,
+                              minBitDepth: draft.minBitDepth,
+                              keyword: draft.keyword,
+                            );
+                            Navigator.of(context).pop(created);
+                          } else {
+                            widget.service.updatePlaylist(draft);
+                            Navigator.of(context).pop(draft);
+                          }
+                        },
+                        child: const Text('儲存歌單'),
+                      ),
+                    ],
                   ),
                 ],
               ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    '最低位元深度：',
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
-                  ),
-                  DropdownButton<int>(
-                    key: const Key('dropdown_smart_bit_depth'),
-                    value: _minBitDepth,
-                    dropdownColor: const Color(0xFF1F2127),
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
-                    items: const [
-                      DropdownMenuItem(value: 0, child: Text('不限')),
-                      DropdownMenuItem(value: 16, child: Text('16-bit+')),
-                      DropdownMenuItem(value: 24, child: Text('24-bit+')),
-                    ],
-                    onChanged: (v) {
-                      if (v != null) setState(() => _minBitDepth = v);
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                '即時預覽：目前曲庫有 $previewCount 首符合條件',
-                style: const TextStyle(
-                  color: Color(0xFF7B92F8),
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          key: const Key('btn_save_smart_playlist'),
-          onPressed: () {
-            final draft = _buildDraft();
-            if (widget.editing == null) {
-              final created = widget.service.createPlaylist(
-                name: draft.name,
-                losslessOnly: draft.losslessOnly,
-                dsdOnly: draft.dsdOnly,
-                minSampleRateHz: draft.minSampleRateHz,
-                minBitDepth: draft.minBitDepth,
-                keyword: draft.keyword,
-              );
-              Navigator.of(context).pop(created);
-            } else {
-              widget.service.updatePlaylist(draft);
-              Navigator.of(context).pop(draft);
-            }
-          },
-          child: const Text('儲存歌單'),
-        ),
-      ],
     );
   }
 }

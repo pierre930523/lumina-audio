@@ -198,6 +198,7 @@ fn test_ws_message_serialization() {
             track_id: Some("trk-001".to_string()),
             position_ms: 12500,
             duration_ms: 163000,
+            ..Default::default()
         },
     };
 
@@ -1182,7 +1183,7 @@ async fn test_server_contract1_2_3_routes() {
         0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
         0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
-    std::fs::write(&cover_path, &dummy_png).unwrap();
+    std::fs::write(&cover_path, dummy_png).unwrap();
 
     // Scan
     let scan_resp = app
@@ -1249,7 +1250,7 @@ async fn test_server_contract1_2_3_routes() {
 
     // Artwork override
     let dummy_user_img = root_dir.join("user_cover.png");
-    std::fs::write(&dummy_user_img, &dummy_png).unwrap();
+    std::fs::write(&dummy_user_img, dummy_png).unwrap();
     let art_ovr_resp = app
         .clone()
         .oneshot(
@@ -1376,4 +1377,927 @@ async fn test_server_contract1_2_3_routes() {
 
     player.shutdown();
     let _ = std::fs::remove_dir_all(root_dir);
+}
+
+#[tokio::test]
+async fn test_server_transition_watcher_emits_track_changed_and_queue_updated() {
+    use core_audio::stream::StreamSource;
+    use core_server::spawn_playback_transition_watcher;
+    use core_types::{DeckState, DeckTrackMetadata};
+
+    // Without player, watcher returns None.
+    let no_player_state = Arc::new(AppState::new(None));
+    assert!(spawn_playback_transition_watcher(no_player_state).is_none());
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_srv_watcher_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav1 = tmp_dir.join("w1.wav");
+    let wav2 = tmp_dir.join("w2.wav");
+    write_test_wav(&wav1, 48_000, 2, 48_000 / 2); // 500ms
+    write_test_wav(&wav2, 48_000, 2, 48_000 * 3); // 3000ms
+
+    let player = core_audio::AudioPlayer::new_headless();
+    let state = Arc::new(AppState::with_player(None, Some(player.clone())));
+    let app = build_router(state.clone());
+
+    // Pair client for REST verification
+    let init_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/initiate")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let init_val: serde_json::Value =
+        serde_json::from_slice(&to_bytes(init_resp.into_body(), 1024 * 64).await.unwrap())
+            .unwrap();
+    let pin = init_val["pin"].as_str().unwrap();
+    let verify_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pair/verify")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"pin":"{pin}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let verify_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(verify_resp.into_body(), 1024 * 64).await.unwrap(),
+    )
+    .unwrap();
+    let token = verify_val["token"].as_str().unwrap().to_string();
+
+    let mut rx = state.broadcast_tx.subscribe();
+    let watcher =
+        spawn_playback_transition_watcher(state.clone()).expect("watcher handle when player Some");
+
+    let meta1 = DeckTrackMetadata {
+        track_id: "srv-trk-1".to_string(),
+        provider_id: "local".to_string(),
+        title: "Server Track 1".to_string(),
+        artist: "Artist 1".to_string(),
+        album: "Album 1".to_string(),
+        cover_url: Some("https://cdn.example.com/srv-1.jpg".to_string()),
+        duration_ms: 500,
+    };
+    let meta2 = DeckTrackMetadata {
+        track_id: "srv-trk-2".to_string(),
+        provider_id: "qobuz".to_string(),
+        title: "Server Track 2".to_string(),
+        artist: "Artist 2".to_string(),
+        album: "Album 2".to_string(),
+        cover_url: Some("https://cdn.example.com/srv-2.jpg".to_string()),
+        duration_ms: 3_000,
+    };
+
+    player
+        .play_stream_with_metadata(StreamSource::local_file(&wav1), "Local 1", Some(meta1))
+        .expect("play wav1");
+    player
+        .prepare_standby_with_metadata(StreamSource::local_file(&wav2), "Qobuz 2", Some(meta2))
+        .expect("prepare standby wav2");
+
+    // Wait for standby to become ready before track 1 finishes if needed
+    let mut ready = false;
+    for _ in 0..80 {
+        if player.dual_deck_status().deck_b_state == DeckState::StandbyReady
+            || player.swap_generation() >= 1
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    assert!(ready);
+
+    let mut saw_track_changed = None;
+    let mut saw_queue_updated = None;
+    let mut saw_pb_changed = None;
+    let mut saw_sp_updated = false;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline
+        && (saw_track_changed.is_none()
+            || saw_queue_updated.is_none()
+            || saw_pb_changed.is_none()
+            || !saw_sp_updated)
+    {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(WsMessage::Event { event, payload })) if event == "track_changed" => {
+                saw_track_changed = Some(payload);
+            }
+            Ok(Ok(WsMessage::Event { event, payload })) if event == "queue_updated" => {
+                saw_queue_updated = Some(payload);
+            }
+            Ok(Ok(WsMessage::PlaybackStateChanged { payload })) if payload.swap_generation >= 1 => {
+                saw_pb_changed = Some(payload);
+            }
+            Ok(Ok(WsMessage::SignalPathUpdated { payload })) if !payload.nodes.is_empty() => {
+                saw_sp_updated = true;
+            }
+            _ => {}
+        }
+    }
+
+    let tc = saw_track_changed.expect("watcher must emit track_changed");
+    assert_eq!(tc["swap_generation"], 1);
+    assert_eq!(tc["position_ms"], 0);
+    assert!(tc["duration_ms"].as_u64().unwrap_or(0) >= 2_500);
+    assert_eq!(tc["track"]["track_id"], "srv-trk-2");
+    assert_eq!(tc["track_id"], "srv-trk-2");
+    assert_eq!(tc["provider_id"], "qobuz");
+    assert_eq!(tc["title"], "Server Track 2");
+    assert_eq!(tc["artist"], "Artist 2");
+    assert_eq!(tc["album"], "Album 2");
+    assert_eq!(tc["cover_url"], "https://cdn.example.com/srv-2.jpg");
+
+    let qu = saw_queue_updated.expect("watcher must emit queue_updated");
+    assert_eq!(qu["swap_generation"], 1);
+    assert_eq!(qu["track_id"], "srv-trk-2");
+
+    let pb = saw_pb_changed.expect("watcher must emit PlaybackStateChanged");
+    assert_eq!(pb.swap_generation, 1);
+    assert_eq!(pb.track_id.as_deref(), Some("srv-trk-2"));
+    assert_eq!(pb.track.as_ref().map(|t| t.title.as_str()), Some("Server Track 2"));
+    assert!(saw_sp_updated, "watcher must emit SignalPathUpdated");
+
+    // REST /api/v1/playback/state reflects current_track & swap_generation
+    let state_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state_resp.status(), StatusCode::OK);
+    let state_val: serde_json::Value =
+        serde_json::from_slice(&to_bytes(state_resp.into_body(), 1024 * 64).await.unwrap())
+            .unwrap();
+    assert_eq!(state_val["swap_generation"], 1);
+    assert_eq!(state_val["current_track_id"], "srv-trk-2");
+    assert_eq!(state_val["track_id"], "srv-trk-2");
+    assert_eq!(state_val["current_track"]["track_id"], "srv-trk-2");
+    assert_eq!(state_val["current_track"]["title"], "Server Track 2");
+
+    watcher.abort();
+    player.shutdown();
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[tokio::test]
+async fn test_server_rapid_30_play_requests_latest_wins_and_no_state_lock_stall() {
+    use core_types::{DeckTrackMetadata, StreamKey, StreamSourceSpec};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_srv_rapid30_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav_44 = tmp_dir.join("s44.wav");
+    let wav_48 = tmp_dir.join("s48.wav");
+    let wav_96 = tmp_dir.join("s96.wav");
+    write_test_wav(&wav_44, 44_100, 2, 44_100 * 2);
+    write_test_wav(&wav_48, 48_000, 2, 48_000 * 2);
+    write_test_wav(&wav_96, 96_000, 2, 96_000 * 2);
+    let wav_96_bytes = Arc::new(std::fs::read(&wav_96).unwrap());
+
+    // Mock HTTP server with a stalled endpoint and a fast 96kHz WAV endpoint
+    let mock_http = axum::Router::new()
+        .route(
+            "/stalled.wav",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                (StatusCode::OK, Vec::<u8>::new())
+            }),
+        )
+        .route(
+            "/ok96.wav",
+            axum::routing::get({
+                let data = wav_96_bytes.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let d = data.clone();
+                    async move {
+                        if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+                            && let Some(spec) = range.strip_prefix("bytes=")
+                            && let Some((s, e)) = spec.split_once('-')
+                        {
+                            let start: usize = s.parse().unwrap_or(0).min(d.len() - 1);
+                            let end: usize = if e.is_empty() {
+                                d.len() - 1
+                            } else {
+                                e.parse().unwrap_or(d.len() - 1).min(d.len() - 1)
+                            };
+                            return (
+                                StatusCode::PARTIAL_CONTENT,
+                                [
+                                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                                    (
+                                        header::CONTENT_RANGE,
+                                        format!("bytes {start}-{end}/{}", d.len()),
+                                    ),
+                                    (header::CONTENT_TYPE, "audio/wav".to_string()),
+                                ],
+                                d[start..=end].to_vec(),
+                            );
+                        }
+                        (
+                            StatusCode::OK,
+                            [
+                                (header::ACCEPT_RANGES, "bytes".to_string()),
+                                (
+                                    header::CONTENT_RANGE,
+                                    format!("bytes 0-{}/{}", d.len() - 1, d.len()),
+                                ),
+                                (header::CONTENT_TYPE, "audio/wav".to_string()),
+                            ],
+                            (*d).clone(),
+                        )
+                    }
+                }
+            }),
+        );
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = http_listener.local_addr().unwrap().port();
+    let http_srv = tokio::spawn(async move {
+        let _ = axum::serve(http_listener, mock_http).await;
+    });
+
+    let player = core_audio::AudioPlayer::new_headless();
+    let state = Arc::new(AppState::with_player(None, Some(player.clone())));
+    let watcher = core_server::spawn_playback_transition_watcher(state.clone())
+        .expect("watcher handle when player Some");
+    let token = "lum_sec_rapid30_test_token";
+    state.pairing_manager.register_token(token).await;
+    let app = build_router(state.clone());
+    let mut ws_rx = state.broadcast_tx.subscribe();
+
+    let mut max_post_ms: u128 = 0;
+    let mut max_get_ms: u128 = 0;
+    let mut last_epoch: u64 = 0;
+
+    for i in 1u64..=30 {
+        let body = if i == 30 {
+            serde_json::json!({
+                "track_id": "srv-rapid-30",
+                "playback_epoch": i,
+                "source": "Tidal HI_RES",
+                "track": DeckTrackMetadata {
+                    track_id: "srv-rapid-30".to_string(),
+                    provider_id: "tidal".to_string(),
+                    title: "Settled Server Track 30".to_string(),
+                    artist: "Artist 30".to_string(),
+                    album: "Album 30".to_string(),
+                    cover_url: None,
+                    duration_ms: 2000,
+                },
+                "source_spec": StreamSourceSpec::DirectRange {
+                    key: StreamKey::new("tidal", "srv-rapid-30", "HI_RES"),
+                    url: format!("http://127.0.0.1:{http_port}/ok96.wav"),
+                    headers: BTreeMap::new(),
+                    bitrate_bps: Some(4_608_000),
+                    mime_type: Some("audio/wav".to_string()),
+                    hint_extension: Some("wav".to_string()),
+                    content_length: Some(wav_96_bytes.len() as u64),
+                    expire_at: None,
+                    init_range_end: None,
+                    index_range_start: None,
+                    index_range_end: None,
+                    loudness: None,
+                    album_loudness: None,
+                }
+            })
+        } else if i % 2 == 1 {
+            serde_json::json!({
+                "track_id": format!("srv-rapid-{i}"),
+                "playback_epoch": i,
+                "stream_url": format!("http://127.0.0.1:{http_port}/stalled.wav"),
+                "hint_extension": "wav",
+            })
+        } else {
+            let p = if i % 4 == 0 { &wav_48 } else { &wav_44 };
+            serde_json::json!({
+                "track_id": format!("srv-rapid-{i}"),
+                "playback_epoch": i,
+                "file_path": p.to_string_lossy(),
+            })
+        };
+
+        let t0 = Instant::now();
+        let play_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/playback/play")
+                    .method("POST")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        max_post_ms = max_post_ms.max(t0.elapsed().as_millis());
+        assert_eq!(play_resp.status(), StatusCode::OK);
+        let play_val: serde_json::Value = serde_json::from_slice(
+            &to_bytes(play_resp.into_body(), 1024 * 64).await.unwrap(),
+        )
+        .unwrap();
+        let ep = play_val["playback_epoch"].as_u64().unwrap_or(0);
+        assert!(ep >= last_epoch, "monotonic epoch prev={last_epoch} cur={ep}");
+        last_epoch = ep;
+
+        // Verify GET /api/v1/playback/state never stalls behind playback_state write lock
+        let t1 = Instant::now();
+        let st_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/playback/state")
+                    .method("GET")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        max_get_ms = max_get_ms.max(t1.elapsed().as_millis());
+        assert_eq!(st_resp.status(), StatusCode::OK);
+    }
+
+    assert!(
+        max_post_ms < 100,
+        "POST /api/v1/playback/play stalled for {max_post_ms}ms"
+    );
+    assert!(
+        max_get_ms < 100,
+        "GET /api/v1/playback/state stalled for {max_get_ms}ms"
+    );
+
+    // Wait for track 30 to settle into playing
+    let mut settled = None;
+    for _ in 0..120 {
+        let st_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/playback/state")
+                    .method("GET")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(
+            &to_bytes(st_resp.into_body(), 1024 * 64).await.unwrap(),
+        )
+        .unwrap();
+        if val["status"] == "playing" && val["current_track_id"] == "srv-rapid-30" {
+            settled = Some(val);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let settled = settled.expect("final track 30 must settle into playing");
+    assert!(settled["playback_epoch"].as_u64().unwrap_or(0) >= 30);
+
+    // Stale epoch (5 < 30) must be ignored
+    let stale_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/play")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "track_id": "srv-stale-5",
+                        "playback_epoch": 5,
+                        "file_path": wav_44.to_string_lossy(),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_resp.status(), StatusCode::OK);
+    let stale_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(stale_resp.into_body(), 1024 * 64).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stale_val["status"], "ignored");
+
+    // Epoch-less stalled play right after epoched track 30:
+    // 1. Must advance playback_epoch > 30
+    // 2. Even after transition watcher ticks (80ms), GET /api/v1/playback/state and WS broadcasts
+    //    must stay in "loading" for Track 31 and NEVER flash back to Old Track 30 ("playing").
+    let ep30 = settled["playback_epoch"].as_u64().unwrap();
+    // Drain prior WS messages first
+    while ws_rx.try_recv().is_ok() {}
+    let ep31_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/play")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "track_id": "srv-epochless-31",
+                        "stream_url": format!("http://127.0.0.1:{http_port}/stalled.wav"),
+                        "hint_extension": "wav",
+                        "track": DeckTrackMetadata {
+                            track_id: "srv-epochless-31".to_string(),
+                            provider_id: "youtube_music".to_string(),
+                            title: "Loading Server Track 31".to_string(),
+                            artist: "Artist 31".to_string(),
+                            album: "Album 31".to_string(),
+                            cover_url: None,
+                            duration_ms: 180_000,
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ep31_resp.status(), StatusCode::OK);
+    let ep31_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(ep31_resp.into_body(), 1024 * 64).await.unwrap(),
+    )
+    .unwrap();
+    let ep31 = ep31_val["playback_epoch"].as_u64().unwrap_or(0);
+    assert!(ep31 > ep30, "epoch-less server play must advance epoch past {ep30}, got {ep31}");
+
+    // Wait > 50ms so spawn_playback_transition_watcher ticks at least once while Track 31 is Loading
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let st31_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/state")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let st31_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(st31_resp.into_body(), 1024 * 64).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(st31_val["status"], "loading");
+    assert_eq!(st31_val["state_code"], 5);
+    assert_eq!(st31_val["current_track_id"], "srv-epochless-31");
+    assert_eq!(st31_val["current_track"]["track_id"], "srv-epochless-31");
+    while let Ok(msg) = ws_rx.try_recv() {
+        if let WsMessage::PlaybackStateChanged { payload } = msg {
+            assert_ne!(
+                payload.track_id.as_deref(),
+                Some("srv-rapid-30"),
+                "transition watcher must never flash back to old track srv-rapid-30 while loading"
+            );
+        }
+    }
+
+    // Epoch-less fast play right after epoched play must NOT be dropped (must settle into playing)
+    let ep32_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/play")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "track_id": "srv-epochless-32",
+                        "file_path": wav_48.to_string_lossy(),
+                        "track": DeckTrackMetadata {
+                            track_id: "srv-epochless-32".to_string(),
+                            provider_id: "local".to_string(),
+                            title: "Settled Server Track 32".to_string(),
+                            artist: "Artist 32".to_string(),
+                            album: "Album 32".to_string(),
+                            cover_url: None,
+                            duration_ms: 2000,
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ep32_resp.status(), StatusCode::OK);
+    let mut settled_32 = None;
+    for _ in 0..100 {
+        let st_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/playback/state")
+                    .method("GET")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(
+            &to_bytes(st_resp.into_body(), 1024 * 64).await.unwrap(),
+        )
+        .unwrap();
+        if val["status"] == "playing" && val["current_track_id"] == "srv-epochless-32" {
+            settled_32 = Some(val);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let settled_32 = settled_32.expect("epoch-less play 32 after epoched play must settle to playing");
+    let ep32 = settled_32["playback_epoch"].as_u64().unwrap_or(0);
+    assert!(ep32 > ep31);
+
+    // Stop must succeed cleanly and advance playback_epoch
+    let stop_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/playback/stop")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stop_resp.status(), StatusCode::OK);
+    let stop_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(stop_resp.into_body(), 1024 * 64).await.unwrap(),
+    )
+    .unwrap();
+    assert!(stop_val["playback_epoch"].as_u64().unwrap_or(0) > ep32);
+
+    // Confirm WS broadcast received PlaybackStateChanged with playback_epoch >= 32
+    let mut saw_epoch_ws = false;
+    while let Ok(msg) = ws_rx.try_recv() {
+        if let WsMessage::PlaybackStateChanged { payload } = msg
+            && payload.playback_epoch >= ep32
+        {
+            saw_epoch_ws = true;
+            break;
+        }
+    }
+    assert!(
+        saw_epoch_ws,
+        "WS broadcast should carry playback_epoch >= {ep32}"
+    );
+
+    watcher.abort();
+    http_srv.abort();
+    player.shutdown();
+    let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[tokio::test]
+async fn test_rest_and_ws_ingestion_layer_endpoints() {
+    let pool = core_db::open_test_database().await.unwrap();
+    let state = Arc::new(AppState::with_player(Some(pool), None));
+    state.bootstrap_from_db().await;
+    let token = "lum_sec_ingestion_test_token";
+    state.pairing_manager.register_token(token).await;
+    let mut ws_rx = state.broadcast_tx.subscribe();
+    let app = build_router(state.clone());
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_srv_ingest_{ts}"));
+    let album_dir = tmp_dir.join("Miles Davis").join("Kind of Blue");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    write_test_wav(&album_dir.join("01 - So What.wav"), 48_000, 2, 48_000);
+    let corrupt_path = album_dir.join("02 - Corrupt.wav");
+    std::fs::write(&corrupt_path, b"BAD_RIFF_DATA_0000").unwrap();
+
+    // 1. POST /api/v1/library/watch & GET /api/v1/library/watch
+    let add_watch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/watch")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root_path": tmp_dir.to_string_lossy(),
+                        "watch_mode": "manual",
+                        "poll_interval_sec": 90
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_watch.status(), StatusCode::OK);
+    let added_root: serde_json::Value = serde_json::from_slice(
+        &to_bytes(add_watch.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(added_root["watch_mode"], "manual");
+    assert_eq!(added_root["poll_interval_sec"], 90);
+
+    let list_watch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/watch")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_watch.status(), StatusCode::OK);
+    let roots: Vec<serde_json::Value> = serde_json::from_slice(
+        &to_bytes(list_watch.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(roots.len(), 1);
+
+    // 2. POST /api/v1/library/scan/start -> WS library.scan_progress completed event
+    let scan_start = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/scan/start")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "dir_path": tmp_dir.to_string_lossy(),
+                        "force": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scan_start.status(), StatusCode::OK);
+    let start_body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(scan_start.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert!(start_body["scan_id"].as_str().is_some_and(|s| !s.is_empty()));
+
+    let mut saw_completed_ws = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(WsMessage::Event { event, payload })) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), ws_rx.recv()).await
+            && event == "library.scan_progress"
+            && payload["state"] == "completed"
+        {
+            saw_completed_ws = true;
+            break;
+        }
+    }
+    assert!(
+        saw_completed_ws,
+        "Expected WS broadcast to receive library.scan_progress with state='completed'"
+    );
+
+    // 3. GET /api/v1/library/skipped, retry (still_skipped -> fix -> imported), dismiss
+    let skip_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/skipped")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(skip_resp.status(), StatusCode::OK);
+    let skipped: Vec<serde_json::Value> = serde_json::from_slice(
+        &to_bytes(skip_resp.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(skipped.len(), 1);
+    let skip_id = skipped[0]["id"].as_str().unwrap().to_string();
+
+    // Retry while still corrupt -> still_skipped
+    let retry1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/library/skipped/{skip_id}/retry"))
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry1.status(), StatusCode::OK);
+    let retry1_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(retry1.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry1_val["status"], "still_skipped");
+
+    // Replace corrupt file with valid WAV and retry -> imported
+    write_test_wav(&corrupt_path, 48_000, 2, 48_000);
+    let retry2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/library/skipped/{skip_id}/retry"))
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry2.status(), StatusCode::OK);
+    let retry2_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(retry2.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retry2_val["status"], "imported");
+
+    // Dismiss endpoint works cleanly
+    let dismiss_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/library/skipped/{skip_id}/dismiss"))
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dismiss_resp.status(), StatusCode::OK);
+
+    // 4. PUT / GET / DELETE /api/v1/library/overrides/{entity_type}/{entity_id}
+    let put_ov = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/overrides/track/trk-ov-1")
+                .method("PUT")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "field_name": "title",
+                        "value_json": "\"Edited Track Title\""
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_ov.status(), StatusCode::OK);
+
+    let get_ov = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/overrides/track/trk-ov-1")
+                .method("GET")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_ov.status(), StatusCode::OK);
+    let ovs: Vec<serde_json::Value> = serde_json::from_slice(
+        &to_bytes(get_ov.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ovs.len(), 1);
+    assert_eq!(ovs[0]["field_name"], "title");
+
+    let del_ov = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/overrides/track/trk-ov-1/title")
+                .method("DELETE")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_ov.status(), StatusCode::OK);
+
+    // 5. POST /api/v1/library/ingest
+    let ingest_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/library/ingest")
+                .method("POST")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "provider": "youtube_music",
+                        "albums": [{
+                            "external_album_id": "ytm-alb-1",
+                            "title": "Digital Horizons",
+                            "artist_name": "Nujabes",
+                            "tracks": [{
+                                "external_track_id": "ytm-trk-1",
+                                "title": "Aruarian Dance",
+                                "artist_name": "Nujabes",
+                                "album_title": "Digital Horizons",
+                                "disc_number": 1,
+                                "track_number": 1,
+                                "duration_ms": 250000,
+                                "codec": "opus",
+                                "sample_rate_hz": 48000,
+                                "bit_depth": 16,
+                                "channels": 2,
+                                "is_dsd": false
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ingest_resp.status(), StatusCode::OK);
+    let ing_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(ingest_resp.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ing_val["albums_ingested"], 1);
+    assert_eq!(ing_val["tracks_ingested"], 1);
+
+    // 6. DELETE /api/v1/library/watch?id=...
+    let root_id = added_root["id"].as_str().unwrap();
+    let del_watch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/library/watch?id={root_id}"))
+                .method("DELETE")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_watch.status(), StatusCode::OK);
+    let del_val: serde_json::Value = serde_json::from_slice(
+        &to_bytes(del_watch.into_body(), 64 * 1024).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(del_val["ok"], true);
+
+    if let Some(watcher) = state.watcher_manager.write().await.take() {
+        watcher.shutdown().await;
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

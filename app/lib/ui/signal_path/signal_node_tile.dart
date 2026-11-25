@@ -29,14 +29,17 @@ class SignalNodeTile extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: dotColor,
                   shape: BoxShape.circle,
-                  border: Border.all(color: LuminaTokens.borderControl, width: 2),
+                  border: Border.all(
+                    color: LuminaTokens.glassPillBorder,
+                    width: 2,
+                  ),
                 ),
               ),
               if (!isLast)
                 Expanded(
                   child: Container(
                     width: 2,
-                    color: LuminaTokens.borderControl.withValues(alpha: 0.55),
+                    color: LuminaTokens.glassCardBorder,
                   ),
                 ),
             ],
@@ -48,9 +51,11 @@ class SignalNodeTile extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(LuminaTokens.spaceSm),
                 decoration: BoxDecoration(
-                  color: LuminaTokens.cardElevatedBg,
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                  border: Border.all(color: LuminaTokens.borderSubtle),
+                  color: LuminaTokens.glassCardBg,
+                  borderRadius: BorderRadius.circular(
+                    LuminaTokens.glassCardRadius,
+                  ),
+                  border: Border.all(color: LuminaTokens.glassCardBorder),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,

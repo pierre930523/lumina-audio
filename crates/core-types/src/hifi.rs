@@ -316,19 +316,14 @@ impl OutputMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DsdOutputMode {
+    #[default]
     Auto,
     NativeDsd,
     DoP,
     DsdToPcm,
-}
-
-impl Default for DsdOutputMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Exact verification status tokens mandated for the Output Information Panel.

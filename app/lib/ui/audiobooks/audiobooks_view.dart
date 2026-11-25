@@ -19,8 +19,6 @@ class AudiobooksView extends StatefulWidget {
 }
 
 class _AudiobooksViewState extends State<AudiobooksView> {
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   final List<_AudiobookItem> _items = [
     _AudiobookItem(
       id: 'ab-001',
@@ -54,7 +52,11 @@ class _AudiobooksViewState extends State<AudiobooksView> {
         // Header
         Row(
           children: [
-            const Icon(Icons.menu_book_rounded, size: 20, color: _accentBlue),
+            const Icon(
+              Icons.menu_book_rounded,
+              size: 20,
+              color: LuminaTokens.glassTextSecondary,
+            ),
             const SizedBox(width: LuminaTokens.spaceSm),
             const Text(
               '有聲書',
@@ -70,8 +72,9 @@ class _AudiobooksViewState extends State<AudiobooksView> {
               icon: const Icon(Icons.add_rounded, size: 16),
               label: const Text('匯入有聲書', style: TextStyle(fontSize: 12.5)),
               style: OutlinedButton.styleFrom(
-                foregroundColor: _accentBlue,
-                side: const BorderSide(color: LuminaTokens.borderControl),
+                foregroundColor: LuminaTokens.glassTextPrimary,
+                backgroundColor: LuminaTokens.glassPillBg,
+                side: const BorderSide(color: LuminaTokens.glassPillBorder),
                 visualDensity: VisualDensity.compact,
                 padding: const EdgeInsets.symmetric(
                   horizontal: LuminaTokens.spaceSm,
@@ -173,15 +176,13 @@ class _AudiobookTile extends StatelessWidget {
   final _AudiobookItem item;
   final VoidCallback onPlay;
 
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   const _AudiobookTile({super.key, required this.item, required this.onPlay});
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-      hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
+      hoverColor: LuminaTokens.glassRowHoverBg,
       onTap: onPlay,
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -196,9 +197,9 @@ class _AudiobookTile extends StatelessWidget {
               width: 56,
               height: 56,
               decoration: BoxDecoration(
-                color: LuminaTokens.cardElevatedBg,
+                color: LuminaTokens.glassPillBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                border: Border.all(color: LuminaTokens.borderSubtle),
+                border: Border.all(color: LuminaTokens.glassCardBorder),
               ),
               child: const Icon(
                 Icons.menu_book_rounded,
@@ -248,8 +249,8 @@ class _AudiobookTile extends StatelessWidget {
                         Expanded(
                           child: LinearProgressIndicator(
                             value: item.progress,
-                            backgroundColor: LuminaTokens.borderSubtle,
-                            color: _accentBlue,
+                            backgroundColor: LuminaTokens.glassTrackUnplayed,
+                            color: LuminaTokens.glassTextPrimary,
                             minHeight: 4,
                             borderRadius: BorderRadius.circular(2),
                           ),
@@ -284,7 +285,7 @@ class _AudiobookTile extends StatelessWidget {
                   icon: const Icon(
                     Icons.play_circle_outline_rounded,
                     size: 24,
-                    color: _accentBlue,
+                    color: LuminaTokens.glassTextPrimary,
                   ),
                   onPressed: onPlay,
                   visualDensity: VisualDensity.compact,

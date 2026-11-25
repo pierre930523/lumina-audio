@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/foundation.dart';
 
 import '../models/audio_output_info.dart';
+import '../models/ingestion_models.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
@@ -114,13 +115,26 @@ abstract class AudioService {
         );
     }
   }
+  Future<void> playStreamSpecWithOptions(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+    bool debounced = false,
+  }) => playStreamSpecAsync(track, spec, epoch: epoch);
   void setStreamingTrackHandler(StreamingTrackHandler? handler) {}
   void setPlaybackInterruptHandler(VoidCallback? handler) {}
   void beginOptimisticTrackLoad(TrackInfo track, {List<TrackInfo>? queue}) {}
+  void beginOptimisticTrackLoadAtEpoch(
+    TrackInfo track, {
+    List<TrackInfo>? queue,
+    required int epoch,
+  }) => beginOptimisticTrackLoad(track, queue: queue);
   void failOptimisticTrackLoad(TrackInfo track, String message) {}
   Future<void> cancelPendingPlayback() async {}
   Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
       cancelPendingPlayback();
+  Future<void> skipToTrack(TrackInfo track, {List<TrackInfo>? queueContext}) =>
+      play(track: track);
   Future<void> restorePlaybackSession({
     required TrackInfo track,
     required Duration position,
@@ -245,6 +259,59 @@ abstract class AudioService {
   });
   Future<void> switchProfile(String profileId);
   Future<bool> deleteProfile(String profileId);
+
+  // Layer 1 Ingestion: Scan Progress, Watched Roots, Quarantine, Overrides & External Catalog Handoff
+  Stream<ScanProgressEvent> get scanProgressStream =>
+      const Stream<ScanProgressEvent>.empty();
+
+  Future<String?> startDirectoryScan(String path, {bool force = false}) async {
+    await scanDirectory(path);
+    return null;
+  }
+
+  Future<List<WatchedRootRecord>> listWatchedRoots() async => const [];
+
+  Future<WatchedRootRecord?> addWatchedRoot(
+    String rootPath, {
+    WatchMode watchMode = WatchMode.nativeOs,
+    int pollIntervalSec = 300,
+  }) async => null;
+
+  Future<bool> removeWatchedRoot(String rootPath) async => false;
+
+  Future<List<SkippedFileRecord>> getSkippedFiles({
+    bool includeDismissed = false,
+  }) async => const [];
+
+  Future<bool> dismissSkippedFile(String skippedId) async => false;
+
+  Future<Map<String, dynamic>> retrySkippedFile(String skippedId) async =>
+      const <String, dynamic>{
+        'status': 'not_found',
+        'detail': 'Not supported',
+      };
+
+  Future<bool> setMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+    dynamic value,
+  ) async => false;
+
+  Future<bool> clearMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+  ) async => false;
+
+  Future<List<MetadataOverrideRecord>> getMetadataOverrides(
+    String entityType,
+    String entityId,
+  ) async => const [];
+
+  Future<Map<String, int>> ingestExternalCatalog(
+    ExternalCatalogIngestBatch batch,
+  ) async => const <String, int>{'albums_ingested': 0, 'tracks_ingested': 0};
 
   // Pairing & Phase 3 Mobile / Remote Dual-Mode (R2 / M9)
   Future<PairingInitiateInfo?> initiateHostPairing();

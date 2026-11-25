@@ -366,7 +366,10 @@ void main() {
           const StreamKey('tidal', '102', 'LOSSLESS'),
         );
 
-        await Future<void>.delayed(const Duration(milliseconds: 80));
+        for (var i = 0; i < 40 && refreshRequests == 0; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
         expect(refreshRequests, equals(1));
         refreshGate.complete();
 

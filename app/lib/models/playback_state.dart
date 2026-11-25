@@ -1,4 +1,5 @@
 import 'audio_format.dart';
+import 'recommendation_models.dart';
 
 enum PlaybackStatus {
   uninitialized,
@@ -56,6 +57,9 @@ class TrackInfo {
   final String? coverUrl;
   final String? artworkCacheKey;
   final bool hasLyrics;
+  final String? isrc;
+  final String? qualityLabel;
+  final String? artistId;
 
   const TrackInfo({
     required this.id,
@@ -76,6 +80,9 @@ class TrackInfo {
     this.coverUrl,
     this.artworkCacheKey,
     this.hasLyrics = false,
+    this.isrc,
+    this.qualityLabel,
+    this.artistId,
   });
 
   String? get artworkUrl =>
@@ -84,6 +91,11 @@ class TrackInfo {
           : ((albumArtUrl != null && albumArtUrl!.trim().isNotEmpty)
                 ? albumArtUrl
                 : null);
+
+  String get responsiveArtworkKey {
+    final meta = TrackMetadata.fromTrackInfo(this);
+    return '${meta.providerId}:${meta.trackId}';
+  }
 
   String get effectiveAlbumArtist =>
       (albumArtist != null && albumArtist!.trim().isNotEmpty)
@@ -114,6 +126,9 @@ class TrackInfo {
     String? coverUrl,
     String? artworkCacheKey,
     bool? hasLyrics,
+    String? isrc,
+    String? qualityLabel,
+    String? artistId,
   }) {
     return TrackInfo(
       id: id ?? this.id,
@@ -134,6 +149,9 @@ class TrackInfo {
       coverUrl: coverUrl ?? this.coverUrl,
       artworkCacheKey: artworkCacheKey ?? this.artworkCacheKey,
       hasLyrics: hasLyrics ?? this.hasLyrics,
+      isrc: isrc ?? this.isrc,
+      qualityLabel: qualityLabel ?? this.qualityLabel,
+      artistId: artistId ?? this.artistId,
     );
   }
 }
@@ -149,6 +167,8 @@ class PlaybackState {
   final String? lastError;
   final bool deviceLost;
   final String clockSource;
+  final int swapGeneration;
+  final int playbackEpoch;
 
   const PlaybackState({
     required this.status,
@@ -161,7 +181,21 @@ class PlaybackState {
     this.lastError,
     this.deviceLost = false,
     this.clockSource = 'system',
+    this.swapGeneration = 0,
+    this.playbackEpoch = 0,
   });
+
+  static int parsePlaybackEpoch(Map<String, dynamic> json) {
+    final p1 = (json['playback_epoch'] as num?)?.toInt() ?? 0;
+    final p2 = (json['playbackEpoch'] as num?)?.toInt() ?? 0;
+    final p3 = (json['epoch'] as num?)?.toInt() ?? 0;
+    final p4 = (json['play_request_id'] as num?)?.toInt() ?? 0;
+    var best = p1;
+    if (p2 > best) best = p2;
+    if (p3 > best) best = p3;
+    if (p4 > best) best = p4;
+    return best;
+  }
 
   PlaybackState copyWith({
     PlaybackStatus? status,
@@ -175,6 +209,8 @@ class PlaybackState {
     bool clearLastError = false,
     bool? deviceLost,
     String? clockSource,
+    int? swapGeneration,
+    int? playbackEpoch,
   }) {
     return PlaybackState(
       status: status ?? this.status,
@@ -187,6 +223,42 @@ class PlaybackState {
       lastError: clearLastError ? null : (lastError ?? this.lastError),
       deviceLost: deviceLost ?? this.deviceLost,
       clockSource: clockSource ?? this.clockSource,
+      swapGeneration: swapGeneration ?? this.swapGeneration,
+      playbackEpoch: playbackEpoch ?? this.playbackEpoch,
     );
   }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is PlaybackState &&
+        other.status == status &&
+        other.track == track &&
+        other.position == position &&
+        other.volume == volume &&
+        other.isMuted == isMuted &&
+        other.seekEpoch == seekEpoch &&
+        other.isSeeking == isSeeking &&
+        other.lastError == lastError &&
+        other.deviceLost == deviceLost &&
+        other.clockSource == clockSource &&
+        other.swapGeneration == swapGeneration &&
+        other.playbackEpoch == playbackEpoch;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    status,
+    track,
+    position,
+    volume,
+    isMuted,
+    seekEpoch,
+    isSeeking,
+    lastError,
+    deviceLost,
+    clockSource,
+    swapGeneration,
+    playbackEpoch,
+  );
 }

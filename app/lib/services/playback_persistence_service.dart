@@ -119,7 +119,11 @@ class PlaybackPersistenceService {
       'channels': t.format.channels,
       'codec': t.format.codec.name,
       'is_dsd': t.format.isDsd,
+      if (t.format.bitrateKbps != null) 'bitrate_kbps': t.format.bitrateKbps,
       'provider_name': t.providerName,
+      if (t.isrc != null) 'isrc': t.isrc,
+      if (t.qualityLabel != null) 'quality_label': t.qualityLabel,
+      if (t.artistId != null) 'artist_id': t.artistId,
     };
   }
 
@@ -166,8 +170,12 @@ class PlaybackPersistenceService {
         bitDepth: (map['bit_depth'] as num?)?.toInt() ?? 16,
         channels: (map['channels'] as num?)?.toInt() ?? 2,
         isDsd: map['is_dsd'] == true,
+        bitrateKbps: (map['bitrate_kbps'] as num?)?.toInt(),
       ),
       providerName: map['provider_name']?.toString() ?? 'local',
+      isrc: map['isrc']?.toString(),
+      qualityLabel: map['quality_label']?.toString(),
+      artistId: map['artist_id']?.toString(),
     );
   }
 

@@ -29,6 +29,10 @@ class NowPlayingLayoutMetrics {
   final double padBottom;
   final double gap;
   final double titleFontSize;
+  final double subtitleFontSize;
+  final double metaTitleGap;
+  final double metaPillGap;
+  final double coverBorderRadius;
   final bool compactMetadata;
   final bool ultraCompact;
   final double shadowBlur;
@@ -48,6 +52,10 @@ class NowPlayingLayoutMetrics {
     required this.padBottom,
     required this.gap,
     required this.titleFontSize,
+    required this.subtitleFontSize,
+    required this.metaTitleGap,
+    required this.metaPillGap,
+    required this.coverBorderRadius,
     required this.compactMetadata,
     required this.ultraCompact,
     required this.shadowBlur,
@@ -63,13 +71,31 @@ class NowPlayingLayoutMetrics {
     return value.clamp(lo, hi).toDouble();
   }
 
+  static double _responsiveCoverRadius(double vpH, double coverSide) {
+    if (coverSide <= 0.0) return 0.0;
+    final target = _safeClamp(vpH * 0.018, 14.0, 22.0);
+    return math.min(coverSide * 0.08, target);
+  }
+
   static NowPlayingLayoutMetrics compute({
     required double width,
     required double height,
     required NowPlayingViewMode mode,
+    double? viewportWidth,
+    double? viewportHeight,
   }) {
     final w = width.isFinite && width > 0 ? width : 0.0;
     final h = height.isFinite && height > 0 ? height : 0.0;
+    final vpW = (viewportWidth != null &&
+            viewportWidth.isFinite &&
+            viewportWidth > 0)
+        ? viewportWidth
+        : w;
+    final vpH = (viewportHeight != null &&
+            viewportHeight.isFinite &&
+            viewportHeight > 0)
+        ? viewportHeight
+        : h;
     final hStagePad = _safeClamp(w * 0.03, math.min(16.0, w * 0.08), 48.0);
     final ultraCompact = h < 300;
     final compact = h < 440;
@@ -112,6 +138,13 @@ class NowPlayingLayoutMetrics {
             padBottom: padBottom,
             gap: _safeClamp(w * 0.03, 16.0, 32.0),
             titleFontSize: h < 220 ? 17.0 : 19.0,
+            subtitleFontSize: 12.5,
+            metaTitleGap: 2.0,
+            metaPillGap: 6.0,
+            coverBorderRadius: math.min(
+              coverSide * 0.08,
+              _safeClamp(vpH * 0.018, 10.0, 16.0),
+            ),
             compactMetadata: true,
             ultraCompact: true,
             shadowBlur: 14.0,
@@ -133,9 +166,9 @@ class NowPlayingLayoutMetrics {
           shadowSpread = 0.0;
           shadowOffsetY = 10.0;
         } else {
-          shadowBlur = 36.0;
-          shadowSpread = 2.0;
-          shadowOffsetY = 14.0;
+          shadowBlur = 48.0;
+          shadowSpread = 0.0;
+          shadowOffsetY = 20.0;
         }
 
         final minPadH = math.min(16.0, w * 0.14);
@@ -147,43 +180,64 @@ class NowPlayingLayoutMetrics {
             math.max(minPadH, w * 0.14),
           ),
         );
-        final minPadTop = math.min(ultraCompact ? 8.0 : 18.0, h * 0.12);
-        final padTop = _safeClamp(
-          shadowBlur + shadowSpread + (compact ? 4.0 : 6.0),
-          minPadTop,
-          math.max(minPadTop, h * (compact ? 0.08 : 0.14)),
+        final padTop = math.min(
+          ultraCompact ? 8.0 : (compact ? 12.0 : 20.0),
+          math.max(0.0, h * 0.10),
         );
         final padBottom = math.min(
-          ultraCompact ? 8.0 : (compact || shadowBlur < 36.0 ? 12.0 : 20.0),
-          math.max(0.0, h * 0.12),
+          ultraCompact ? 8.0 : (compact ? 12.0 : 16.0),
+          math.max(0.0, h * 0.10),
         );
         final innerW = math.max(0.0, w - stagePadH * 2);
         final innerH = math.max(0.0, h - padTop - padBottom);
-        final gap = math.min(
-          ultraCompact ? 8.0 : (compact ? 12.0 : (h >= 460 ? 18.0 : 14.0)),
-          innerH * 0.15,
-        );
-        final titleFontSize = ultraCompact ? 17.0 : (compact ? 19.0 : 22.0);
+        final targetGap = _safeClamp(vpH * 0.025, 16.0, 28.0);
+        final gap = ultraCompact
+            ? math.min(8.0, innerH * 0.12)
+            : (compact
+                  ? math.min(12.0, innerH * 0.12)
+                  : math.min(targetGap, innerH * 0.15));
+        final titleFontSize = ultraCompact
+            ? 17.0
+            : (compact ? 20.0 : _safeClamp(vpH * 0.028, 22.0, 34.0));
+        final subtitleFontSize = ultraCompact
+            ? 12.0
+            : (compact ? 12.5 : _safeClamp(vpH * 0.015, 14.0, 18.0));
+        final metaTitleGap = compact
+            ? 2.0
+            : _safeClamp(vpH * 0.006, 4.0, 8.0);
+        final metaPillGap = compact
+            ? 6.0
+            : _safeClamp(vpH * 0.011, 8.0, 14.0);
+        final naturalMetaReserve = titleFontSize * 2.0 +
+            metaTitleGap +
+            subtitleFontSize * 1.4 +
+            metaPillGap +
+            30.0;
         final metaReserve = math.min(
-          ultraCompact ? 84.0 : (compact ? 88.0 : 148.0),
+          ultraCompact ? 80.0 : (compact ? 88.0 : naturalMetaReserve),
           innerH * 0.45,
         );
         final roomH = math.max(0.0, innerH - gap - metaReserve);
-        final roomW = math.max(0.0, innerW * (w >= 900 ? 0.68 : 0.88));
-        final physicalMax = math.min(580.0, math.min(roomW, roomH)).floorToDouble();
-        final preferredMin = ultraCompact ? 96.0 : (compact ? 168.0 : 220.0);
-        final minCoverSide = math.min(preferredMin, physicalMax);
-        final maxCoverSide = math.max(minCoverSide, physicalMax);
-        final coverSide = _safeClamp(
-          physicalMax,
-          minCoverSide,
-          maxCoverSide,
-        ).floorToDouble();
+        final roomW = math.max(0.0, innerW);
+        final desiredCover = _safeClamp(
+          math.min(vpH * 0.56, vpW * 0.46),
+          300.0,
+          640.0,
+        );
+        final physicalMax = math
+            .max(0.0, math.min(roomW, roomH))
+            .floorToDouble();
+        final coverSide = math.min(desiredCover, physicalMax).floorToDouble();
+        final preferredMin = ultraCompact
+            ? 96.0
+            : (compact ? 168.0 : 220.0);
+        final minCoverSide = math.min(preferredMin, coverSide);
+        final maxCoverSide = math.max(coverSide, physicalMax);
         final remainingMeta = math.max(0.0, innerH - coverSide - gap);
         final maxMetaHeight = _safeClamp(
           remainingMeta,
           math.min(64.0, remainingMeta),
-          200.0,
+          220.0,
         );
 
         return NowPlayingLayoutMetrics(
@@ -198,6 +252,10 @@ class NowPlayingLayoutMetrics {
           padBottom: padBottom,
           gap: gap,
           titleFontSize: titleFontSize,
+          subtitleFontSize: subtitleFontSize,
+          metaTitleGap: metaTitleGap,
+          metaPillGap: metaPillGap,
+          coverBorderRadius: _responsiveCoverRadius(vpH, coverSide),
           compactMetadata: compact,
           ultraCompact: ultraCompact,
           shadowBlur: shadowBlur,
@@ -222,50 +280,72 @@ class NowPlayingLayoutMetrics {
             shadowSpread = 0.0;
             shadowOffsetY = 10.0;
           } else {
-            shadowBlur = 36.0;
-            shadowSpread = 2.0;
-            shadowOffsetY = 14.0;
+            shadowBlur = 48.0;
+            shadowSpread = 0.0;
+            shadowOffsetY = 20.0;
           }
 
           final stagePadH = math.max(
             hStagePad,
             shadowBlur + shadowSpread + 10.0,
           );
-          final minPadTop = ultraCompact ? 10.0 : (compact ? 16.0 : 24.0);
-          final padTop = _safeClamp(
-            shadowBlur + shadowSpread + (compact ? 2.0 : 4.0),
-            minPadTop,
-            math.max(minPadTop, h * (compact ? 0.09 : 0.14)),
+          final padTop = math.min(
+            ultraCompact ? 8.0 : (compact ? 12.0 : 20.0),
+            math.max(0.0, h * 0.10),
           );
-          final padBottom = ultraCompact
-              ? 10.0
-              : (h < 360 ? 14.0 : (compact ? 16.0 : 24.0));
+          final padBottom = math.min(
+            ultraCompact ? 8.0 : (compact ? 12.0 : 16.0),
+            math.max(0.0, h * 0.10),
+          );
+          final innerH = math.max(0.0, h - padTop - padBottom);
+          final targetGap = _safeClamp(vpH * 0.025, 16.0, 28.0);
           final gap = ultraCompact
-              ? 8.0
-              : (compact ? 12.0 : (h >= 460 ? 22.0 : 14.0));
-          final titleFontSize = ultraCompact ? 16.5 : (compact ? 18.0 : 22.0);
-          final metaReserve = ultraCompact ? 84.0 : (compact ? 114.0 : 148.0);
+              ? math.min(8.0, innerH * 0.12)
+              : (compact
+                    ? math.min(12.0, innerH * 0.12)
+                    : math.min(targetGap, innerH * 0.15));
+          final titleFontSize = ultraCompact
+              ? 16.5
+              : (compact ? 18.0 : _safeClamp(vpH * 0.028, 22.0, 34.0));
+          final subtitleFontSize = ultraCompact
+              ? 12.0
+              : (compact ? 12.5 : _safeClamp(vpH * 0.015, 14.0, 18.0));
+          final metaTitleGap = compact
+              ? 2.0
+              : _safeClamp(vpH * 0.006, 4.0, 8.0);
+          final metaPillGap = compact
+              ? 6.0
+              : _safeClamp(vpH * 0.011, 8.0, 14.0);
+          final naturalMetaReserve = titleFontSize * 2.0 +
+              metaTitleGap +
+              subtitleFontSize * 1.4 +
+              metaPillGap +
+              30.0;
+          final metaReserve = math.min(
+            ultraCompact ? 80.0 : (compact ? 104.0 : naturalMetaReserve),
+            innerH * 0.45,
+          );
           final totalW = math.max(0.0, w - stagePadH - 16.0);
           final leftColW = totalW * (leftFlex / (leftFlex + rightFlex));
           final leftInnerW = math.max(0.0, leftColW - stagePadH * 2);
-          final innerH = math.max(0.0, h - padTop - padBottom);
           final roomH = math.max(0.0, innerH - gap - metaReserve);
+          final desiredCover = _safeClamp(
+            math.min(vpH * 0.56, vpW * 0.46),
+            300.0,
+            640.0,
+          );
           final physicalMax = math
-              .min(540.0, math.min(leftInnerW, roomH))
+              .max(0.0, math.min(640.0, math.min(leftInnerW, roomH)))
               .floorToDouble();
+          final coverSide = math.min(desiredCover, physicalMax).floorToDouble();
           final preferredMin = h < 310 ? 112.0 : (h < 430 ? 156.0 : 200.0);
-          final minCoverSide = math.min(preferredMin, physicalMax);
-          final maxCoverSide = math.max(minCoverSide, physicalMax);
-          final coverSide = _safeClamp(
-            physicalMax,
-            minCoverSide,
-            maxCoverSide,
-          ).floorToDouble();
+          final minCoverSide = math.min(preferredMin, coverSide);
+          final maxCoverSide = math.max(coverSide, physicalMax);
           final remainingMeta = math.max(0.0, innerH - coverSide - gap);
           final maxMetaHeight = _safeClamp(
             remainingMeta,
             math.min(64.0, remainingMeta),
-            200.0,
+            220.0,
           );
 
           return NowPlayingLayoutMetrics(
@@ -280,6 +360,10 @@ class NowPlayingLayoutMetrics {
             padBottom: padBottom,
             gap: gap,
             titleFontSize: titleFontSize,
+            subtitleFontSize: subtitleFontSize,
+            metaTitleGap: metaTitleGap,
+            metaPillGap: metaPillGap,
+            coverBorderRadius: _responsiveCoverRadius(vpH, coverSide),
             compactMetadata: compact,
             ultraCompact: ultraCompact,
             shadowBlur: shadowBlur,
@@ -320,6 +404,10 @@ class NowPlayingLayoutMetrics {
             padBottom: 8.0,
             gap: 12.0,
             titleFontSize: w >= 440 ? 18.0 : 16.5,
+            subtitleFontSize: 13.0,
+            metaTitleGap: 3.0,
+            metaPillGap: 6.0,
+            coverBorderRadius: _responsiveCoverRadius(vpH, coverSide),
             compactMetadata: w < 360,
             ultraCompact: false,
             shadowBlur: 20.0,
@@ -362,6 +450,10 @@ class NowPlayingLayoutMetrics {
           padBottom: padBottomCompact,
           gap: ultraCompact ? 10.0 : 12.0,
           titleFontSize: ultraCompact ? 14.5 : 16.0,
+          subtitleFontSize: 12.5,
+          metaTitleGap: 2.0,
+          metaPillGap: 6.0,
+          coverBorderRadius: 8.0,
           compactMetadata: true,
           ultraCompact: ultraCompact,
           shadowBlur: 12.0,
@@ -388,6 +480,10 @@ class NowPlayingLayoutMetrics {
             padBottom: compact ? 6.0 : 12.0,
             gap: 12.0,
             titleFontSize: 18.0,
+            subtitleFontSize: 13.5,
+            metaTitleGap: 4.0,
+            metaPillGap: 8.0,
+            coverBorderRadius: 0.0,
             compactMetadata: compact,
             ultraCompact: false,
             shadowBlur: 0.0,
@@ -428,6 +524,10 @@ class NowPlayingLayoutMetrics {
           padBottom: padBottomLyrics,
           gap: ultraCompact ? 10.0 : 14.0,
           titleFontSize: ultraCompact ? 14.5 : 16.0,
+          subtitleFontSize: 12.5,
+          metaTitleGap: 2.0,
+          metaPillGap: 6.0,
+          coverBorderRadius: 8.0,
           compactMetadata: true,
           ultraCompact: ultraCompact,
           shadowBlur: 0.0,
@@ -457,6 +557,10 @@ class NowPlayingLayoutMetrics {
         other.padBottom == padBottom &&
         other.gap == gap &&
         other.titleFontSize == titleFontSize &&
+        other.subtitleFontSize == subtitleFontSize &&
+        other.metaTitleGap == metaTitleGap &&
+        other.metaPillGap == metaPillGap &&
+        other.coverBorderRadius == coverBorderRadius &&
         other.compactMetadata == compactMetadata &&
         other.ultraCompact == ultraCompact &&
         other.shadowBlur == shadowBlur &&
@@ -466,7 +570,7 @@ class NowPlayingLayoutMetrics {
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     arrangement,
     coverSide,
     minCoverSide,
@@ -478,11 +582,15 @@ class NowPlayingLayoutMetrics {
     padBottom,
     gap,
     titleFontSize,
+    subtitleFontSize,
+    metaTitleGap,
+    metaPillGap,
+    coverBorderRadius,
     compactMetadata,
     ultraCompact,
     shadowBlur,
     shadowSpread,
     shadowOffsetY,
     maxMetaHeight,
-  );
+  ]);
 }

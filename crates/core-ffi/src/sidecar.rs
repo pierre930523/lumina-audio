@@ -149,8 +149,8 @@ mod tests {
         }
         if !exited {
             let _ = child.kill();
-            let _ = child.wait();
         }
+        let _ = child.wait();
         assert!(
             exited,
             "Child process must be terminated immediately when KILL_ON_JOB_CLOSE handle closes"

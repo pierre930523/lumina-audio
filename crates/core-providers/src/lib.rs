@@ -23,13 +23,18 @@ pub use traits::{
     SyncProgress, SyncResult, SyncResultSummary,
 };
 
-// Local scanner
+// Local scanner & ingestion pipeline
 pub use local::{
-    extract_edition_label, find_folder_cover, find_folder_cover_in_files, is_scannable_audio,
-    normalize_album_base_title, normalize_path, AlbumMapper, AlbumSyncMetadata, ArtworkManager,
-    ArtworkTarget, DirectoryScanner, ExtractedMetadata, LyricLine, LyricWord, LyricsFormat,
-    LyricsKind, LyricsManager, LyricsResult, LyricsSource, LyricsTarget, LocalProvider,
-    LocalProviderConfig, MetadataExtractor, COVER_ART_FILENAMES, SCANNABLE_AUDIO_EXTENSIONS,
+    classify_unsupported_container, compute_content_fingerprint, detect_garbled_tags,
+    extract_disc_number_from_dir_name, extract_edition_label, find_folder_cover,
+    find_folder_cover_in_files, is_playlist_sidecar, is_scannable_audio, normalize_album_base_title,
+    normalize_path, parse_m3u_content, parse_m3u_file, should_ignore_name, should_ignore_path,
+    split_artists, AlbumMapper, AlbumSyncMetadata, ArtworkManager, ArtworkTarget,
+    DetailedScanOutput, DirectoryScanner, ExtractOptions, ExtractedMetadata, IngestionConfig,
+    IngestionPipeline, LocalProvider, LocalProviderConfig, LyricLine, LyricWord, LyricsFormat,
+    LyricsKind, LyricsManager, LyricsResult, LyricsSource, LyricsTarget, MetadataExtractor,
+    ParsedPlaylist, ParsedPlaylistEntry, ScanSkippedCandidate, StorageWatcherManager,
+    VersionSyncMetadata, COVER_ART_FILENAMES, SCANNABLE_AUDIO_EXTENSIONS,
 };
 
 // Cross-source library sync & deduplication (F37)

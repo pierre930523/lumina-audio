@@ -1015,3 +1015,51 @@ fn test_parse_remote_share_uri_rejects_empty_host() {
     assert!(parse_remote_share_uri("http:///music").is_err());
     assert!(parse_remote_share_uri("dav://   ").is_err());
 }
+
+#[test]
+fn test_provider_capabilities_recommendation_flags_and_serde() {
+    for caps in [
+        ProviderCapabilities::local(),
+        ProviderCapabilities::smb(),
+        ProviderCapabilities::webdav(),
+    ] {
+        assert!(!caps.supports_track_radio);
+        assert!(!caps.supports_personal_feed);
+        assert!(!caps.supports_isrc_lookup);
+    }
+
+    for caps in [
+        ProviderCapabilities::qobuz(),
+        ProviderCapabilities::tidal(),
+        ProviderCapabilities::deezer(),
+    ] {
+        assert!(caps.supports_track_radio);
+        assert!(caps.supports_personal_feed);
+        assert!(caps.supports_isrc_lookup);
+
+        let json = serde_json::to_string(&caps).unwrap();
+        let decoded: ProviderCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, caps);
+    }
+
+    let local = ProviderCapabilities::local();
+    let local_json = serde_json::to_string(&local).unwrap();
+    let local_decoded: ProviderCapabilities = serde_json::from_str(&local_json).unwrap();
+    assert_eq!(local_decoded, local);
+
+    // Legacy JSON lacking the new recommendation capability fields defaults all three to false.
+    let legacy_json = r#"{
+        "supports_token_login": true,
+        "supports_oauth": false,
+        "supports_word_lyrics": true,
+        "supports_hi_res": true,
+        "supports_filesystem_scan": false,
+        "supports_catalog_search": true,
+        "supports_stream_resolution": true,
+        "supports_favorites_sync": true
+    }"#;
+    let legacy: ProviderCapabilities = serde_json::from_str(legacy_json).unwrap();
+    assert!(!legacy.supports_track_radio);
+    assert!(!legacy.supports_personal_feed);
+    assert!(!legacy.supports_isrc_lookup);
+}

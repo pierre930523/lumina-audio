@@ -1788,8 +1788,11 @@ void main() {
             matching: find.byKey(ValueKey('cover_net_$okTrackUrl')),
           ),
         );
+        final capsuleProvider = capsuleImg.image is ResizeImage
+            ? (capsuleImg.image as ResizeImage).imageProvider
+            : capsuleImg.image;
         expect(
-          (capsuleImg.image as NetworkImage).headers,
+          (capsuleProvider as NetworkImage).headers,
           BaseStreamingProvider.defaultImageHttpHeaders,
         );
         expect(capsuleImg.filterQuality, FilterQuality.high);
@@ -1801,8 +1804,11 @@ void main() {
             matching: find.byKey(ValueKey('cover_net_$okTrackUrl')),
           ),
         );
+        final nowPlayingProvider = nowPlayingImg.image is ResizeImage
+            ? (nowPlayingImg.image as ResizeImage).imageProvider
+            : nowPlayingImg.image;
         expect(
-          (nowPlayingImg.image as NetworkImage).headers,
+          (nowPlayingProvider as NetworkImage).headers,
           BaseStreamingProvider.defaultImageHttpHeaders,
         );
         expect(nowPlayingImg.filterQuality, FilterQuality.high);

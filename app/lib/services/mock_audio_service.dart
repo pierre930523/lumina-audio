@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/audio_format.dart';
 import '../models/audio_output_info.dart';
+import '../models/ingestion_models.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
 import '../models/signal_path.dart';
@@ -23,6 +24,34 @@ class MockAudioService implements AudioService, DualDeckAudioService {
       StreamController<SignalPath>.broadcast();
   final StreamController<Duration> _positionController =
       StreamController<Duration>.broadcast();
+  final StreamController<ScanProgressEvent> _scanProgressController =
+      StreamController<ScanProgressEvent>.broadcast();
+
+  final List<WatchedRootRecord> _watchedRoots = <WatchedRootRecord>[];
+  final List<SkippedFileRecord> _skippedFiles = <SkippedFileRecord>[];
+  final Map<String, Map<String, MetadataOverrideRecord>> _metadataOverrides =
+      <String, Map<String, MetadataOverrideRecord>>{};
+  final List<ExternalCatalogIngestBatch> _ingestedExternalBatches =
+      <ExternalCatalogIngestBatch>[];
+  int _mockScanSeq = 0;
+
+  @visibleForTesting
+  void emitScanProgress(ScanProgressEvent event) {
+    if (!_disposed && !_scanProgressController.isClosed) {
+      _scanProgressController.add(event);
+    }
+  }
+
+  @visibleForTesting
+  void seedSkippedFiles(List<SkippedFileRecord> records) {
+    _skippedFiles
+      ..clear()
+      ..addAll(records);
+  }
+
+  @visibleForTesting
+  List<ExternalCatalogIngestBatch> get ingestedExternalBatches =>
+      List<ExternalCatalogIngestBatch>.unmodifiable(_ingestedExternalBatches);
 
   late PlaybackState _state;
   late SignalPath _signalPath;
@@ -30,6 +59,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
   late final List<LyricLine> _lyrics;
   int _currentIndex = 0;
   int _activeEpoch = 0;
+  bool _lastPlayDebounced = false;
   StreamSourceSpec? _lastSourceSpec;
   TrackInfo? _standbyTrack;
   StreamSourceSpec? _standbySpec;
@@ -38,6 +68,9 @@ class MockAudioService implements AudioService, DualDeckAudioService {
 
   @visibleForTesting
   int get activeEpoch => _activeEpoch;
+
+  @visibleForTesting
+  bool get lastPlayDebounced => _lastPlayDebounced;
 
   @visibleForTesting
   StreamSourceSpec? get lastSourceSpec => _lastSourceSpec;
@@ -168,6 +201,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
           sampleRateHz: 96000,
           bitDepth: 24,
           channels: 2,
+          bitrateKbps: 2840,
         ),
         providerName: 'Qobuz Hi-Res',
       ),
@@ -518,9 +552,22 @@ class MockAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.loading,
         track: track,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         clearLastError: true,
       ),
     );
+  }
+
+  @override
+  void beginOptimisticTrackLoadAtEpoch(
+    TrackInfo track, {
+    List<TrackInfo>? queue,
+    required int epoch,
+  }) {
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+    }
+    beginOptimisticTrackLoad(track, queue: queue);
   }
 
   @override
@@ -531,6 +578,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.error,
         track: track,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         lastError: message,
       ),
     );
@@ -589,14 +637,24 @@ class MockAudioService implements AudioService, DualDeckAudioService {
           status: PlaybackStatus.playing,
           track: track,
           position: Duration.zero,
+          playbackEpoch: _activeEpoch,
           clearLastError: true,
         ),
       );
       _emitSignalPath();
     } else {
-      _emitState(_state.copyWith(status: PlaybackStatus.playing));
+      _emitState(
+        _state.copyWith(
+          status: PlaybackStatus.playing,
+          playbackEpoch: _activeEpoch,
+        ),
+      );
     }
   }
+
+  @override
+  Future<void> skipToTrack(TrackInfo track, {List<TrackInfo>? queueContext}) =>
+      play(track: track);
 
   @override
   Future<void> playStreamUrl({
@@ -620,6 +678,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.playing,
         track: track,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         clearLastError: true,
       ),
     );
@@ -634,13 +693,29 @@ class MockAudioService implements AudioService, DualDeckAudioService {
     String? hintExtension,
     required int requestId,
   }) {
-    _activeEpoch = requestId;
+    if (requestId > 0 && requestId < _activeEpoch) {
+      return Future<void>.value();
+    }
+    if (requestId > _activeEpoch) {
+      _activeEpoch = requestId;
+    }
     return playStreamUrl(
       track: track,
       streamUrl: streamUrl,
       headers: headers,
       hintExtension: hintExtension,
     );
+  }
+
+  @override
+  Future<void> playStreamSpecWithOptions(
+    TrackInfo track,
+    StreamSourceSpec spec, {
+    required int epoch,
+    bool debounced = false,
+  }) {
+    _lastPlayDebounced = debounced;
+    return playStreamSpecAsync(track, spec, epoch: epoch);
   }
 
   @override
@@ -741,6 +816,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
         status: PlaybackStatus.playing,
         track: nextTrack,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
         clearLastError: true,
       ),
     );
@@ -749,8 +825,12 @@ class MockAudioService implements AudioService, DualDeckAudioService {
   }
 
   @override
-  Future<void> cancelPendingPlaybackAtEpoch(int epoch) =>
-      cancelPendingPlayback();
+  Future<void> cancelPendingPlaybackAtEpoch(int epoch) {
+    if (epoch > _activeEpoch) {
+      _activeEpoch = epoch;
+    }
+    return cancelPendingPlayback();
+  }
 
   @override
   Future<void> restorePlaybackSession({
@@ -996,11 +1076,11 @@ class MockAudioService implements AudioService, DualDeckAudioService {
   Future<void> stop() async {
     _playbackInterruptHandler?.call();
     _clearStandby();
-    _activeEpoch = 0;
     _emitState(
       _state.copyWith(
         status: PlaybackStatus.stopped,
         position: Duration.zero,
+        playbackEpoch: _activeEpoch,
       ),
     );
   }
@@ -1131,10 +1211,26 @@ class MockAudioService implements AudioService, DualDeckAudioService {
 
   @override
   Future<CanonicalAlbumDetail?> getAlbumDetail(String albumId) async {
+    final overrides = _metadataOverrides['album:$albumId'];
+    String? overrideString(String field) {
+      final raw = overrides?[field]?.valueJson;
+      if (raw == null || raw.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is String && decoded.trim().isNotEmpty) {
+          return decoded.trim();
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    final defaultTitle = albumId == 'alb-wall'
+        ? 'The Wall'
+        : 'The Dark Side of the Moon';
     return CanonicalAlbumDetail(
       id: albumId,
-      title: albumId == 'alb-wall' ? 'The Wall' : 'The Dark Side of the Moon',
-      artistName: 'Pink Floyd',
+      title: overrideString('title') ?? defaultTitle,
+      artistName: overrideString('artist_name') ?? 'Pink Floyd',
       releaseYear: albumId == 'alb-wall' ? 1979 : 1973,
       editorialBio: '跨平台母帶高解析認證標準版本。',
       versions: const [
@@ -1946,6 +2042,189 @@ class MockAudioService implements AudioService, DualDeckAudioService {
   }
 
   @override
+  Stream<ScanProgressEvent> get scanProgressStream =>
+      _scanProgressController.stream;
+
+  @override
+  Future<String?> startDirectoryScan(String path, {bool force = false}) async {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return null;
+    final scanId = 'mock-scan-${++_mockScanSeq}';
+    emitScanProgress(
+      ScanProgressEvent(
+        scanId: scanId,
+        rootPath: trimmed,
+        state: ScanLifecycleState.discovering,
+        currentPath: trimmed,
+      ),
+    );
+    final count = await scanDirectory(trimmed);
+    emitScanProgress(
+      ScanProgressEvent(
+        scanId: scanId,
+        rootPath: trimmed,
+        state: ScanLifecycleState.completed,
+        scanned: count,
+        added: count,
+        totalEstimated: count,
+      ),
+    );
+    return scanId;
+  }
+
+  @override
+  Future<List<WatchedRootRecord>> listWatchedRoots() async =>
+      List<WatchedRootRecord>.unmodifiable(_watchedRoots);
+
+  @override
+  Future<WatchedRootRecord?> addWatchedRoot(
+    String rootPath, {
+    WatchMode watchMode = WatchMode.nativeOs,
+    int pollIntervalSec = 300,
+  }) async {
+    final trimmed = rootPath.trim();
+    if (trimmed.isEmpty) return null;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final idx = _watchedRoots.indexWhere(
+      (r) => r.rootPath.toLowerCase() == trimmed.toLowerCase(),
+    );
+    final record = WatchedRootRecord(
+      id: idx >= 0
+          ? _watchedRoots[idx].id
+          : 'root-${_watchedRoots.length + 1}',
+      providerId: watchMode == WatchMode.nasPolling &&
+              trimmed.toLowerCase().startsWith('smb://')
+          ? 'smb'
+          : 'local',
+      rootPath: trimmed,
+      watchMode: watchMode,
+      pollIntervalSec: pollIntervalSec,
+      isOnline: true,
+      lastScanAt: nowIso,
+      updatedAt: nowIso,
+    );
+    if (idx >= 0) {
+      _watchedRoots[idx] = record;
+    } else {
+      _watchedRoots.add(record);
+    }
+    return record;
+  }
+
+  @override
+  Future<bool> removeWatchedRoot(String rootPath) async {
+    final trimmed = rootPath.trim().toLowerCase();
+    final before = _watchedRoots.length;
+    _watchedRoots.removeWhere((r) => r.rootPath.toLowerCase() == trimmed);
+    return _watchedRoots.length != before;
+  }
+
+  @override
+  Future<List<SkippedFileRecord>> getSkippedFiles({
+    bool includeDismissed = false,
+  }) async {
+    if (includeDismissed) {
+      return List<SkippedFileRecord>.unmodifiable(_skippedFiles);
+    }
+    return _skippedFiles.where((f) => !f.dismissed).toList(growable: false);
+  }
+
+  @override
+  Future<bool> dismissSkippedFile(String skippedId) async {
+    final idx = _skippedFiles.indexWhere((f) => f.id == skippedId);
+    if (idx < 0) return false;
+    final old = _skippedFiles[idx];
+    _skippedFiles[idx] = SkippedFileRecord(
+      id: old.id,
+      providerId: old.providerId,
+      filePath: old.filePath,
+      reason: old.reason,
+      detail: old.detail,
+      fileSize: old.fileSize,
+      fileMtime: old.fileMtime,
+      firstSeenAt: old.firstSeenAt,
+      lastSeenAt: old.lastSeenAt,
+      dismissed: true,
+    );
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>> retrySkippedFile(String skippedId) async {
+    final idx = _skippedFiles.indexWhere((f) => f.id == skippedId);
+    if (idx < 0) {
+      return const <String, dynamic>{
+        'status': 'not_found',
+        'detail': 'Skipped file record not found',
+      };
+    }
+    final removed = _skippedFiles.removeAt(idx);
+    return <String, dynamic>{
+      'status': 'imported',
+      'detail': 'Re-imported ${removed.filePath}',
+    };
+  }
+
+  @override
+  Future<bool> setMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+    dynamic value,
+  ) async {
+    final key = '$entityType:$entityId';
+    final map = _metadataOverrides.putIfAbsent(
+      key,
+      () => <String, MetadataOverrideRecord>{},
+    );
+    map[fieldName] = MetadataOverrideRecord(
+      entityType: entityType,
+      entityId: entityId,
+      fieldName: fieldName,
+      valueJson: jsonEncode(value),
+      sourceLayer: MetadataLayer.userEdit,
+      updatedAt: DateTime.now().toUtc().toIso8601String(),
+    );
+    return true;
+  }
+
+  @override
+  Future<bool> clearMetadataOverride(
+    String entityType,
+    String entityId,
+    String fieldName,
+  ) async {
+    final map = _metadataOverrides['$entityType:$entityId'];
+    if (map == null) return false;
+    return map.remove(fieldName) != null;
+  }
+
+  @override
+  Future<List<MetadataOverrideRecord>> getMetadataOverrides(
+    String entityType,
+    String entityId,
+  ) async {
+    final map = _metadataOverrides['$entityType:$entityId'];
+    if (map == null || map.isEmpty) return const [];
+    return List<MetadataOverrideRecord>.unmodifiable(map.values);
+  }
+
+  @override
+  Future<Map<String, int>> ingestExternalCatalog(
+    ExternalCatalogIngestBatch batch,
+  ) async {
+    _ingestedExternalBatches.add(batch);
+    var tracks = 0;
+    for (final a in batch.albums) {
+      tracks += a.tracks.length;
+    }
+    return <String, int>{
+      'albums_ingested': batch.albums.length,
+      'tracks_ingested': tracks,
+    };
+  }
+
+  @override
   void dispose() {
     if (_disposed) return;
     _disposed = true;
@@ -1953,6 +2232,7 @@ class MockAudioService implements AudioService, DualDeckAudioService {
     _stateController.close();
     _signalPathController.close();
     _positionController.close();
+    _scanProgressController.close();
   }
 }
 

@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
+import '../../models/ingestion_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_settings_controller.dart';
 import '../theme/lumina_tokens.dart';
@@ -22,13 +25,19 @@ class LibrarySettingsPanel extends StatefulWidget {
 }
 
 class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
-  static const _dividerColor = LuminaTokens.borderSubtle;
+  static const _dividerColor = LuminaTokens.glassCardDivider;
 
   final TextEditingController _scanController = TextEditingController();
   late Set<String> _draftExcluded;
   bool _isScanning = false;
   String? _scanStatus;
   String? _actionStatus;
+  ScanProgressEvent? _latestScanProgress;
+  StreamSubscription<ScanProgressEvent>? _scanProgressSub;
+  Map<String, WatchedRootRecord> _watchedRootsByPath =
+      const <String, WatchedRootRecord>{};
+  List<SkippedFileRecord> _skippedFiles = const <SkippedFileRecord>[];
+  bool _loadingSkipped = false;
 
   @override
   void initState() {
@@ -36,12 +45,65 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
     _draftExcluded = Set<String>.from(
       widget.settingsController.excludedExtensions,
     );
+    _scanProgressSub = widget.audioService.scanProgressStream.listen((event) {
+      if (!mounted) return;
+      setState(() {
+        _latestScanProgress = event;
+        if (event.state == ScanLifecycleState.completed ||
+            event.state == ScanLifecycleState.failed) {
+          _isScanning = false;
+        }
+      });
+      if (event.state == ScanLifecycleState.completed) {
+        widget.onLibraryChanged?.call();
+        unawaited(_refreshIngestionState());
+      }
+    });
+    unawaited(_refreshIngestionState());
   }
 
   @override
   void dispose() {
+    _scanProgressSub?.cancel();
+    _scanProgressSub = null;
     _scanController.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshIngestionState() async {
+    await Future.wait(<Future<void>>[
+      _loadWatchedRoots(),
+      _loadSkippedFiles(),
+    ]);
+  }
+
+  Future<void> _loadWatchedRoots() async {
+    try {
+      final roots = await widget.audioService.listWatchedRoots();
+      if (!mounted) return;
+      setState(() {
+        _watchedRootsByPath = <String, WatchedRootRecord>{
+          for (final r in roots) r.rootPath.toLowerCase(): r,
+        };
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _loadSkippedFiles() async {
+    if (!mounted) return;
+    setState(() => _loadingSkipped = true);
+    try {
+      final skipped = await widget.audioService.getSkippedFiles();
+      if (!mounted) return;
+      setState(() {
+        _skippedFiles = skipped;
+      });
+    } catch (_) {
+    } finally {
+      if (mounted) {
+        setState(() => _loadingSkipped = false);
+      }
+    }
   }
 
   Future<void> _scanPath(String rawPath) async {
@@ -49,11 +111,23 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
     if (path.isEmpty) return;
     setState(() => _isScanning = true);
     try {
+      final mode = LibrarySettingsController.inferWatchModeForPath(path);
+      final watched = await widget.audioService.addWatchedRoot(
+        path,
+        watchMode: mode,
+      );
       final count = await widget.audioService.scanDirectory(path);
       widget.settingsController.addOrUpdateFolder(path, count);
       widget.onLibraryChanged?.call();
+      await _refreshIngestionState();
       if (!mounted) return;
       setState(() {
+        if (watched != null) {
+          _watchedRootsByPath = <String, WatchedRootRecord>{
+            ..._watchedRootsByPath,
+            watched.rootPath.toLowerCase(): watched,
+          };
+        }
         _scanStatus = '已掃描「$path」，收錄 $count 首曲目';
       });
     } finally {
@@ -61,6 +135,34 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
         setState(() => _isScanning = false);
       }
     }
+  }
+
+  Future<void> _handleDismissSkipped(SkippedFileRecord item) async {
+    final ok = await widget.audioService.dismissSkippedFile(item.id);
+    if (!mounted) return;
+    await _loadSkippedFiles();
+    if (!mounted) return;
+    setState(() {
+      _actionStatus = ok
+          ? '已忽略隔離檔案「${item.filePath}」'
+          : '無法忽略隔離檔案「${item.filePath}」';
+    });
+  }
+
+  Future<void> _handleRetrySkipped(SkippedFileRecord item) async {
+    final res = await widget.audioService.retrySkippedFile(item.id);
+    if (!mounted) return;
+    await _loadSkippedFiles();
+    if (res['status'] == 'imported') {
+      widget.onLibraryChanged?.call();
+    }
+    if (!mounted) return;
+    final detail = res['detail']?.toString() ?? '';
+    setState(() {
+      _actionStatus = res['status'] == 'imported'
+          ? '已重新匯入「${item.filePath}」'
+          : '重試結果（${res['status'] ?? 'unknown'}）${detail.isNotEmpty ? '：$detail' : ''}';
+    });
   }
 
   Future<void> _pickAndFillFolder() async {
@@ -221,6 +323,8 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                         },
                       ),
                     ),
+                    if (_latestScanProgress != null)
+                      _buildScanProgressCard(_latestScanProgress!),
                     if (_scanStatus != null)
                       Padding(
                         padding: const EdgeInsets.fromLTRB(
@@ -276,7 +380,8 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                     ),
                                     label: const Text('全部重新掃描'),
                                     style: TextButton.styleFrom(
-                                      foregroundColor: LuminaTokens.accentBlue,
+                                      foregroundColor:
+                                          LuminaTokens.glassTextPrimary,
                                       disabledForegroundColor:
                                           LuminaTokens.textDisabled,
                                       minimumSize: const Size(0, 32),
@@ -315,17 +420,19 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                     vertical: LuminaTokens.spaceXs,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: LuminaTokens.cardElevatedBg,
+                                    color: LuminaTokens.glassPillBg,
                                     borderRadius: BorderRadius.circular(
                                       LuminaTokens.radiusSm,
                                     ),
-                                    border: Border.all(color: _dividerColor),
+                                    border: Border.all(
+                                      color: LuminaTokens.glassCardBorder,
+                                    ),
                                   ),
                                   child: Row(
                                     children: [
                                       const Icon(
                                         Icons.folder_outlined,
-                                        color: LuminaTokens.accentBlue,
+                                        color: LuminaTokens.glassTextPrimary,
                                         size: 18,
                                       ),
                                       const SizedBox(
@@ -356,6 +463,11 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                           ],
                                         ),
                                       ),
+                                      const SizedBox(width: LuminaTokens.spaceXs),
+                                      _buildWatchModeBadge(
+                                        f.path,
+                                        _watchedRootsByPath[f.path.toLowerCase()],
+                                      ),
                                       IconButton(
                                         tooltip: '重新掃描此資料夾',
                                         visualDensity: VisualDensity.compact,
@@ -380,7 +492,16 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                             .iconButtonStyle(),
                                         onPressed: () {
                                           ctrl.removeFolder(f.path);
+                                          unawaited(
+                                            widget.audioService
+                                                .removeWatchedRoot(f.path)
+                                                .then((_) => _loadWatchedRoots()),
+                                          );
                                           setState(() {
+                                            final next = Map<String, WatchedRootRecord>.from(
+                                              _watchedRootsByPath,
+                                            )..remove(f.path.toLowerCase());
+                                            _watchedRootsByPath = next;
                                             _actionStatus =
                                                 '已移除資料夾「${f.path}」';
                                           });
@@ -705,8 +826,7 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                       LuminaTokens.radiusSm,
                                     ),
                                     mouseCursor: SystemMouseCursors.click,
-                                    hoverColor: LuminaTokens.cardHoverBg
-                                        .withValues(alpha: 0.6),
+                                    hoverColor: LuminaTokens.glassRowHoverBg,
                                     focusColor: LuminaTokens.focusRing
                                         .withValues(alpha: 0.2),
                                     onTap: () {
@@ -742,13 +862,13 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                                                   }
                                                 });
                                               },
-                                              activeColor:
-                                                  LuminaTokens.accentBlue,
+                                              activeColor: LuminaTokens
+                                                  .glassSwitchOnTrack,
                                               checkColor:
                                                   LuminaTokens.onAccentDark,
                                               side: const BorderSide(
-                                                color:
-                                                    LuminaTokens.borderControl,
+                                                color: LuminaTokens
+                                                    .glassPillBorder,
                                                 width: 1.5,
                                               ),
                                               shape: RoundedRectangleBorder(
@@ -812,11 +932,300 @@ class _LibrarySettingsPanelState extends State<LibrarySettingsPanel> {
                     ),
                   ],
                 ),
+                const SizedBox(height: LuminaTokens.spaceMd),
+
+                // 6. Skipped Files Quarantine (略過與隔離檔案)
+                SettingsGroupCard(
+                  key: const Key('skipped_files_section'),
+                  title: '略過與隔離檔案 (${_skippedFiles.length})',
+                  description: '掃描時因標頭損毀、權限不足或未分割 CUE/ISO 而略過的檔案清單，不影響其餘曲目入庫。',
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        LuminaTokens.spaceMd + LuminaTokens.space2xs,
+                        LuminaTokens.spaceXs,
+                        LuminaTokens.spaceMd + LuminaTokens.space2xs,
+                        LuminaTokens.spaceMd,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                _skippedFiles.isEmpty
+                                    ? '目前沒有被隔離的略過檔案'
+                                    : '共 ${_skippedFiles.length} 個隔離項目',
+                                style: const TextStyle(
+                                  color: LuminaTokens.textMuted,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              TextButton.icon(
+                                key: const Key('btn_refresh_skipped_files'),
+                                onPressed:
+                                    _loadingSkipped ? null : _loadSkippedFiles,
+                                icon: const Icon(Icons.refresh_rounded, size: 15),
+                                label: const Text('重新整理'),
+                                style: TextButton.styleFrom(
+                                  foregroundColor: LuminaTokens.glassTextPrimary,
+                                  minimumSize: const Size(0, 30),
+                                ),
+                              ),
+                            ],
+                          ),
+                          for (final item in _skippedFiles)
+                            Padding(
+                              padding: const EdgeInsets.only(
+                                top: LuminaTokens.spaceXs,
+                              ),
+                              child: Container(
+                                key: Key('skipped_file_${item.id}'),
+                                padding: const EdgeInsets.all(
+                                  LuminaTokens.spaceSm,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: LuminaTokens.glassPillBg,
+                                  borderRadius: BorderRadius.circular(
+                                    LuminaTokens.radiusSm,
+                                  ),
+                                  border: Border.all(
+                                    color: LuminaTokens.glassCardBorder,
+                                  ),
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Icon(
+                                      Icons.warning_amber_rounded,
+                                      size: 18,
+                                      color: Color(0xFFFFB74D),
+                                    ),
+                                    const SizedBox(width: LuminaTokens.spaceSm),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            item.reason.displayLabel,
+                                            style: const TextStyle(
+                                              color: LuminaTokens.textPrimary,
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            item.filePath,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: LuminaTokens.textSecondary,
+                                              fontSize: 11.5,
+                                            ),
+                                          ),
+                                          if (item.detail.isNotEmpty ||
+                                              item.lastSeenAt.isNotEmpty)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 2,
+                                              ),
+                                              child: Text(
+                                                [
+                                                  if (item.detail.isNotEmpty)
+                                                    item.detail,
+                                                  if (item.lastSeenAt.isNotEmpty)
+                                                    item.lastSeenAt,
+                                                ].join(' · '),
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  color: LuminaTokens.textMuted,
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: LuminaTokens.spaceXs),
+                                    TextButton(
+                                      key: Key('btn_retry_skipped_${item.id}'),
+                                      onPressed: () => _handleRetrySkipped(item),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor:
+                                            LuminaTokens.glassTextPrimary,
+                                        minimumSize: const Size(0, 30),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                      ),
+                                      child: const Text('重試'),
+                                    ),
+                                    TextButton(
+                                      key: Key('btn_dismiss_skipped_${item.id}'),
+                                      onPressed: () =>
+                                          _handleDismissSkipped(item),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: LuminaTokens.textMuted,
+                                        minimumSize: const Size(0, 30),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                      ),
+                                      child: const Text('忽略'),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _buildScanProgressCard(ScanProgressEvent progress) {
+    final total = progress.totalEstimated;
+    final double? fraction = progress.state == ScanLifecycleState.completed
+        ? 1.0
+        : (total != null && total > 0
+              ? (progress.scanned / total).clamp(0.0, 1.0)
+              : null);
+    final stateLabel = switch (progress.state) {
+      ScanLifecycleState.idle => '待命',
+      ScanLifecycleState.discovering => '探索目錄中',
+      ScanLifecycleState.probing => '解析音訊標頭',
+      ScanLifecycleState.persisting => '寫入資料庫',
+      ScanLifecycleState.watching => '即時監控中',
+      ScanLifecycleState.completed => '掃描完成',
+      ScanLifecycleState.failed => '掃描失敗',
+    };
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        LuminaTokens.spaceMd + LuminaTokens.space2xs,
+        0,
+        LuminaTokens.spaceMd + LuminaTokens.space2xs,
+        LuminaTokens.spaceSm,
+      ),
+      child: Container(
+        key: const Key('ingestion_scan_progress_card'),
+        padding: const EdgeInsets.all(LuminaTokens.spaceSm),
+        decoration: BoxDecoration(
+          color: LuminaTokens.glassPillBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '$stateLabel · ${progress.rootPath}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: LuminaTokens.textPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  total != null && total > 0
+                      ? '${progress.scanned} / $total'
+                      : '${progress.scanned}',
+                  style: const TextStyle(
+                    color: LuminaTokens.textSecondary,
+                    fontSize: 11.5,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: fraction,
+                minHeight: 4,
+                backgroundColor: LuminaTokens.glassCardDivider,
+                valueColor: const AlwaysStoppedAnimation<Color>(
+                  LuminaTokens.glassSwitchOnTrack,
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '已掃描 ${progress.scanned} · 新增 ${progress.added} · 更新 ${progress.updated} · 略過 ${progress.skipped}',
+              style: const TextStyle(
+                color: LuminaTokens.textSecondary,
+                fontSize: 11.5,
+              ),
+            ),
+            if (progress.currentPath != null &&
+                progress.currentPath!.trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  progress.currentPath!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: LuminaTokens.textMuted,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWatchModeBadge(String folderPath, WatchedRootRecord? watched) {
+    final mode = watched?.watchMode ??
+        LibrarySettingsController.inferWatchModeForPath(folderPath);
+    final isOffline = watched != null && !watched.isOnline;
+    final label = isOffline
+        ? 'Offline'
+        : switch (mode) {
+            WatchMode.nativeOs => 'OS Native',
+            WatchMode.nasPolling => 'NAS Polling',
+            WatchMode.manual => 'Manual',
+          };
+    final accentColor = isOffline
+        ? const Color(0xFFE57373)
+        : (mode == WatchMode.nasPolling
+              ? const Color(0xFF64B5F6)
+              : LuminaTokens.statusSuccess);
+
+    return Container(
+      key: Key('watch_badge_$folderPath'),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: accentColor.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+        border: Border.all(color: accentColor.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: accentColor,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 

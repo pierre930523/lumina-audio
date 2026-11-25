@@ -3,8 +3,11 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/audio_output_info.dart';
+import '../../models/playback_state.dart';
 import '../../models/signal_path.dart';
 import '../../services/audio_service.dart';
+import '../common/audio_quality_badge.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 import 'quality_badge.dart';
 import 'signal_node_tile.dart';
@@ -22,15 +25,19 @@ class SignalPathModal extends StatefulWidget {
       context: context,
       barrierColor: LuminaTokens.scrimBg,
       builder: (ctx) => Dialog(
-        backgroundColor: LuminaTokens.cardBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-          side: const BorderSide(color: LuminaTokens.borderSubtle),
-        ),
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
         insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560, maxHeight: 700),
-          child: SignalPathModal(audioService: audioService),
+          child: FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassDialogBlur,
+            color: LuminaTokens.glassDialogBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
+            child: SignalPathModal(audioService: audioService),
+          ),
         ),
       ),
     );
@@ -109,7 +116,6 @@ class _SignalPathModalState extends State<SignalPathModal> {
       initialData: widget.audioService.currentSignalPath,
       builder: (context, snapshot) {
         final signalPath = snapshot.data ?? widget.audioService.currentSignalPath;
-        final accentColor = QualityBadge.colorForQuality(signalPath.overallQuality);
         final descriptionColor =
             QualityBadge.textColorForQuality(signalPath.overallQuality);
         final strictOn = widget.audioService.isStrictBitPerfect;
@@ -134,7 +140,19 @@ class _SignalPathModalState extends State<SignalPathModal> {
             children: [
               Row(
                 children: [
-                  QualityBadge(quality: signalPath.overallQuality),
+                  StreamBuilder<PlaybackState>(
+                    stream: widget.audioService.stateStream,
+                    initialData: widget.audioService.currentState,
+                    builder: (context, stateSnap) {
+                      final currentTrack =
+                          (stateSnap.data ?? widget.audioService.currentState)
+                              .track;
+                      return AudioQualityBadge(
+                        track: currentTrack,
+                        buttonKey: const Key('signal_path_modal_quality_badge'),
+                      );
+                    },
+                  ),
                   const SizedBox(width: LuminaTokens.spaceSm),
                   const Expanded(
                     child: Text(
@@ -178,7 +196,7 @@ class _SignalPathModalState extends State<SignalPathModal> {
                     ),
                     style: IconButton.styleFrom(
                       foregroundColor: LuminaTokens.textSecondary,
-                      hoverColor: LuminaTokens.cardHoverBg,
+                      hoverColor: LuminaTokens.glassRowHoverBg,
                       focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(
@@ -255,9 +273,11 @@ class _SignalPathModalState extends State<SignalPathModal> {
                   vertical: LuminaTokens.spaceSm,
                 ),
                 decoration: BoxDecoration(
-                  color: LuminaTokens.cardElevatedBg,
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                  border: Border.all(color: LuminaTokens.borderSubtle),
+                  color: LuminaTokens.glassCardBg,
+                  borderRadius: BorderRadius.circular(
+                    LuminaTokens.glassCardRadius,
+                  ),
+                  border: Border.all(color: LuminaTokens.glassCardBorder),
                 ),
                 child: Column(
                   children: [
@@ -293,24 +313,6 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         Switch(
                           key: const Key('dsp_bypass_switch'),
                           value: signalPath.dspBypassed,
-                          activeTrackColor: accentColor,
-                          activeThumbColor: LuminaTokens.textPrimary,
-                          inactiveThumbColor: strictOn
-                              ? LuminaTokens.textDisabled
-                              : LuminaTokens.textSecondary,
-                          inactiveTrackColor: LuminaTokens.canvasBg,
-                          trackOutlineColor: WidgetStateProperty.resolveWith(
-                            (states) {
-                              if (states.contains(WidgetState.disabled)) {
-                                return LuminaTokens.textDisabled
-                                    .withValues(alpha: 0.5);
-                              }
-                              if (states.contains(WidgetState.focused)) {
-                                return LuminaTokens.focusRing;
-                              }
-                              return LuminaTokens.borderControl;
-                            },
-                          ),
                           mouseCursor: strictOn
                               ? SystemMouseCursors.basic
                               : SystemMouseCursors.click,
@@ -323,7 +325,10 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         ),
                       ],
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 16),
+                    const Divider(
+                      color: LuminaTokens.glassCardDivider,
+                      height: 16,
+                    ),
                     Row(
                       children: [
                         Expanded(
@@ -354,15 +359,6 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         Switch(
                           key: const Key('strict_bit_perfect_switch'),
                           value: strictOn,
-                          activeTrackColor: LuminaTokens.accentPurple,
-                          activeThumbColor: LuminaTokens.textPrimary,
-                          inactiveThumbColor: LuminaTokens.textSecondary,
-                          inactiveTrackColor: LuminaTokens.canvasBg,
-                          trackOutlineColor: WidgetStateProperty.resolveWith(
-                            (states) => states.contains(WidgetState.focused)
-                                ? LuminaTokens.focusRing
-                                : LuminaTokens.borderControl,
-                          ),
                           mouseCursor: SystemMouseCursors.click,
                           onChanged: (value) async {
                             await widget.audioService.setStrictBitPerfect(value);
@@ -372,7 +368,10 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         ),
                       ],
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 16),
+                    const Divider(
+                      color: LuminaTokens.glassCardDivider,
+                      height: 16,
+                    ),
                     Row(
                       children: [
                         const Text(
@@ -407,19 +406,25 @@ class _SignalPathModalState extends State<SignalPathModal> {
                                         ? FontWeight.w700
                                         : FontWeight.w500,
                                     color: selected
-                                        ? LuminaTokens.textPrimary
-                                        : LuminaTokens.textSecondary,
+                                        ? Colors.white
+                                        : LuminaTokens.glassTextSecondary,
                                   ),
                                 ),
                                 selected: selected,
-                                checkmarkColor: LuminaTokens.textPrimary,
-                                selectedColor: LuminaTokens.accentPurple
-                                    .withValues(alpha: 0.28),
-                                backgroundColor: LuminaTokens.cardBg,
+                                showCheckmark: false,
+                                selectedColor:
+                                    LuminaTokens.glassSegmentSelectedBg,
+                                backgroundColor:
+                                    LuminaTokens.glassSegmentTrackBg,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(
+                                    LuminaTokens.radiusSm,
+                                  ),
+                                ),
                                 side: BorderSide(
                                   color: selected
-                                      ? LuminaTokens.accentPurple
-                                      : LuminaTokens.borderControl,
+                                      ? LuminaTokens.glassSegmentSelectedBorder
+                                      : LuminaTokens.glassSegmentTrackBorder,
                                 ),
                                 visualDensity: VisualDensity.compact,
                                 onSelected: (_) async {
@@ -445,7 +450,7 @@ class _SignalPathModalState extends State<SignalPathModal> {
                   key: const Key('toggle_phase10_panel'),
                   onTap: () => setState(() => _showDetails = !_showDetails),
                   mouseCursor: SystemMouseCursors.click,
-                  hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.6),
+                  hoverColor: LuminaTokens.glassRowHoverBg,
                   focusColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
                   borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
                   child: Padding(
@@ -487,9 +492,11 @@ class _SignalPathModalState extends State<SignalPathModal> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(LuminaTokens.spaceSm),
                   decoration: BoxDecoration(
-                    color: LuminaTokens.canvasBg,
-                    borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                    border: Border.all(color: LuminaTokens.borderSubtle),
+                    color: LuminaTokens.glassCardBg,
+                    borderRadius: BorderRadius.circular(
+                      LuminaTokens.glassCardRadius,
+                    ),
+                    border: Border.all(color: LuminaTokens.glassCardBorder),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -503,14 +510,20 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         'Rate / Bit Depth / Ch',
                         '${src.sampleRateHz} Hz · ${src.bitDepth}-bit · ${src.channels}ch (${src.channelLayout})',
                       ),
-                      const Divider(color: LuminaTokens.borderSubtle, height: 14),
+                      const Divider(
+                        color: LuminaTokens.glassCardDivider,
+                        height: 14,
+                      ),
                       _buildSectionHeader('DECODER'),
                       _buildKvRow('Decoder Type', dec.decoderType),
                       _buildKvRow(
                         'PCM / Bit Preservation',
                         '${dec.decodedPcmFormat} · ${dec.sampleRateHz} Hz · valid ${dec.validBits}/${dec.containerBits}-bit${dec.integerPreserved ? ' (Integer Preserved)' : ''}',
                       ),
-                      const Divider(color: LuminaTokens.borderSubtle, height: 14),
+                      const Divider(
+                        color: LuminaTokens.glassCardDivider,
+                        height: 14,
+                      ),
                       _buildSectionHeader('OUTPUT'),
                       _buildKvRow(
                         'Device / Transport',
@@ -528,7 +541,10 @@ class _SignalPathModalState extends State<SignalPathModal> {
                         'DSP / SW Volume',
                         '${out.dspStatus} · ${out.softwareVolumeStatus}',
                       ),
-                      const Divider(color: LuminaTokens.borderSubtle, height: 14),
+                      const Divider(
+                        color: LuminaTokens.glassCardDivider,
+                        height: 14,
+                      ),
                       _buildSectionHeader('VERIFICATION'),
                       _buildKvRow(
                         'Bit-Perfect Status',
@@ -565,7 +581,7 @@ class _SignalPathModalState extends State<SignalPathModal> {
       child: Text(
         title,
         style: const TextStyle(
-          color: LuminaTokens.accentBlue,
+          color: LuminaTokens.glassTextSecondary,
           fontSize: 10.5,
           fontWeight: FontWeight.w800,
           letterSpacing: 1.0,

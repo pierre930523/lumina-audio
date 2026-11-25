@@ -4,16 +4,20 @@ import 'package:flutter/foundation.dart';
 
 import '../../../models/audio_format.dart';
 import '../../../models/playback_state.dart';
+import '../../../models/recommendation_models.dart';
 import '../../../models/stream_source_spec.dart';
 import '../../../models/streaming_models.dart';
 import '../../../models/studio_models.dart';
 import '../oauth_helper.dart';
+import '../recommendation_provider.dart';
 import '../stream_resolver.dart';
 import '../streaming_provider.dart';
+import '../track_matcher.dart';
 import '../yt_dlp_service.dart';
 
 /// Real Tidal OAuth 2.0 (PKCE + Device Flow) and Hi-Res FLAC streaming provider.
-class TidalProvider extends BaseStreamingProvider implements StreamResolver {
+class TidalProvider extends BaseStreamingProvider
+    implements StreamResolver, RecommendationProvider {
   static const String defaultScopes = 'r_usr w_usr w_sub';
   static const String byokCredentialStorageKey = 'streaming:tidal:byok';
 
@@ -1274,7 +1278,10 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
   }
 
   ({List<StreamingAlbum> albums, List<TrackInfo> tracks, List<String> mixIds})
-      _extractHomeRecommendations(Map<String, dynamic> root) {
+      _extractHomeRecommendations(
+    Map<String, dynamic> root, {
+    int coverSize = 640,
+  }) {
     final rawAlbums = <Map<String, dynamic>>[];
     final rawTracks = <Map<String, dynamic>>[];
     final mixIds = <String>[];
@@ -1337,9 +1344,10 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
       if (isTrack) {
         if (seenTrackIds.add(id)) {
           final enriched = Map<String, dynamic>.from(map);
-          if (_extractTidalCoverFromMap(enriched) == null) {
+          if (_extractTidalCoverFromMap(enriched, size: coverSize) == null) {
             final fallbackCover =
-                _extractTidalCoverFromMap(rawMap) ?? parentCover;
+                _extractTidalCoverFromMap(rawMap, size: coverSize) ??
+                parentCover;
             if (fallbackCover != null) {
               enriched['cover'] = fallbackCover;
             }
@@ -1354,9 +1362,10 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
       } else if (isAlbum) {
         if (seenAlbumIds.add(id)) {
           final enriched = Map<String, dynamic>.from(map);
-          if (_extractTidalCoverFromMap(enriched) == null) {
+          if (_extractTidalCoverFromMap(enriched, size: coverSize) == null) {
             final fallbackCover =
-                _extractTidalCoverFromMap(rawMap) ?? parentCover;
+                _extractTidalCoverFromMap(rawMap, size: coverSize) ??
+                parentCover;
             if (fallbackCover != null) {
               enriched['cover'] = fallbackCover;
             }
@@ -1375,7 +1384,8 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
       if (node is Map) {
         final map = Map<String, dynamic>.from(node);
         final nextHint = map['type']?.toString() ?? hintType;
-        final nodeCover = _extractTidalCoverFromMap(map) ?? parentCover;
+        final nodeCover =
+            _extractTidalCoverFromMap(map, size: coverSize) ?? parentCover;
         final isContainer = map['items'] is List ||
             map['modules'] is List ||
             map['rows'] is List ||
@@ -1474,7 +1484,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
         final albumObj = tMap['album'];
         if (albumObj is Map) {
           final albId = albumObj['id']?.toString();
-          final existing = _extractTidalCoverFromMap(tMap);
+          final existing = _extractTidalCoverFromMap(tMap, size: coverSize);
           if (existing == null &&
               albId != null &&
               coverByAlbumId.containsKey(albId)) {
@@ -1485,7 +1495,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
     }
     return (
       albums: parsedAlbums,
-      tracks: _parseTrackList(rawTracks),
+      tracks: _parseTrackList(rawTracks, coverSize: coverSize),
       mixIds: mixIds,
     );
   }
@@ -1794,6 +1804,19 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
             rethrow;
           }
         } else {
+          final classified = StreamingException.classifyKind(
+            statusCode: e.statusCode,
+            message: e.message,
+            isDrmRestricted: e.isDrmRestricted,
+          );
+          if (e.statusCode == 451 ||
+              classified == StreamingErrorKind.regionRestricted) {
+            throw StreamingException(
+              e.message,
+              statusCode: e.statusCode,
+              kind: StreamingErrorKind.regionRestricted,
+            );
+          }
           failTier(tier, e.message, statusCode: e.statusCode);
           continue;
         }
@@ -1957,10 +1980,17 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
       failTier(tier, '不支援的 Tidal 串流清單格式：$mimeType');
     }
 
+    final finalMessage = lastError ?? 'Tidal 此曲目所有音質層級皆受保護或無法播放';
+    final classified = StreamingException.classifyKind(
+      statusCode: lastStatusCode,
+      message: finalMessage,
+      isDrmRestricted: sawDrm,
+    );
     throw StreamingException(
-      lastError ?? 'Tidal 此曲目所有音質層級皆受保護或無法播放',
+      finalMessage,
       statusCode: lastStatusCode,
       isDrmRestricted: sawDrm,
+      kind: classified,
     );
   }
 
@@ -2068,6 +2098,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
             sampleRateHz: sampleRate,
             bitDepth: bitDepth,
             channels: 2,
+            bitrateKbps: _tidalLossyBitrateKbps(audioQuality, isFlac: isFlac),
           ),
         );
       },
@@ -2097,6 +2128,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
             sampleRateHz: sampleRate,
             bitDepth: bitDepth,
             channels: 2,
+            bitrateKbps: _tidalLossyBitrateKbps(audioQuality, isFlac: isFlac),
           ),
         );
       },
@@ -2164,6 +2196,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
             sampleRateHz: sampleRate,
             bitDepth: bitDepth,
             channels: 2,
+            bitrateKbps: _tidalLossyBitrateKbps(audioQuality, isFlac: isFlac),
           ),
           engineRoute: engineRoute,
         );
@@ -2195,6 +2228,7 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
             sampleRateHz: sampleRate,
             bitDepth: bitDepth,
             channels: 2,
+            bitrateKbps: _tidalLossyBitrateKbps(audioQuality, isFlac: isFlac),
           ),
           engineRoute: engineRoute,
         );
@@ -2206,9 +2240,13 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
     dynamic rawItems, {
     String? fallbackCoverUrl,
     String? fallbackAlbumTitle,
+    int coverSize = 640,
   }) {
     if (rawItems is! List) return const [];
-    final normalizedFallbackCover = _tidalCoverUrl(fallbackCoverUrl);
+    final normalizedFallbackCover = _tidalCoverUrl(
+      fallbackCoverUrl,
+      size: coverSize,
+    );
     final tracks = <TrackInfo>[];
     for (final entry in rawItems) {
       if (entry is! Map) continue;
@@ -2234,9 +2272,9 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
           ? Map<String, dynamic>.from(map['album'] as Map)
           : null;
       final coverUrl = (albumObj != null
-              ? _extractTidalCoverFromMap(albumObj)
+              ? _extractTidalCoverFromMap(albumObj, size: coverSize)
               : null) ??
-          _extractTidalCoverFromMap(map) ??
+          _extractTidalCoverFromMap(map, size: coverSize) ??
           normalizedFallbackCover;
       final rawAlbTitle = albumObj?['title']?.toString().trim();
       final fbAlbTitle = fallbackAlbumTitle?.trim();
@@ -2247,6 +2285,11 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
                 : 'Tidal');
       final durationSec = (map['duration'] as num?)?.toInt() ?? 0;
       final quality = _resolveEffectiveTidalQuality(map);
+      final rawIsrc = map['isrc']?.toString().trim();
+      final isrc = (rawIsrc != null && rawIsrc.isNotEmpty) ? rawIsrc : null;
+      final rawArtistId = artistObj?['id']?.toString().trim();
+      final artistId =
+          (rawArtistId != null && rawArtistId.isNotEmpty) ? rawArtistId : null;
 
       tracks.add(
         TrackInfo(
@@ -2261,6 +2304,9 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
           discNumber: (map['volumeNumber'] as num?)?.toInt(),
           format: _formatForTidalQuality(quality),
           providerName: 'Tidal',
+          isrc: isrc,
+          qualityLabel: quality.isNotEmpty ? quality : null,
+          artistId: artistId,
         ),
       );
     }
@@ -2368,6 +2414,15 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
     return rawQuality;
   }
 
+  static int? _tidalLossyBitrateKbps(String quality, {bool isFlac = false}) {
+    if (isFlac) return null;
+    return switch (quality.toUpperCase()) {
+      'HIGH' => 320,
+      'LOW' => 96,
+      _ => null,
+    };
+  }
+
   static AudioFormat _formatForTidalQuality(String quality) {
     if (quality == 'HI_RES_LOSSLESS' || quality == 'HI_RES') {
       return const AudioFormat(
@@ -2385,11 +2440,12 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
         channels: 2,
       );
     }
-    return const AudioFormat(
+    return AudioFormat(
       codec: AudioCodec.aac,
       sampleRateHz: 44100,
       bitDepth: 16,
       channels: 2,
+      bitrateKbps: _tidalLossyBitrateKbps(quality),
     );
   }
 
@@ -2514,5 +2570,477 @@ class TidalProvider extends BaseStreamingProvider implements StreamResolver {
     return BaseStreamingProvider.normalizeCoverUrl(
       'https://resources.tidal.com/images/${trimmed.replaceAll('-', '/')}/${size}x$size.jpg',
     );
+  }
+
+  // ─── RecommendationProvider ────────────────────────────────────────────────
+
+  @override
+  String get recommendationProviderId => kind;
+
+  void _requireRecAuth() {
+    if (authState != StreamingAuthState.connected ||
+        (_accessToken?.trim().isEmpty ?? true)) {
+      throw RecError(
+        kind: RecErrorKind.authRequired,
+        message: lastError ?? 'Tidal 尚未登入或授權已失效，請重新登入',
+        statusCode: 401,
+        providerId: kind,
+      );
+    }
+  }
+
+  RecError _mapRecError(Object e) {
+    if (e is RecError) return e;
+    if (e is StreamingException) {
+      if (e.isCancelled) {
+        return RecError(
+          kind: RecErrorKind.cancelled,
+          message: e.message,
+          statusCode: e.statusCode,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 401 || e.isTokenExpired) {
+        return RecError(
+          kind: RecErrorKind.authRequired,
+          message: e.message,
+          statusCode: 401,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 429) {
+        return RecError(
+          kind: RecErrorKind.rateLimited,
+          message: e.message,
+          statusCode: 429,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 404) {
+        return RecError(
+          kind: RecErrorKind.notFound,
+          message: e.message,
+          statusCode: 404,
+          providerId: kind,
+        );
+      }
+      return RecError(
+        kind: RecErrorKind.network,
+        message: e.message,
+        statusCode: e.statusCode,
+        providerId: kind,
+      );
+    }
+    return RecError(
+      kind: RecErrorKind.unknown,
+      message: e.toString(),
+      providerId: kind,
+    );
+  }
+
+  @override
+  Future<RadioPage> getTrackRadio(
+    TrackMetadata seed, {
+    int limit = 10,
+    String? cursor,
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    _requireRecAuth();
+
+    String cleanId;
+    final lowerTrackId = seed.trackId.trim().toLowerCase();
+    if (seed.providerId == kind ||
+        lowerTrackId.startsWith('tidal:') ||
+        lowerTrackId.startsWith('streaming:tidal:')) {
+      cleanId = _stripTidalPrefix(seed.trackId);
+    } else {
+      final matched = await matchTrack(
+        TrackMatchQuery.fromTrackMetadata(seed),
+        cancel: cancel,
+      );
+      cleanId = matched != null ? _stripTidalPrefix(matched.trackId) : '';
+    }
+
+    if (cleanId.isEmpty) {
+      return const RadioPage(
+        tracks: <TrackMetadata>[],
+        sourceLabel: 'Tidal Track Radio',
+      );
+    }
+
+    final effectiveLimit = limit > 0 ? limit : 10;
+    final rawOffset = int.tryParse(cursor?.trim() ?? '') ?? 0;
+    final offset = rawOffset < 0 ? 0 : rawOffset;
+
+    List<dynamic> rawItems = const <dynamic>[];
+    try {
+      final json = await _requestTidalGet(
+        '/tracks/$cleanId/radio',
+        <String, String>{
+          'limit': '$effectiveLimit',
+          if (offset > 0) 'offset': '$offset',
+        },
+        cancel: cancel,
+      );
+      final items = json['items'] ?? json['data'];
+      if (items is List) {
+        rawItems = items;
+      }
+    } on StreamingException catch (e) {
+      if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+        throw _mapRecError(e);
+      }
+      if (e.statusCode != 404 && e.statusCode != 400) {
+        throw _mapRecError(e);
+      }
+    }
+
+    if (rawItems.isEmpty) {
+      try {
+        final mixJson = await _tryTidalGet(
+          '/tracks/$cleanId/mix',
+          const <String, String>{},
+          cancel: cancel,
+        );
+        final mixId = mixJson?['id']?.toString().trim() ?? '';
+        if (mixId.isNotEmpty) {
+          final mixItemsJson = await _tryTidalGet(
+            '/mixes/$mixId/items',
+            <String, String>{
+              'limit': '$effectiveLimit',
+              if (offset > 0) 'offset': '$offset',
+            },
+            cancel: cancel,
+          );
+          final mixItems = mixItemsJson?['items'] ?? mixItemsJson?['data'];
+          if (mixItems is List) {
+            rawItems = mixItems;
+          }
+        }
+      } on StreamingException catch (e) {
+        throw _mapRecError(e);
+      }
+    }
+
+    if (rawItems.isEmpty) {
+      try {
+        final feedJson = await _tryTidalGet(
+          '/home/feed/static',
+          const <String, String>{
+            'deviceType': 'BROWSER',
+            'locale': 'en_US',
+            'platform': 'WEB',
+          },
+          v2: true,
+          cancel: cancel,
+        );
+        if (feedJson != null) {
+          final ext = _extractHomeRecommendations(
+            feedJson,
+            coverSize: 1280,
+          );
+          if (ext.mixIds.isNotEmpty) {
+            final mixItemsJson = await _tryTidalGet(
+              '/mixes/${ext.mixIds.first}/items',
+              <String, String>{
+                'limit': '$effectiveLimit',
+                if (offset > 0) 'offset': '$offset',
+              },
+              cancel: cancel,
+            );
+            final mixItems = mixItemsJson?['items'] ?? mixItemsJson?['data'];
+            if (mixItems is List) {
+              rawItems = mixItems;
+            }
+          }
+        }
+      } on StreamingException catch (e) {
+        throw _mapRecError(e);
+      }
+    }
+
+    final parsed = _parseTrackList(rawItems, coverSize: 1280);
+    final tracks = <TrackMetadata>[];
+    final seenIds = <String>{};
+    for (final t in parsed) {
+      final tid = _stripTidalPrefix(t.id);
+      if (tid.isEmpty || tid == cleanId) continue;
+      if (seenIds.add(tid)) {
+        tracks.add(TrackMetadata.fromTrackInfo(t, providerIdOverride: kind));
+      }
+    }
+
+    final nextCursor = rawItems.length >= effectiveLimit
+        ? '${offset + effectiveLimit}'
+        : null;
+
+    return RadioPage(
+      tracks: tracks,
+      nextCursor: nextCursor,
+      sourceLabel: 'Tidal Track Radio',
+    );
+  }
+
+  @override
+  Future<List<FeedSection>> getPersonalizedFeed({
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    _requireRecAuth();
+
+    final sections = <FeedSection>[];
+    final seenSectionIds = <String>{};
+    final collectedMixIds = <String>[];
+
+    void addSectionsFromJson(Map<String, dynamic> root, String prefix) {
+      final ext = _extractHomeRecommendations(root, coverSize: 1280);
+      for (final id in ext.mixIds) {
+        if (!collectedMixIds.contains(id)) {
+          collectedMixIds.add(id);
+        }
+      }
+
+      var idx = 0;
+      void extractStructuredContainers(dynamic node, {String? fallbackTitle}) {
+        if (node is List) {
+          for (final item in node) {
+            extractStructuredContainers(item, fallbackTitle: fallbackTitle);
+          }
+          return;
+        }
+        if (node is! Map) return;
+        final map = Map<String, dynamic>.from(node);
+        final rawTitle = (map['title'] ??
+                (map['header'] is Map ? (map['header'] as Map)['title'] : null))
+            ?.toString()
+            .trim();
+        final sectionTitle = (rawTitle != null && rawTitle.isNotEmpty)
+            ? rawTitle
+            : fallbackTitle;
+
+        final pagedList = map['pagedList'];
+        final directItems = map['items'] is List
+            ? map['items'] as List
+            : (pagedList is Map && pagedList['items'] is List
+                  ? pagedList['items'] as List
+                  : null);
+
+        if (directItems != null && directItems.isNotEmpty) {
+          final isContainer = directItems.any(
+            (e) =>
+                e is Map &&
+                (e['items'] is List ||
+                    e['modules'] is List ||
+                    e['rows'] is List ||
+                    e['pagedList'] is Map),
+          );
+          if (!isContainer) {
+            final containerExt = _extractHomeRecommendations(
+              <String, dynamic>{
+                'items': directItems,
+                if (map['type'] != null) 'type': map['type'],
+              },
+              coverSize: 1280,
+            );
+            final sectionTracks = containerExt.tracks
+                .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+                .toList(growable: false);
+            if (sectionTracks.isNotEmpty || containerExt.albums.isNotEmpty) {
+              final secId = '${prefix}_${idx++}';
+              if (seenSectionIds.add(secId)) {
+                sections.add(
+                  FeedSection(
+                    id: secId,
+                    title: sectionTitle ?? 'Tidal Discovery',
+                    providerId: kind,
+                    tracks: sectionTracks,
+                    albums: containerExt.albums,
+                  ),
+                );
+              }
+            }
+            return;
+          }
+        }
+
+        for (final key in const <String>[
+          'items',
+          'rows',
+          'modules',
+          'contents',
+        ]) {
+          if (map[key] != null) {
+            extractStructuredContainers(
+              map[key],
+              fallbackTitle: sectionTitle,
+            );
+          }
+        }
+      }
+
+      extractStructuredContainers(root);
+      if (sections.isEmpty && (ext.tracks.isNotEmpty || ext.albums.isNotEmpty)) {
+        final secId = '${prefix}_fallback';
+        if (seenSectionIds.add(secId)) {
+          sections.add(
+            FeedSection(
+              id: secId,
+              title: 'Tidal Home',
+              providerId: kind,
+              tracks: ext.tracks
+                  .map(
+                    (t) => TrackMetadata.fromTrackInfo(
+                      t,
+                      providerIdOverride: kind,
+                    ),
+                  )
+                  .toList(growable: false),
+              albums: ext.albums,
+            ),
+          );
+        }
+      }
+    }
+
+    try {
+      final v2Json = await _tryTidalGet(
+        '/home/feed/static',
+        const <String, String>{
+          'deviceType': 'BROWSER',
+          'locale': 'en_US',
+          'platform': 'WEB',
+        },
+        v2: true,
+        cancel: cancel,
+      );
+      if (v2Json != null) {
+        addSectionsFromJson(v2Json, 'tidal_v2');
+      }
+
+      if (sections.isEmpty) {
+        final homeJson = await _tryTidalGet(
+          '/pages/home',
+          const <String, String>{'deviceType': 'BROWSER'},
+          cancel: cancel,
+        );
+        if (homeJson != null) {
+          addSectionsFromJson(homeJson, 'tidal_home');
+        }
+      }
+
+      if (collectedMixIds.isNotEmpty) {
+        final mixJson = await _tryTidalGet(
+          '/mixes/${collectedMixIds.first}/items',
+          const <String, String>{'limit': '20'},
+          cancel: cancel,
+        );
+        if (mixJson != null) {
+          final mixTracks = _parseTrackList(
+                mixJson['items'] ?? mixJson['data'],
+                coverSize: 1280,
+              )
+              .map(
+                (t) => TrackMetadata.fromTrackInfo(
+                  t,
+                  providerIdOverride: kind,
+                ),
+              )
+              .toList(growable: false);
+          if (mixTracks.isNotEmpty && seenSectionIds.add('tidal_mix_0')) {
+            sections.add(
+              FeedSection(
+                id: 'tidal_mix_0',
+                title: 'Tidal Mixes',
+                providerId: kind,
+                tracks: mixTracks,
+              ),
+            );
+          }
+        }
+      }
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
+
+    return List<FeedSection>.unmodifiable(sections);
+  }
+
+  @override
+  Future<TrackMetadata?> matchTrack(
+    TrackMatchQuery query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    _requireRecAuth();
+
+    final normIsrc = TrackMatcher.normalizeIsrc(query.isrc);
+    if (normIsrc != null) {
+      final isrcCandidates = <TrackMetadata>[];
+      try {
+        final searchJson = await _requestTidalGet(
+          '/search/tracks',
+          <String, String>{'query': normIsrc, 'limit': '25'},
+          cancel: cancel,
+        );
+        for (final t in _parseTrackList(searchJson['items'], coverSize: 1280)) {
+          final meta = TrackMetadata.fromTrackInfo(t, providerIdOverride: kind);
+          if (TrackMatcher.normalizeIsrc(meta.isrc) == normIsrc) {
+            isrcCandidates.add(meta);
+          }
+        }
+      } on StreamingException catch (e) {
+        if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+          throw _mapRecError(e);
+        }
+      }
+
+      if (isrcCandidates.isEmpty) {
+        try {
+          final tracksJson = await _requestTidalGet(
+            '/tracks',
+            <String, String>{'isrc': normIsrc, 'limit': '25'},
+            cancel: cancel,
+          );
+          for (final t in _parseTrackList(
+            tracksJson['items'] ?? tracksJson['data'],
+            coverSize: 1280,
+          )) {
+            final meta = TrackMetadata.fromTrackInfo(
+              t,
+              providerIdOverride: kind,
+            );
+            if (TrackMatcher.normalizeIsrc(meta.isrc) == normIsrc) {
+              isrcCandidates.add(meta);
+            }
+          }
+        } on StreamingException catch (e) {
+          if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+            throw _mapRecError(e);
+          }
+        }
+      }
+
+      if (isrcCandidates.isNotEmpty) {
+        return TrackMatcher.selectBestMatch(query, isrcCandidates);
+      }
+    }
+
+    final searchText = '${query.artist.trim()} ${query.title.trim()}'.trim();
+    if (searchText.isEmpty) return null;
+
+    try {
+      final json = await _requestTidalGet(
+        '/search/tracks',
+        <String, String>{'query': searchText, 'limit': '25'},
+        cancel: cancel,
+      );
+      final candidates = _parseTrackList(json['items'], coverSize: 1280)
+          .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+          .toList(growable: false);
+      return TrackMatcher.selectBestMatch(query, candidates);
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
   }
 }

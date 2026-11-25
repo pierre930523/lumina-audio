@@ -119,8 +119,9 @@ class HttpPotProvider implements PotProvider {
   PoToken? _cachedGvsToken;
   Future<PoToken?>? _gvsRefreshFuture;
   String? _gvsRefreshBinding;
-  final Map<String, Future<PoToken?>> _inFlightPlayerTokens =
-      <String, Future<PoToken?>>{};
+  final Map<String, ({Future<PoToken?> future, CancellationToken taskCancel, Set<Object> waiters})>
+      _inFlightPlayerTokens =
+      <String, ({Future<PoToken?> future, CancellationToken taskCancel, Set<Object> waiters})>{};
   bool _disposed = false;
 
   HttpPotProvider({
@@ -223,33 +224,57 @@ class HttpPotProvider implements PotProvider {
     final vid = videoId.trim();
     if (vid.isEmpty) return null;
 
-    final existing = _inFlightPlayerTokens[vid];
-    if (existing != null) {
-      return _awaitWithOptionalCancel(existing, cancelToken);
+    var flight = _inFlightPlayerTokens[vid];
+    if (flight == null) {
+      final taskCancel = CancellationToken();
+      final waiters = <Object>{};
+      final future = _mintToken(
+        scope: PoTokenScope.player,
+        bindingKey: vid,
+        fallbackTtl: defaultPlayerTtl,
+        cancelToken: taskCancel,
+      );
+      flight = (future: future, taskCancel: taskCancel, waiters: waiters);
+      _inFlightPlayerTokens[vid] = flight;
+      final capturedFlight = flight;
+      future.whenComplete(() {
+        if (identical(_inFlightPlayerTokens[vid], capturedFlight)) {
+          _inFlightPlayerTokens.remove(vid);
+        }
+      });
     }
 
-    final future = _mintToken(
-      scope: PoTokenScope.player,
-      bindingKey: vid,
-      fallbackTtl: defaultPlayerTtl,
-    );
-    _inFlightPlayerTokens[vid] = future;
-    future.whenComplete(() {
-      if (identical(_inFlightPlayerTokens[vid], future)) {
-        _inFlightPlayerTokens.remove(vid);
-      }
+    final waiterToken = Object();
+    flight.waiters.add(waiterToken);
+    final activeFlight = flight;
+    return _awaitWithOptionalCancel(
+      activeFlight.future,
+      cancelToken,
+      onWaiterCancelled: () {
+        activeFlight.waiters.remove(waiterToken);
+        if (activeFlight.waiters.isEmpty) {
+          activeFlight.taskCancel.cancel();
+          if (identical(_inFlightPlayerTokens[vid], activeFlight)) {
+            _inFlightPlayerTokens.remove(vid);
+          }
+        }
+      },
+    ).whenComplete(() {
+      activeFlight.waiters.remove(waiterToken);
     });
-    return _awaitWithOptionalCancel(future, cancelToken);
   }
 
   Future<PoToken?> _mintToken({
     required PoTokenScope scope,
     required String bindingKey,
     required Duration fallbackTtl,
+    CancellationToken? cancelToken,
   }) async {
-    if (_disposed) return null;
+    if (_disposed || cancelToken?.isCancelled == true) return null;
     final baseUri = await _resolveBaseUri();
-    if (baseUri == null || _disposed) return null;
+    if (baseUri == null || _disposed || cancelToken?.isCancelled == true) {
+      return null;
+    }
     PotSidecarManager.assertLoopbackUri(baseUri);
 
     final uri = baseUri.resolve('/get_pot');
@@ -262,7 +287,12 @@ class HttpPotProvider implements PotProvider {
     try {
       final resp = _requester != null
           ? await _requester(uri: uri, body: payload, timeout: requestTimeout)
-          : await _postLoopbackJson(uri: uri, body: payload);
+          : await _postLoopbackJson(
+              uri: uri,
+              body: payload,
+              cancelToken: cancelToken,
+            );
+      if (_disposed || cancelToken?.isCancelled == true) return null;
 
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         return null;
@@ -330,30 +360,97 @@ class HttpPotProvider implements PotProvider {
   Future<({int statusCode, String body})> _postLoopbackJson({
     required Uri uri,
     required Map<String, dynamic> body,
+    CancellationToken? cancelToken,
   }) async {
+    if (cancelToken?.isCancelled == true) {
+      throw const StreamingException('操作已取消', isCancelled: true);
+    }
     final encoded = utf8.encode(jsonEncode(body));
-    final req = await _httpClient.openUrl('POST', uri).timeout(requestTimeout);
-    req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-    req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-    req.contentLength = encoded.length;
-    req.add(encoded);
-    final resp = await req.close().timeout(requestTimeout);
-    final respBody = await utf8.decoder
-        .bind(resp)
-        .join()
-        .timeout(requestTimeout);
-    return (statusCode: resp.statusCode, body: respBody);
+    HttpClientRequest? activeReq;
+    StreamSubscription<String>? bodySub;
+    var aborted = false;
+    final completer = Completer<({int statusCode, String body})>();
+
+    void onCancel() {
+      aborted = true;
+      try {
+        activeReq?.abort();
+      } catch (_) {}
+      unawaited(bodySub?.cancel().catchError((_) {}));
+      if (!completer.isCompleted) {
+        completer.completeError(
+          const StreamingException('操作已取消', isCancelled: true),
+        );
+      }
+    }
+
+    cancelToken?.addListener(onCancel);
+    try {
+      () async {
+        try {
+          final req =
+              await _httpClient.openUrl('POST', uri).timeout(requestTimeout);
+          if (aborted || _disposed) {
+            try {
+              req.abort();
+            } catch (_) {}
+            return;
+          }
+          activeReq = req;
+          req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+          req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+          req.contentLength = encoded.length;
+          req.add(encoded);
+          final resp = await req.close().timeout(requestTimeout);
+          if (aborted || _disposed) {
+            unawaited(resp.drain<void>().catchError((_) {}));
+            return;
+          }
+          final buf = StringBuffer();
+          final bodyDone = Completer<String>();
+          bodySub = utf8.decoder.bind(resp).listen(
+            buf.write,
+            onDone: () {
+              if (!bodyDone.isCompleted) bodyDone.complete(buf.toString());
+            },
+            onError: (Object err, StackTrace st) {
+              if (!bodyDone.isCompleted) bodyDone.completeError(err, st);
+            },
+            cancelOnError: true,
+          );
+          final respBody = await bodyDone.future.timeout(requestTimeout);
+          if (!aborted && !_disposed && !completer.isCompleted) {
+            completer.complete((statusCode: resp.statusCode, body: respBody));
+          }
+        } catch (err, st) {
+          if (!completer.isCompleted) {
+            completer.completeError(err, st);
+          }
+        }
+      }();
+      return await completer.future;
+    } finally {
+      cancelToken?.removeListener(onCancel);
+      if (aborted) {
+        unawaited(bodySub?.cancel().catchError((_) {}));
+      }
+    }
   }
 
   Future<PoToken?> _awaitWithOptionalCancel(
     Future<PoToken?> future,
-    CancellationToken? cancelToken,
-  ) {
+    CancellationToken? cancelToken, {
+    VoidCallback? onWaiterCancelled,
+  }) {
     if (cancelToken == null) return future;
-    if (cancelToken.isCancelled) return Future<PoToken?>.value(null);
+    if (cancelToken.isCancelled) {
+      onWaiterCancelled?.call();
+      return Future<PoToken?>.value(null);
+    }
 
     final completer = Completer<PoToken?>();
     void onCancel() {
+      onWaiterCancelled?.call();
       if (!completer.isCompleted) {
         completer.complete(null);
       }
@@ -385,6 +482,9 @@ class HttpPotProvider implements PotProvider {
     if (_disposed) return;
     _disposed = true;
     invalidateSession();
+    for (final flight in _inFlightPlayerTokens.values) {
+      flight.taskCancel.cancel();
+    }
     _inFlightPlayerTokens.clear();
     if (_ownsSidecarManager) {
       await _sidecarManager?.dispose();

@@ -661,9 +661,9 @@ mod tests {
 
             let read = cons.pop_slice_aligned(&mut pop_buf, 6);
             assert_eq!(read % 6, 0);
-            for frame in pop_buf[..read].chunks_exact(6) {
+            for frame in pop_buf[..read].as_chunks::<6>().0 {
                 let b = next_pop.to_le_bytes();
-                assert_eq!(frame, [b[0], b[1], b[2], b[3], 0xA5, 0x5A]);
+                assert_eq!(*frame, [b[0], b[1], b[2], b[3], 0xA5, 0x5A]);
                 next_pop += 1;
             }
         }

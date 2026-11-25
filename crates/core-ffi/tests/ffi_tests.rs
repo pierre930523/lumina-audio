@@ -661,7 +661,7 @@ fn test_ffi_contract2_artwork_and_rescan() {
         0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xDA, 0x00, 0x08, 0x01,
         0x01, 0x00, 0x00, 0x3F, 0x00, 0xBF, 0x00, 0xFF, 0xD9,
     ];
-    std::fs::write(&cover_file, &dummy_jpg).unwrap();
+    std::fs::write(&cover_file, dummy_jpg).unwrap();
 
     // Scan dir
     let c_dir = CString::new(tmp_dir.to_string_lossy().to_string()).unwrap();
@@ -708,7 +708,7 @@ fn test_ffi_contract2_artwork_and_rescan() {
         0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
         0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
-    std::fs::write(&manual_cover, &dummy_png).unwrap();
+    std::fs::write(&manual_cover, dummy_png).unwrap();
     let c_manual = CString::new(manual_cover.to_string_lossy().to_string()).unwrap();
 
     assert_eq!(
@@ -2392,6 +2392,756 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
     assert_eq!(lumina_stream_set_refresh_callback(None), 0);
     stop_flag.store(true, Ordering::SeqCst);
     let _ = srv_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_ffi_dual_deck_metadata_and_get_state_json_after_skip_and_eof() {
+    use core_types::{StreamKey, StreamSourceSpec};
+
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "lumina_ffi_deck_meta_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav1 = tmp_dir.join("meta_1.wav");
+    let wav2 = tmp_dir.join("meta_2.wav");
+    let wav3 = tmp_dir.join("meta_3.wav");
+    write_test_wav(&wav1, 48_000, 2, 48_000 * 3); // 3s
+    write_test_wav(&wav2, 48_000, 2, 48_000 / 2); // 0.5s (for fast EOF swap -> wav3)
+    write_test_wav(&wav3, 48_000, 2, 48_000 * 3); // 3s
+
+    let read_state_json = || -> serde_json::Value {
+        let p = lumina_playback_get_state_json();
+        assert!(!p.is_null());
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    // 1. Play Track 1 with full metadata
+    let play1 = serde_json::json!({
+        "id": "qb-trk-1",
+        "provider_id": "qobuz",
+        "title": "Track One",
+        "artist": "Artist One",
+        "album": "Album One",
+        "cover_url": "https://cdn.example.com/1.jpg",
+        "epoch": 100,
+        "source_spec": StreamSourceSpec::LocalFile {
+            key: StreamKey::new("qobuz", "qb-trk-1", "27"),
+            path: wav1.to_string_lossy().to_string(),
+            loudness: None,
+            album_loudness: None,
+        }
+    })
+    .to_string();
+    let c_play1 = CString::new(play1).unwrap();
+    assert_eq!(lumina_playback_play(c_play1.as_ptr()), 0);
+
+    let st1 = read_state_json();
+    assert_eq!(st1["swap_generation"], 0);
+    assert_eq!(st1["swapGeneration"], 0);
+    assert_eq!(st1["current_track_id"], "qb-trk-1");
+    assert_eq!(st1["current_track"]["track_id"], "qb-trk-1");
+    assert_eq!(st1["current_track"]["provider_id"], "qobuz");
+    assert_eq!(st1["current_track"]["title"], "Track One");
+    assert_eq!(
+        st1["current_track"]["cover_url"],
+        "https://cdn.example.com/1.jpg"
+    );
+    assert!(st1["current_track"]["duration_ms"].as_u64().unwrap_or(0) >= 2_500);
+
+    // 2. Prepare Standby Track 2 (using album_art_url alias) and skip_to_standby()
+    let standby2 = serde_json::json!({
+        "track_id": "td-trk-2",
+        "provider_id": "tidal",
+        "title": "Track Two",
+        "artist": "Artist Two",
+        "album": "Album Two",
+        "album_art_url": "https://cdn.example.com/2.jpg",
+        "epoch": 100,
+        "source_spec": StreamSourceSpec::LocalFile {
+            key: StreamKey::new("tidal", "td-trk-2", "HI_RES"),
+            path: wav2.to_string_lossy().to_string(),
+            loudness: None,
+            album_loudness: None,
+        }
+    })
+    .to_string();
+    let c_sb2 = CString::new(standby2).unwrap();
+    assert_eq!(lumina_playback_prepare_standby_async(c_sb2.as_ptr(), 100), 0);
+
+    let mut sb2_ready = false;
+    for _ in 0..80 {
+        if read_state_json()["deck_b_state"] == "STANDBY_READY" {
+            sb2_ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(sb2_ready, "Standby Deck B did not become STANDBY_READY");
+
+    assert_eq!(lumina_playback_skip_to_standby(), 1);
+    let st2 = read_state_json();
+    assert_eq!(st2["active_deck"], "deck_b");
+    assert_eq!(st2["swap_generation"], 1);
+    assert_eq!(st2["swapGeneration"], 1);
+    assert_eq!(st2["current_track_id"], "td-trk-2");
+    assert_eq!(st2["current_track"]["track_id"], "td-trk-2");
+    assert_eq!(st2["current_track"]["provider_id"], "tidal");
+    assert_eq!(st2["current_track"]["title"], "Track Two");
+    assert_eq!(
+        st2["current_track"]["cover_url"],
+        "https://cdn.example.com/2.jpg"
+    );
+
+    // 3. Prepare Standby Track 3 on Deck A and let Track 2 reach EOF automatically
+    let standby3 = serde_json::json!({
+        "id": "ytm-trk-3",
+        "title": "Track Three",
+        "artist": "Artist Three",
+        "album": "Album Three",
+        "artwork_url": "https://cdn.example.com/3.jpg",
+        "epoch": 100,
+        "source_spec": StreamSourceSpec::LocalFile {
+            key: StreamKey::new("youtube_music", "ytm-trk-3", "251"),
+            path: wav3.to_string_lossy().to_string(),
+            loudness: None,
+            album_loudness: None,
+        }
+    })
+    .to_string();
+    let c_sb3 = CString::new(standby3).unwrap();
+    assert_eq!(lumina_playback_prepare_standby_async(c_sb3.as_ptr(), 100), 0);
+
+    let mut swapped_eof = false;
+    for _ in 0..150 {
+        let st = read_state_json();
+        if st["swap_generation"].as_u64().unwrap_or(0) >= 2 && st["active_deck"] == "deck_a" {
+            swapped_eof = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        swapped_eof,
+        "Expected automatic EOF gapless swap back to deck_a: {}",
+        read_state_json()
+    );
+
+    // Give relay_loop a brief moment if needed and verify get_state_json() reports Track 3 cleanly
+    let st3 = read_state_json();
+    assert_eq!(st3["swap_generation"], 2);
+    assert_eq!(st3["swapGeneration"], 2);
+    assert_eq!(st3["current_track_id"], "ytm-trk-3");
+    assert_eq!(st3["current_track"]["track_id"], "ytm-trk-3");
+    assert_eq!(st3["current_track"]["provider_id"], "youtube_music");
+    assert_eq!(st3["current_track"]["title"], "Track Three");
+    assert_eq!(
+        st3["current_track"]["cover_url"],
+        "https://cdn.example.com/3.jpg"
+    );
+    assert!(st3["current_track"]["duration_ms"].as_u64().unwrap_or(0) >= 2_500);
+
+    assert_eq!(lumina_playback_stop(), 0);
+    let st_stopped = read_state_json();
+    assert!(st_stopped["current_track"].is_null());
+
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_ffi_rapid_30_skips_latest_wins_non_blocking_and_epoch_monotonic() {
+    use core_types::{StreamKey, StreamSourceSpec};
+    use std::collections::BTreeMap;
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_rapid30_{ts}"));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let wav_44 = tmp_dir.join("local_44k.wav");
+    let wav_48 = tmp_dir.join("local_48k.wav");
+    let wav_96 = tmp_dir.join("local_96k.wav");
+    write_test_wav(&wav_44, 44_100, 2, 44_100 * 2);
+    write_test_wav(&wav_48, 48_000, 2, 48_000 * 2);
+    write_test_wav(&wav_96, 96_000, 2, 96_000 * 2);
+    let wav_96_bytes = Arc::new(std::fs::read(&wav_96).unwrap());
+
+    // Local mock HTTP server: /stalled hangs open sockets; /ok.wav serves 96kHz WAV with range support.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop_srv = Arc::new(AtomicBool::new(false));
+    let stop_bg = Arc::clone(&stop_srv);
+    let http_hits = Arc::new(AtomicUsize::new(0));
+    let http_hits_bg = Arc::clone(&http_hits);
+    let wav_bg = Arc::clone(&wav_96_bytes);
+    let srv_handle = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while !stop_bg.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut req_buf = [0u8; 2048];
+                    let n = stream.read(&mut req_buf).unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&req_buf[..n]);
+                    http_hits_bg.fetch_add(1, Ordering::SeqCst);
+                    if req_str.contains("/stalled") {
+                        held.push(stream);
+                    } else if req_str.contains("/ok.wav") {
+                        let body = &wav_bg[..];
+                        let total = body.len();
+                        let (status, slice, range_hdr) =
+                            if let Some(line) = req_str.lines().find(|l| {
+                                l.to_ascii_lowercase().starts_with("range: bytes=")
+                            }) {
+                                let spec = line
+                                    .split_once('=')
+                                    .map(|(_, r)| r.trim())
+                                    .unwrap_or("0-");
+                                let (s_str, e_str) = spec.split_once('-').unwrap_or(("0", ""));
+                                let start: usize = s_str.parse().unwrap_or(0).min(total - 1);
+                                let end: usize = if e_str.is_empty() {
+                                    total - 1
+                                } else {
+                                    e_str.parse().unwrap_or(total - 1).min(total - 1)
+                                };
+                                (
+                                    "206 Partial Content",
+                                    &body[start..=end],
+                                    format!("Content-Range: bytes {start}-{end}/{total}\r\n"),
+                                )
+                            } else {
+                                ("200 OK", body, String::new())
+                            };
+                        let hdr = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\n{range_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            slice.len()
+                        );
+                        let _ = stream.write_all(hdr.as_bytes());
+                        let _ = stream.write_all(slice);
+                        let _ = stream.flush();
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let read_state_json = || -> serde_json::Value {
+        let p = lumina_playback_get_state_json();
+        assert!(!p.is_null());
+        let s = unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
+        unsafe { lumina_string_free(p) };
+        serde_json::from_str(&s).unwrap()
+    };
+
+    let mut max_call_ms: u128 = 0;
+    let mut last_pb_epoch: u64 = 0;
+
+    // Fire 30 rapid skips across stalled HTTP, local 44.1/48/96kHz, and Tidal/YTM DirectRange specs,
+    // interleaved with cancel_pending, prepare_standby_async, and get_state_json polls.
+    for i in 1u64..=30 {
+        let track_id = format!("rapid-track-{i}");
+        let payload = if i == 30 {
+            serde_json::json!({
+                "id": track_id,
+                "title": "Settled Final Track 30",
+                "provider_id": "tidal",
+                "playback_epoch": i,
+                "duration_ms": 2000,
+                "source_spec": StreamSourceSpec::DirectRange {
+                    key: StreamKey::new("tidal", "rapid-track-30", "HI_RES"),
+                    url: format!("http://{addr}/ok.wav"),
+                    headers: BTreeMap::new(),
+                    bitrate_bps: Some(4_608_000),
+                    mime_type: Some("audio/wav".to_string()),
+                    hint_extension: Some("wav".to_string()),
+                    content_length: Some(wav_96_bytes.len() as u64),
+                    expire_at: None,
+                    init_range_end: None,
+                    index_range_start: None,
+                    index_range_end: None,
+                    loudness: None,
+                    album_loudness: None,
+                }
+            })
+        } else if i % 3 == 1 {
+            // Stalled YTM-like stream
+            serde_json::json!({
+                "id": track_id,
+                "title": format!("YTM Stalled {i}"),
+                "provider_id": "youtube_music",
+                "playback_epoch": i,
+                "stream_url": format!("http://{addr}/stalled/{i}"),
+                "duration_ms": 180_000,
+            })
+        } else if i % 3 == 2 {
+            // Local lossless 44.1kHz or 48kHz
+            let p = if i % 2 == 0 { &wav_44 } else { &wav_48 };
+            serde_json::json!({
+                "id": track_id,
+                "title": format!("Local Lossless {i}"),
+                "provider_id": "local",
+                "playback_epoch": i,
+                "source_spec": StreamSourceSpec::LocalFile {
+                    key: StreamKey::new("local", format!("rapid-track-{i}"), "native"),
+                    path: p.to_string_lossy().to_string(),
+                    loudness: None,
+                    album_loudness: None,
+                }
+            })
+        } else {
+            // Stalled Tidal-like DirectRange
+            serde_json::json!({
+                "id": track_id,
+                "title": format!("Tidal Stalled {i}"),
+                "provider_id": "tidal",
+                "playback_epoch": i,
+                "source_spec": StreamSourceSpec::DirectRange {
+                    key: StreamKey::new("tidal", format!("rapid-track-{i}"), "HI_RES"),
+                    url: format!("http://{addr}/stalled/{i}"),
+                    headers: BTreeMap::new(),
+                    bitrate_bps: Some(4_608_000),
+                    mime_type: Some("audio/wav".to_string()),
+                    hint_extension: Some("wav".to_string()),
+                    content_length: None,
+                    expire_at: None,
+                    init_range_end: None,
+                    index_range_start: None,
+                    index_range_end: None,
+                    loudness: None,
+                    album_loudness: None,
+                }
+            })
+        }
+        .to_string();
+
+        let c_payload = CString::new(payload).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(lumina_playback_play_async(c_payload.as_ptr(), i), 0);
+        let elapsed_ms = t0.elapsed().as_millis();
+        max_call_ms = max_call_ms.max(elapsed_ms);
+
+        // Interleave non-blocking standby prep & cancel mid-burst
+        if i == 10 {
+            let sb_payload = CString::new(
+                serde_json::json!({
+                    "id": "sb-mid",
+                    "epoch": i,
+                    "source_spec": StreamSourceSpec::LocalFile {
+                        key: StreamKey::new("local", "sb-mid", "native"),
+                        path: wav_48.to_string_lossy().to_string(),
+                        loudness: None,
+                        album_loudness: None,
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let t_sb = Instant::now();
+            assert_eq!(lumina_playback_prepare_standby_async(sb_payload.as_ptr(), i), 0);
+            assert!(
+                t_sb.elapsed().as_millis() < 25,
+                "prepare_standby_async must be non-blocking"
+            );
+        }
+        if i == 15 {
+            let t_cancel = Instant::now();
+            assert_eq!(lumina_playback_cancel_pending(i), 0);
+            assert!(
+                t_cancel.elapsed().as_millis() < 25,
+                "cancel_pending must be non-blocking"
+            );
+        }
+
+        let st = read_state_json();
+        let pb_ep = st["playback_epoch"].as_u64().unwrap_or(0);
+        assert_eq!(pb_ep, st["playbackEpoch"].as_u64().unwrap_or(0));
+        assert!(
+            pb_ep >= last_pb_epoch,
+            "playback_epoch must be monotonic: prev={last_pb_epoch} cur={pb_ep}"
+        );
+        last_pb_epoch = pb_ep;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert!(
+        max_call_ms < 25,
+        "lumina_playback_play_async took {max_call_ms}ms during 30 rapid skips (expected non-blocking)"
+    );
+
+    // Wait for track #30 to settle via Latest-Wins
+    let mut settled = None;
+    for _ in 0..120 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 30 && st["state_code"] == 2 {
+            settled = Some(st);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let settled = settled.unwrap_or_else(|| {
+        panic!(
+            "Final track 30 should settle into Playing after 30 rapid skips, got: {}",
+            read_state_json()
+        )
+    });
+    assert_eq!(settled["current_track_id"], "rapid-track-30");
+    assert!(settled["playback_epoch"].as_u64().unwrap_or(0) >= 30);
+    assert!(settled["epoch"].as_u64().unwrap_or(0) >= 30);
+
+    // Stale epoch (12 < 30) must be ignored without disturbing track 30
+    let stale_payload = CString::new(
+        serde_json::json!({
+            "id": "stale-12",
+            "playback_epoch": 12,
+            "file_path": wav_44.to_string_lossy(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(lumina_playback_play_async(stale_payload.as_ptr(), 12), 0);
+    let after_stale = read_state_json();
+    assert_eq!(after_stale["current_track_id"], "rapid-track-30");
+    assert_eq!(after_stale["state_code"], 2);
+
+    // Epoch-less stalled play right after epoched track 30 must:
+    // 1. Report Loading (5) with NEW track 31 metadata (never flashing back to Old Track 30!)
+    // 2. Advance playback_epoch monotonically (> 30)
+    let ep30 = after_stale["playback_epoch"].as_u64().unwrap();
+    let epochless_stalled = CString::new(
+        serde_json::json!({
+            "id": "rapid-track-31",
+            "title": "Loading Track 31",
+            "artist": "Artist 31",
+            "provider_id": "youtube_music",
+            "stream_url": format!("http://{addr}/stalled/31"),
+            "duration_ms": 180_000,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(lumina_playback_play_async(epochless_stalled.as_ptr(), 31), 0);
+    let loading_31 = read_state_json();
+    assert_eq!(loading_31["state_code"], 5);
+    assert_eq!(loading_31["current_track_id"], "rapid-track-31");
+    assert_eq!(loading_31["current_track"]["track_id"], "rapid-track-31");
+    assert_eq!(loading_31["current_track"]["title"], "Loading Track 31");
+    assert!(
+        loading_31["playback_epoch"].as_u64().unwrap_or(0) > ep30,
+        "epoch-less play after epoched play must advance playback_epoch past {ep30}"
+    );
+
+    // Epoch-less fast play right after epoched play must NOT be silently dropped (must settle to Playing)
+    let epochless_fast = CString::new(
+        serde_json::json!({
+            "id": "rapid-track-32",
+            "title": "Epochless Settled 32",
+            "file_path": wav_48.to_string_lossy(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(lumina_playback_play_async(epochless_fast.as_ptr(), 32), 0);
+    let mut settled_32 = None;
+    for _ in 0..100 {
+        let st = read_state_json();
+        if st["loaded_request_id"] == 32 && st["state_code"] == 2 {
+            settled_32 = Some(st);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let settled_32 = settled_32.unwrap_or_else(|| {
+        panic!(
+            "Epoch-less play 32 after epoched play 30 must settle into Playing, got: {}",
+            read_state_json()
+        )
+    });
+    assert_eq!(settled_32["current_track_id"], "rapid-track-32");
+    assert!(settled_32["playback_epoch"].as_u64().unwrap_or(0) > ep30);
+
+    // Non-blocking stop must return rapidly and bump playback_epoch
+    let ep_before_stop = settled_32["playback_epoch"].as_u64().unwrap();
+    let t_stop = Instant::now();
+    assert_eq!(lumina_playback_stop(), 0);
+    assert!(
+        t_stop.elapsed().as_millis() < 25,
+        "lumina_playback_stop must be non-blocking"
+    );
+    let after_stop = read_state_json();
+    assert_eq!(after_stop["state_code"], 1);
+    assert!(after_stop["current_track"].is_null());
+    assert!(after_stop["playback_epoch"].as_u64().unwrap() > ep_before_stop);
+
+    stop_srv.store(true, Ordering::SeqCst);
+    let _ = srv_handle.join();
+    assert_eq!(lumina_shutdown(), 0);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_ffi_ingestion_layer_watch_scan_skipped_overrides_ingest_and_providers() {
+    use std::os::raw::c_char;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    static CAPTURED_EVENTS: OnceLock<StdMutex<Vec<serde_json::Value>>> = OnceLock::new();
+
+    extern "C" fn on_scan_progress(json_ptr: *const c_char) {
+        if json_ptr.is_null() {
+            return;
+        }
+        let s = unsafe { CStr::from_ptr(json_ptr).to_string_lossy().into_owned() };
+        unsafe { lumina_string_free(json_ptr as *mut c_char) };
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
+            let store = CAPTURED_EVENTS.get_or_init(|| StdMutex::new(Vec::new()));
+            if let Ok(mut guard) = store.lock() {
+                guard.push(val);
+            }
+        }
+    }
+
+    let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let store = CAPTURED_EVENTS.get_or_init(|| StdMutex::new(Vec::new()));
+    store.lock().unwrap().clear();
+
+    lumina_shutdown();
+    assert_eq!(lumina_init_headless(), 0);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_ingest_{ts}"));
+    let music_dir = tmp_dir.join("Music").join("ArtistA").join("AlbumA");
+    std::fs::create_dir_all(&music_dir).unwrap();
+    let db_path = tmp_dir.join("library.db");
+
+    let wav_ok = music_dir.join("01 - Good.wav");
+    write_test_wav(&wav_ok, 44_100, 2, 44_100);
+    let corrupt_wav = music_dir.join("02 - Broken.wav");
+    std::fs::write(&corrupt_wav, b"NOT_A_VALID_WAV_HEADER_0000").unwrap();
+    let dismiss_cue = music_dir.join("03 - Unsplit.cue");
+    std::fs::write(&dismiss_cue, b"FILE \"disc.flac\" WAVE\nTRACK 01 AUDIO\n").unwrap();
+
+    let c_db = CString::new(db_path.to_string_lossy().as_ref()).unwrap();
+    assert_eq!(lumina_library_init(c_db.as_ptr()), 0);
+
+    // 1. Register scan progress callback
+    assert_eq!(
+        lumina_library_set_scan_progress_callback(Some(on_scan_progress)),
+        0
+    );
+
+    // 2. Watch root CRUD
+    let c_root = CString::new(tmp_dir.join("Music").to_string_lossy().as_ref()).unwrap();
+    let c_mode = CString::new("manual").unwrap();
+    let added_ptr = lumina_library_watch_add(c_root.as_ptr(), c_mode.as_ptr(), 120);
+    assert!(!added_ptr.is_null());
+    let added_str = unsafe { CStr::from_ptr(added_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(added_ptr) };
+    let added_val: serde_json::Value = serde_json::from_str(&added_str).unwrap();
+    assert_eq!(added_val["watch_mode"], "manual");
+    assert_eq!(added_val["poll_interval_sec"], 120);
+
+    let list_ptr = lumina_library_watch_list();
+    assert!(!list_ptr.is_null());
+    let list_str = unsafe { CStr::from_ptr(list_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(list_ptr) };
+    let list_val: serde_json::Value = serde_json::from_str(&list_str).unwrap();
+    assert_eq!(list_val.as_array().unwrap().len(), 1);
+
+    // 3. Async scan start -> emits ScanProgressEvent through FFI callback
+    let start_ptr = lumina_library_scan_start(c_root.as_ptr(), 0);
+    assert!(!start_ptr.is_null());
+    let start_str = unsafe { CStr::from_ptr(start_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(start_ptr) };
+    let start_val: serde_json::Value = serde_json::from_str(&start_str).unwrap();
+    assert!(start_val["scan_id"].as_str().is_some_and(|s| !s.is_empty()));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_completed = false;
+    while Instant::now() < deadline {
+        {
+            let evs = store.lock().unwrap();
+            if evs.iter().any(|e| e["state"] == "completed") {
+                saw_completed = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        saw_completed,
+        "Expected scan progress callback to receive a 'completed' event"
+    );
+
+    // 4. Skipped files: list, retry (still_skipped -> fix -> imported), dismiss
+    let skip_ptr = lumina_library_get_skipped_files(0);
+    assert!(!skip_ptr.is_null());
+    let skip_str = unsafe { CStr::from_ptr(skip_ptr).to_str().unwrap().to_string() };
+    unsafe { lumina_string_free(skip_ptr) };
+    let skipped: Vec<serde_json::Value> = serde_json::from_str(&skip_str).unwrap();
+    assert!(
+        skipped.len() >= 2,
+        "Expected corrupt wav and unsplit cue in skipped_files, got: {skipped:?}"
+    );
+
+    let broken_rec = skipped
+        .iter()
+        .find(|s| {
+            s["file_path"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .ends_with("02 - broken.wav")
+        })
+        .expect("broken wav skipped record");
+    let broken_id = CString::new(broken_rec["id"].as_str().unwrap()).unwrap();
+
+    // Retry while still broken -> still_skipped
+    let r1_ptr = lumina_library_retry_skipped_file(broken_id.as_ptr());
+    assert!(!r1_ptr.is_null());
+    let r1_val: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(r1_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(r1_ptr) };
+    assert_eq!(r1_val["status"], "still_skipped");
+
+    // Replace broken file with valid WAV and retry -> imported
+    write_test_wav(&corrupt_wav, 44_100, 2, 44_100);
+    let r2_ptr = lumina_library_retry_skipped_file(broken_id.as_ptr());
+    assert!(!r2_ptr.is_null());
+    let r2_val: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(r2_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(r2_ptr) };
+    assert_eq!(r2_val["status"], "imported");
+
+    // Dismiss the unsplit cue
+    let cue_rec = skipped
+        .iter()
+        .find(|s| {
+            s["file_path"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .ends_with("03 - unsplit.cue")
+        })
+        .expect("cue skipped record");
+    let cue_id = CString::new(cue_rec["id"].as_str().unwrap()).unwrap();
+    assert_eq!(lumina_library_dismiss_skipped_file(cue_id.as_ptr()), 0);
+
+    let skip_after_ptr = lumina_library_get_skipped_files(0);
+    let skip_after: Vec<serde_json::Value> =
+        serde_json::from_str(unsafe { CStr::from_ptr(skip_after_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(skip_after_ptr) };
+    assert!(skip_after.is_empty());
+
+    // 5. Metadata overrides: set, get, clear
+    let c_et = CString::new("album").unwrap();
+    let c_eid = CString::new("alb-test-1").unwrap();
+    let c_field = CString::new("title").unwrap();
+    let c_val = CString::new("\"User Custom Title\"").unwrap();
+    assert_eq!(
+        lumina_library_set_metadata_override(
+            c_et.as_ptr(),
+            c_eid.as_ptr(),
+            c_field.as_ptr(),
+            c_val.as_ptr()
+        ),
+        0
+    );
+    let ov_ptr = lumina_library_get_metadata_overrides(c_et.as_ptr(), c_eid.as_ptr());
+    assert!(!ov_ptr.is_null());
+    let ovs: Vec<serde_json::Value> =
+        serde_json::from_str(unsafe { CStr::from_ptr(ov_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(ov_ptr) };
+    assert_eq!(ovs.len(), 1);
+    assert_eq!(ovs[0]["field_name"], "title");
+    assert_eq!(ovs[0]["source_layer"], "user_edit");
+
+    assert_eq!(
+        lumina_library_clear_metadata_override(c_et.as_ptr(), c_eid.as_ptr(), c_field.as_ptr()),
+        0
+    );
+    let ov2_ptr = lumina_library_get_metadata_overrides(c_et.as_ptr(), c_eid.as_ptr());
+    let ovs2: Vec<serde_json::Value> =
+        serde_json::from_str(unsafe { CStr::from_ptr(ov2_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(ov2_ptr) };
+    assert!(ovs2.is_empty());
+
+    // 6. External catalog ingest (Apple Music / YouTube Music lightweight metadata)
+    let batch = serde_json::json!({
+        "provider": "apple_music",
+        "albums": [{
+            "external_album_id": "am-alb-1",
+            "title": "Cloud Symphony",
+            "artist_name": "Orbital",
+            "release_year": 2024,
+            "tracks": [{
+                "external_track_id": "am-trk-1",
+                "title": "Overture",
+                "artist_name": "Orbital",
+                "album_title": "Cloud Symphony",
+                "disc_number": 1,
+                "track_number": 1,
+                "duration_ms": 210000,
+                "codec": "alac",
+                "sample_rate_hz": 96000,
+                "bit_depth": 24,
+                "channels": 2,
+                "is_dsd": false
+            }]
+        }]
+    })
+    .to_string();
+    let c_batch = CString::new(batch).unwrap();
+    let ing_ptr = lumina_library_ingest_external_catalog(c_batch.as_ptr());
+    assert!(!ing_ptr.is_null());
+    let ing_val: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(ing_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(ing_ptr) };
+    assert_eq!(ing_val["albums_ingested"], 1);
+    assert_eq!(ing_val["tracks_ingested"], 1);
+
+    // 7. Provider list & watch root removal
+    let prov_ptr = lumina_provider_list();
+    assert!(!prov_ptr.is_null());
+    let prov_val: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(prov_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(prov_ptr) };
+    assert!(prov_val.is_array());
+
+    assert_eq!(lumina_library_watch_remove(c_root.as_ptr()), 0);
+    let list2_ptr = lumina_library_watch_list();
+    let list2_val: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(list2_ptr).to_str().unwrap() }).unwrap();
+    unsafe { lumina_string_free(list2_ptr) };
+    assert!(list2_val.as_array().unwrap().is_empty());
+
+    assert_eq!(lumina_library_set_scan_progress_callback(None), 0);
     assert_eq!(lumina_shutdown(), 0);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

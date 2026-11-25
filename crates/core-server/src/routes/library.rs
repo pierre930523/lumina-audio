@@ -2,16 +2,23 @@ use crate::error::ServerError;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use core_db::{rebuild_search_index, search_library_with_limit, Artist, LibraryRepository};
+use core_db::{
+    rebuild_search_index, search_library_with_limit, Artist, IngestionRepository, LibraryRepository,
+};
 use core_providers::{
     CreditEnrichmentService, DiscogsClient, DiscogsConfig, EnrichmentConfig, EnrichmentReport,
-    LibrarySyncService, LocalProvider, MusicBrainzClient, MusicBrainzConfig, MusicProvider,
-    SyncResult,
+    IngestionPipeline, LibrarySyncService, LocalProvider, MusicBrainzClient, MusicBrainzConfig,
+    MusicProvider, SyncResult,
 };
-use core_types::{AlbumCreditDetail, AlbumDetail, ArtistDetail, CanonicalAlbum};
+use core_types::{
+    AlbumCreditDetail, AlbumDetail, ArtistDetail, CanonicalAlbum, ExternalCatalogIngestBatch,
+    MetadataLayer, MetadataOverride, SkippedFile, WatchMode, WatchedRoot,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -610,15 +617,30 @@ pub async fn post_scan_library(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ScanLibraryRequest>,
 ) -> Result<Json<ScanLibraryResponse>, ServerError> {
+    if let Some(pool) = &state.db_pool {
+        state.ensure_scan_progress_relay();
+        let pipeline = state
+            .ingestion_pipeline
+            .clone()
+            .unwrap_or_else(|| IngestionPipeline::with_defaults(pool.clone()));
+        let ev = pipeline
+            .scan_root(std::path::Path::new(&req.path), "local")
+            .await
+            .map_err(|e| ServerError::Internal(e.to_string()))?;
+        let albums_count = count_albums_under_root(pool, &req.path).await;
+        return Ok(Json(ScanLibraryResponse {
+            scanned_files: ev.scanned as usize,
+            albums_count,
+            tracks_count: (ev.added + ev.updated + ev.unchanged) as usize,
+            errors_count: ev.skipped as usize,
+        }));
+    }
+
     let provider = LocalProvider::from_root(&req.path);
     let sync = provider
         .sync_library()
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?;
-
-    if let Some(pool) = &state.db_pool {
-        persist_sync_result(pool, &sync).await?;
-    }
 
     Ok(Json(ScanLibraryResponse {
         scanned_files: sync.scanned_files_count,
@@ -688,22 +710,22 @@ pub async fn get_artwork(
 
     if let Some(ref path_str) = res.cache_path {
         let p = std::path::Path::new(path_str);
-        if p.is_file() {
-            if let Ok(bytes) = std::fs::read(p) {
-                let mime = res.mime_type.as_deref().unwrap_or_else(|| {
-                    if path_str.ends_with(".png") {
-                        "image/png"
-                    } else if path_str.ends_with(".webp") {
-                        "image/webp"
-                    } else {
-                        "image/jpeg"
-                    }
-                });
-                return Ok(axum::response::Response::builder()
-                    .header(axum::http::header::CONTENT_TYPE, mime)
-                    .body(axum::body::Body::from(bytes))
-                    .unwrap());
-            }
+        if p.is_file()
+            && let Ok(bytes) = std::fs::read(p)
+        {
+            let mime = res.mime_type.as_deref().unwrap_or_else(|| {
+                if path_str.ends_with(".png") {
+                    "image/png"
+                } else if path_str.ends_with(".webp") {
+                    "image/webp"
+                } else {
+                    "image/jpeg"
+                }
+            });
+            return Ok(axum::response::Response::builder()
+                .header(axum::http::header::CONTENT_TYPE, mime)
+                .body(axum::body::Body::from(bytes))
+                .unwrap());
         }
     }
 
@@ -763,4 +785,438 @@ pub async fn post_rescan_library(
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?;
     Ok(Json(report))
+}
+
+// ---------------------------------------------------------------------------
+// Layer 1 Ingestion Pipeline — Shared Helpers & REST Endpoints
+// ---------------------------------------------------------------------------
+
+pub async fn count_albums_under_root(pool: &SqlitePool, root_path: &str) -> usize {
+    let norm = root_path
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let like_pat = format!("{norm}/%");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT av.canonical_album_id) \
+         FROM track_sources ts \
+         JOIN album_versions av ON av.id = ts.version_id \
+         WHERE ts.provider_id = 'local' \
+           AND (ts.external_track_id = ? OR ts.external_track_id LIKE ?)",
+    )
+    .bind(&norm)
+    .bind(&like_pat)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    if count > 0 {
+        return count as usize;
+    }
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM canonical_albums")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+        .max(0) as usize
+}
+
+pub async fn invalidate_dir_mtime_cache(pool: &SqlitePool, dir_path: &str) {
+    let norm = dir_path
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let like_pat = format!("{norm}/%");
+    let _ = sqlx::query(
+        "UPDATE track_sources SET file_mtime = NULL, file_size = NULL \
+         WHERE provider_id = 'local' \
+           AND (external_track_id = ? OR external_track_id LIKE ?)",
+    )
+    .bind(&norm)
+    .bind(&like_pat)
+    .execute(pool)
+    .await;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RetrySkippedFileResponse {
+    pub status: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+pub async fn retry_skipped_file_by_id(
+    pipeline: &IngestionPipeline,
+    skipped_id: &str,
+) -> Result<RetrySkippedFileResponse, ServerError> {
+    let pool = pipeline.pool();
+    let all = IngestionRepository::list_skipped_files(pool, true)
+        .await
+        .map_err(|e| ServerError::Database(e.to_string()))?;
+    let Some(rec) = all.into_iter().find(|r| r.id == skipped_id) else {
+        return Ok(RetrySkippedFileResponse {
+            status: "not_found".to_string(),
+            detail: "Skipped file record not found".to_string(),
+            file_path: None,
+        });
+    };
+
+    let target_path = PathBuf::from(&rec.file_path);
+    if !target_path.exists() {
+        return Ok(RetrySkippedFileResponse {
+            status: "missing".to_string(),
+            detail: "File does not exist on disk".to_string(),
+            file_path: Some(rec.file_path),
+        });
+    }
+
+    let roots = IngestionRepository::list_watched_roots(pool)
+        .await
+        .unwrap_or_default();
+    let root_path = roots
+        .into_iter()
+        .find(|r| rec.file_path.starts_with(&r.root_path))
+        .map(|r| PathBuf::from(r.root_path))
+        .unwrap_or_else(|| {
+            target_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+
+    let ev = pipeline
+        .process_changed_paths(&root_path, &rec.provider_id, std::slice::from_ref(&target_path))
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+
+    if ev.skipped == 0 && (ev.added + ev.updated + ev.unchanged) > 0 {
+        let _ = IngestionRepository::clear_skipped_for_path(pool, &rec.provider_id, &rec.file_path)
+            .await;
+        return Ok(RetrySkippedFileResponse {
+            status: "imported".to_string(),
+            detail: "Successfully imported".to_string(),
+            file_path: Some(rec.file_path),
+        });
+    }
+
+    let updated_detail = IngestionRepository::list_skipped_files(pool, true)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.file_path == rec.file_path)
+        .map(|r| r.detail)
+        .unwrap_or(rec.detail);
+
+    Ok(RetrySkippedFileResponse {
+        status: "still_skipped".to_string(),
+        detail: updated_detail,
+        file_path: Some(rec.file_path),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScanStartRequest {
+    pub dir_path: String,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+pub async fn post_scan_start(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ScanStartRequest>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let dir_path = req.dir_path.trim().to_string();
+    if dir_path.is_empty() {
+        return Err(ServerError::BadRequest("dir_path is empty".to_string()));
+    }
+    let Some(pool) = state.db_pool.clone() else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    state.ensure_scan_progress_relay();
+    let pipeline = state
+        .ingestion_pipeline
+        .clone()
+        .unwrap_or_else(|| IngestionPipeline::with_defaults(pool.clone()));
+    let force = req.force.unwrap_or(false);
+    let scan_id = uuid::Uuid::new_v4().to_string();
+
+    tokio::spawn(async move {
+        if force {
+            invalidate_dir_mtime_cache(&pool, &dir_path).await;
+        }
+        let _ = pipeline.scan_root(std::path::Path::new(&dir_path), "local").await;
+    });
+
+    Ok(Json(serde_json::json!({ "scan_id": scan_id })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddWatchedRootRequest {
+    pub root_path: String,
+    #[serde(default)]
+    pub watch_mode: Option<String>,
+    #[serde(default)]
+    pub poll_interval_sec: Option<u32>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RemoveWatchedRootQuery {
+    pub root_path: Option<String>,
+    pub id: Option<String>,
+}
+
+pub async fn get_watched_roots(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WatchedRoot>>, ServerError> {
+    let Some(pool) = &state.db_pool else {
+        return Ok(Json(Vec::new()));
+    };
+    let roots = IngestionRepository::list_watched_roots(pool)
+        .await
+        .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(roots))
+}
+
+pub async fn post_watched_root(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddWatchedRootRequest>,
+) -> Result<Json<WatchedRoot>, ServerError> {
+    let root_path = req.root_path.trim();
+    if root_path.is_empty() {
+        return Err(ServerError::BadRequest("root_path is empty".to_string()));
+    }
+    let Some(watcher) = state.ensure_watcher_manager().await else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let mode = match req.watch_mode.as_deref() {
+        Some(m) if !m.trim().is_empty() => {
+            WatchMode::from_str(m.trim()).map_err(|e| ServerError::BadRequest(e.to_string()))?
+        }
+        _ => WatchMode::NativeOs,
+    };
+    let poll_interval_sec = req.poll_interval_sec.unwrap_or(300);
+    let provider_id = req.provider_id.as_deref().unwrap_or("local");
+
+    let stored = watcher
+        .add_root(
+            provider_id,
+            std::path::Path::new(root_path),
+            mode,
+            poll_interval_sec,
+        )
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+    Ok(Json(stored))
+}
+
+pub async fn remove_watched_root_by_id_or_path(
+    watcher: &core_providers::StorageWatcherManager,
+    target: &str,
+) -> Result<bool, ServerError> {
+    let trimmed = target.trim();
+    if watcher
+        .remove_root(trimmed)
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?
+    {
+        return Ok(true);
+    }
+    let norm_target = trimmed
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let roots = watcher
+        .list_roots()
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+    for root in roots {
+        let norm_root = root
+            .root_path
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        if root.id == trimmed || norm_root == norm_target {
+            return watcher
+                .remove_root(&root.id)
+                .await
+                .map_err(|e| ServerError::Internal(e.to_string()));
+        }
+    }
+    Ok(false)
+}
+
+pub async fn delete_watched_root(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RemoveWatchedRootQuery>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let target = query
+        .root_path
+        .or(query.id)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ServerError::BadRequest("root_path or id query parameter is required".to_string())
+        })?;
+    let Some(watcher) = state.ensure_watcher_manager().await else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let removed = remove_watched_root_by_id_or_path(&watcher, &target).await?;
+    Ok(Json(serde_json::json!({ "ok": removed })))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SkippedFilesQuery {
+    pub include_dismissed: Option<bool>,
+}
+
+pub async fn get_skipped_files(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SkippedFilesQuery>,
+) -> Result<Json<Vec<SkippedFile>>, ServerError> {
+    let Some(pool) = &state.db_pool else {
+        return Ok(Json(Vec::new()));
+    };
+    let include_dismissed = query.include_dismissed.unwrap_or(false);
+    let list = IngestionRepository::list_skipped_files(pool, include_dismissed)
+        .await
+        .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(list))
+}
+
+pub async fn post_dismiss_skipped_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let Some(pool) = &state.db_pool else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let dismissed = IngestionRepository::dismiss_skipped_file(pool, &id)
+        .await
+        .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": dismissed })))
+}
+
+pub async fn post_retry_skipped_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RetrySkippedFileResponse>, ServerError> {
+    let Some(pool) = &state.db_pool else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    state.ensure_scan_progress_relay();
+    let pipeline = state
+        .ingestion_pipeline
+        .clone()
+        .unwrap_or_else(|| IngestionPipeline::with_defaults(pool.clone()));
+    let resp = retry_skipped_file_by_id(&pipeline, &id).await?;
+    Ok(Json(resp))
+}
+
+fn validate_entity_type(entity_type: &str) -> Result<&str, ServerError> {
+    let trimmed = entity_type.trim();
+    match trimmed {
+        "track" | "album" | "artist" => Ok(trimmed),
+        _ => Err(ServerError::BadRequest(format!(
+            "Invalid entity_type '{trimmed}'; expected 'track', 'album', or 'artist'"
+        ))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PutMetadataOverrideRequest {
+    pub field_name: String,
+    pub value_json: String,
+}
+
+pub async fn get_metadata_overrides(
+    State(state): State<Arc<AppState>>,
+    Path((entity_type, entity_id)): Path<(String, String)>,
+) -> Result<Json<Vec<MetadataOverride>>, ServerError> {
+    let entity_type = validate_entity_type(&entity_type)?;
+    let Some(pool) = &state.db_pool else {
+        return Ok(Json(Vec::new()));
+    };
+    let list = IngestionRepository::get_overrides_for_entity(pool, entity_type, &entity_id)
+        .await
+        .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(list))
+}
+
+pub async fn put_metadata_override(
+    State(state): State<Arc<AppState>>,
+    Path((entity_type, entity_id)): Path<(String, String)>,
+    Json(req): Json<PutMetadataOverrideRequest>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let entity_type = validate_entity_type(&entity_type)?;
+    let field_name = req.field_name.trim();
+    if field_name.is_empty() {
+        return Err(ServerError::BadRequest("field_name is empty".to_string()));
+    }
+    let Some(pool) = &state.db_pool else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let written = IngestionRepository::set_metadata_override(
+        pool,
+        entity_type,
+        &entity_id,
+        field_name,
+        &req.value_json,
+        MetadataLayer::UserEdit,
+    )
+    .await
+    .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": written })))
+}
+
+pub async fn delete_metadata_override(
+    State(state): State<Arc<AppState>>,
+    Path((entity_type, entity_id, field_name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let entity_type = validate_entity_type(&entity_type)?;
+    let Some(pool) = &state.db_pool else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let cleared =
+        IngestionRepository::clear_metadata_override(pool, entity_type, &entity_id, &field_name)
+            .await
+            .map_err(|e| ServerError::Database(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": cleared })))
+}
+
+pub async fn post_ingest_external_catalog(
+    State(state): State<Arc<AppState>>,
+    Json(batch): Json<ExternalCatalogIngestBatch>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let Some(pool) = &state.db_pool else {
+        return Err(ServerError::BadRequest(
+            "Database not initialized".to_string(),
+        ));
+    };
+    let rep = IngestionPipeline::ingest_external_catalog(pool, &batch)
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "albums_ingested": rep.albums_inserted + rep.albums_matched,
+        "tracks_ingested": rep.tracks_upserted,
+        "albums_inserted": rep.albums_inserted,
+        "albums_matched": rep.albums_matched,
+        "versions_upserted": rep.versions_upserted,
+    })))
 }

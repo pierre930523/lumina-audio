@@ -1,9 +1,16 @@
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
+
 use core_types::{
     AudioDeviceCapabilities, DeviceTransportKind, DsdOutputMode, DsdRate, OutputBackendKind,
     OutputMode, PlaybackEnginePolicy, SampleFormatKind, UnifiedAudioFormat,
 };
 
 use crate::verification::WireSampleFormat;
+
+const DEVICE_PROBE_CACHE_TTL: Duration = Duration::from_secs(5);
+type CachedDeviceEntry = (Instant, Vec<(AudioDeviceCapabilities, DeviceExtraMeta)>);
+static DEVICE_PROBE_CACHE: OnceLock<RwLock<Option<CachedDeviceEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedFormat {
@@ -87,32 +94,30 @@ impl AudioFormatManager {
                 if native_ok {
                     return Ok(Self::build_native_dsd(source, dsd_rate));
                 }
-                return Err(format!(
+                Err(format!(
                     "設備 '{}' 不支援 {} Native DSD (ASIO Native DSD={}, Max={:?})",
                     device.name,
                     dsd_rate.label(),
                     device.supports_native_dsd,
                     device.max_dsd_rate
-                ));
+                ))
             }
             DsdOutputMode::DoP => {
                 if dop_supported {
                     return Ok(Self::build_dop(source, dop_carrier.unwrap(), device));
                 }
-                return Err(format!(
+                Err(format!(
                     "設備 '{}' 未支援或未具備 {} DoP 條件 (需要 24-bit 獨佔 / {} Hz)",
                     device.name,
                     dsd_rate.label(),
                     dop_carrier.unwrap_or(0)
-                ));
+                ))
             }
-            DsdOutputMode::DsdToPcm => {
-                return Ok(Self::build_dsd_to_pcm(
-                    source,
-                    device,
-                    "使用者明確選擇 DSD-to-PCM 轉換模式".to_string(),
-                ));
-            }
+            DsdOutputMode::DsdToPcm => Ok(Self::build_dsd_to_pcm(
+                source,
+                device,
+                "使用者明確選擇 DSD-to-PCM 轉換模式".to_string(),
+            )),
             DsdOutputMode::Auto => {
                 if native_ok {
                     return Ok(Self::build_native_dsd(source, dsd_rate));
@@ -127,14 +132,14 @@ impl AudioFormatManager {
                         dsd_rate.label()
                     ));
                 }
-                return Ok(Self::build_dsd_to_pcm(
+                Ok(Self::build_dsd_to_pcm(
                     source,
                     device,
                     format!(
                         "設備 '{}' 不支援 Native DSD / DoP，已明確降級為 DSD-to-PCM 輸出",
                         device.name
                     ),
-                ));
+                ))
             }
         }
     }
@@ -454,9 +459,39 @@ impl AudioDeviceManager {
             .collect()
     }
 
-    /// Enumerates real audio hardware capabilities paired with extended probe metadata
-    /// (OS default flag, HDMI display audio indicator, and hardware buffer bounds).
+    /// Clears the process-wide hardware probe cache so the next query re-enumerates COM/ASIO.
+    pub fn invalidate_device_cache() {
+        let cache = DEVICE_PROBE_CACHE.get_or_init(|| RwLock::new(None));
+        if let Ok(mut guard) = cache.write() {
+            *guard = None;
+        }
+    }
+
+    /// Enumerates real audio hardware capabilities paired with extended probe metadata,
+    /// served from a short-TTL cache (invalidated on OS device/resume events) so rapid skips
+    /// and status polls never trigger synchronous COM/ASIO probing on the hot path.
     pub fn list_devices_with_meta() -> Vec<(AudioDeviceCapabilities, DeviceExtraMeta)> {
+        let cache = DEVICE_PROBE_CACHE.get_or_init(|| RwLock::new(None));
+        if let Ok(guard) = cache.read()
+            && let Some((ts, ref cached)) = *guard
+            && ts.elapsed() < DEVICE_PROBE_CACHE_TTL
+        {
+            return cached.clone();
+        }
+        Self::list_devices_with_meta_fresh()
+    }
+
+    /// Forces a fresh hardware probe and refreshes the process-wide device capability cache.
+    pub fn list_devices_with_meta_fresh() -> Vec<(AudioDeviceCapabilities, DeviceExtraMeta)> {
+        let devices = Self::probe_devices_with_meta_uncached();
+        let cache = DEVICE_PROBE_CACHE.get_or_init(|| RwLock::new(None));
+        if let Ok(mut guard) = cache.write() {
+            *guard = Some((Instant::now(), devices.clone()));
+        }
+        devices
+    }
+
+    fn probe_devices_with_meta_uncached() -> Vec<(AudioDeviceCapabilities, DeviceExtraMeta)> {
         let mut devices = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -656,13 +691,12 @@ impl AudioDeviceManager {
         devices: &'a [AudioDeviceCapabilities],
         selected: Option<&str>,
     ) -> Option<&'a AudioDeviceCapabilities> {
-        if let Some(sel) = selected.filter(|s| !s.trim().is_empty()) {
-            if let Some(found) = devices
-                .iter()
-                .find(|d| d.device_id == sel || d.name == sel || d.asio_driver_name.as_deref() == Some(sel))
-            {
-                return Some(found);
-            }
+        if let Some(sel) = selected.filter(|s| !s.trim().is_empty())
+            && let Some(found) = devices.iter().find(|d| {
+                d.device_id == sel || d.name == sel || d.asio_driver_name.as_deref() == Some(sel)
+            })
+        {
+            return Some(found);
         }
         devices
             .iter()

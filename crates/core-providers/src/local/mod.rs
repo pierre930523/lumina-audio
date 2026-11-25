@@ -1,10 +1,15 @@
 pub mod artwork;
 pub mod dsd_meta;
+pub mod fingerprint;
+pub mod ignore;
 pub mod lyrics;
 pub mod mapper;
 pub mod metadata;
+pub mod pipeline;
+pub mod playlist;
 pub mod riff_meta;
 pub mod scanner;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,21 +29,31 @@ use crate::traits::{
     StreamResolver, SyncProgress, SyncResult, SyncResultSummary,
 };
 pub use self::artwork::{ArtworkManager, ArtworkTarget};
+pub use self::fingerprint::compute_content_fingerprint;
+pub use self::ignore::{
+    classify_unsupported_container, is_playlist_sidecar, should_ignore_name, should_ignore_path,
+};
 pub use self::lyrics::{
     LyricLine, LyricWord, LyricsFormat, LyricsKind, LyricsManager, LyricsResult, LyricsSource,
     LyricsTarget,
 };
 pub use self::mapper::{
     extract_edition_label, normalize_album_base_title, AlbumMapper, AlbumSyncMetadata,
+    VersionSyncMetadata,
 };
 pub use self::metadata::{
-    derive_album_and_artist_from_dir, derive_title_and_track_from_filename, ExtractedMetadata,
+    derive_album_and_artist_from_dir, derive_title_and_track_from_filename, detect_garbled_tags,
+    extract_disc_number_from_dir_name, split_artists, ExtractOptions, ExtractedMetadata,
     MetadataExtractor,
 };
+pub use self::pipeline::{IngestionConfig, IngestionPipeline};
+pub use self::playlist::{parse_m3u_content, parse_m3u_file, ParsedPlaylist, ParsedPlaylistEntry};
 pub use self::scanner::{
     find_folder_cover, find_folder_cover_in_files, is_scannable_audio, normalize_path,
-    DirectoryScanner, COVER_ART_FILENAMES, SCANNABLE_AUDIO_EXTENSIONS,
+    DetailedScanOutput, DirectoryScanner, ScanSkippedCandidate, COVER_ART_FILENAMES,
+    SCANNABLE_AUDIO_EXTENSIONS,
 };
+pub use self::watcher::StorageWatcherManager;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalProviderConfig {

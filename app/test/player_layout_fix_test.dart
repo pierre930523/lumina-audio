@@ -5,10 +5,10 @@ import 'package:lumina_app/models/signal_path.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
 import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
+import 'package:lumina_app/ui/common/audio_quality_badge.dart';
 import 'package:lumina_app/ui/mini_player/playback_controls.dart';
 import 'package:lumina_app/ui/mini_player/progress_bar.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
-import 'package:lumina_app/ui/signal_path/quality_badge.dart';
 import 'package:material_ui/material_ui.dart';
 
 void main() {
@@ -51,18 +51,18 @@ void main() {
           await tester.pumpAndSettle();
           expect(tester.takeException(), isNull);
 
-          // 1. Collapsed Home view: single QualityBadge on screen, NOT inside PlaybackControls.
-          expect(find.byType(QualityBadge), findsOneWidget);
-          expect(find.text('標準高音質'), findsOneWidget);
+          // 1. Collapsed Home view: single Gold Hi-Res QualityBadge inside PlaybackControls.
+          expect(find.byType(AudioQualityBadge), findsOneWidget);
+          expect(find.text('Hi-Res'), findsOneWidget);
           expect(
             find.descendant(
               of: find.byType(PlaybackControls),
-              matching: find.byType(QualityBadge),
+              matching: find.byType(AudioQualityBadge),
             ),
-            findsNothing,
+            findsOneWidget,
           );
 
-          // 2. Play/Pause button aligns dead-center horizontally with bottom bar and waveform progress bar.
+          // 2. Play/Pause button aligns dead-center horizontally with bottom bar and linear progress bar.
           final capsuleRect =
               tester.getRect(find.byKey(const Key('liquid_glass_capsule')));
           final playCenter =
@@ -84,8 +84,10 @@ void main() {
             lessThan(5.0),
           );
 
-          // 3. Expand Now Playing overlay (default wide Split mode).
+          // 3. Expand Now Playing overlay (defaults to Focus View, then switch to Split mode).
           await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('btn_now_playing_mode_split')));
           await tester.pumpAndSettle();
           expect(tester.takeException(), isNull);
           expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
@@ -106,13 +108,20 @@ void main() {
             findsNothing,
           );
 
-          // Still ONLY ONE QualityBadge on screen (in NowPlayingOverlay, removed from bottom bar).
-          expect(find.byType(QualityBadge), findsOneWidget);
-          expect(find.text('標準高音質'), findsOneWidget);
+          // Still ONLY ONE QualityBadge on screen (shared inside bottom bar PlaybackControls, NO duplicate in NowPlayingOverlay).
+          expect(find.byType(AudioQualityBadge), findsOneWidget);
+          expect(find.text('Hi-Res'), findsOneWidget);
           expect(
             find.descendant(
               of: find.byKey(const Key('liquid_glass_capsule')),
-              matching: find.byType(QualityBadge),
+              matching: find.byType(AudioQualityBadge),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.descendant(
+              of: find.byType(NowPlayingOverlay),
+              matching: find.byType(AudioQualityBadge),
             ),
             findsNothing,
           );
@@ -125,13 +134,13 @@ void main() {
             lessThan(1.0),
           );
 
-          // Verify quality pills sit cleanly inside NowPlayingOverlay without vertical clipping.
+          // Verify quality badge sits cleanly inside bottom bar without vertical clipping.
           final overlayRect =
               tester.getRect(find.byKey(const Key('now_playing_overlay')));
           final badgeRect =
               tester.getRect(find.byKey(const Key('quality_badge_button')));
-          expect(badgeRect.top, greaterThanOrEqualTo(overlayRect.top));
-          expect(badgeRect.bottom, lessThanOrEqualTo(overlayRect.bottom));
+          expect(badgeRect.top, greaterThanOrEqualTo(capsuleRect.top));
+          expect(badgeRect.bottom, lessThanOrEqualTo(capsuleRect.bottom));
 
           // 4. Switch to pure Cover View mode: NO Scrollable/Scrollbar, centered cover, generous shadow margins.
           await tester.tap(find.byKey(const Key('btn_now_playing_mode_cover')));
@@ -162,12 +171,13 @@ void main() {
           );
 
           // Single QualityBadge & unclipped bounds in Cover mode.
-          expect(find.byType(QualityBadge), findsOneWidget);
+          expect(find.byType(AudioQualityBadge), findsOneWidget);
           final coverBadgeRect =
               tester.getRect(find.byKey(const Key('quality_badge_button')));
-          expect(coverBadgeRect.bottom, lessThanOrEqualTo(overlayRect.bottom));
+          expect(coverBadgeRect.top, greaterThanOrEqualTo(capsuleRect.top));
+          expect(coverBadgeRect.bottom, lessThanOrEqualTo(capsuleRect.bottom));
 
-          // Cover card is horizontally centered and has outer padding > BoxShadow blur+spread on all 4 edges.
+          // Cover card is horizontally centered and has outer padding > BoxShadow reach on all 4 edges.
           final coverFinder = find.descendant(
             of: find.byType(NowPlayingOverlay),
             matching: find.byType(AlbumArtworkView),
@@ -178,11 +188,11 @@ void main() {
             (coverRect.center.dx - overlayRect.center.dx).abs(),
             lessThan(1.0),
           );
-          // Shadow blurRadius(36) + spreadRadius(2) = 38; offsetY = 14 => bottom reach = 52.
-          expect(coverRect.left - overlayRect.left, greaterThan(38.0));
-          expect(overlayRect.right - coverRect.right, greaterThan(38.0));
-          expect(coverRect.top - overlayRect.top, greaterThan(38.0));
-          expect(overlayRect.bottom - coverRect.bottom, greaterThan(52.0));
+          // Shadow blurRadius(48) + spreadRadius(0) = 48; offsetY = 20 => top reach = 28, bottom reach = 68.
+          expect(coverRect.left - overlayRect.left, greaterThan(48.0));
+          expect(overlayRect.right - coverRect.right, greaterThan(48.0));
+          expect(coverRect.top - overlayRect.top, greaterThan(28.0));
+          expect(overlayRect.bottom - coverRect.bottom, greaterThan(68.0));
         },
       );
     }
@@ -228,12 +238,13 @@ void main() {
         ),
         findsNothing,
       );
-      expect(find.byType(QualityBadge), findsOneWidget);
-      final overlayRect =
-          tester.getRect(find.byKey(const Key('now_playing_overlay')));
+      expect(find.byType(AudioQualityBadge), findsOneWidget);
+      final capsuleRect =
+          tester.getRect(find.byKey(const Key('liquid_glass_capsule')));
       final badgeRect =
           tester.getRect(find.byKey(const Key('quality_badge_button')));
-      expect(badgeRect.bottom, lessThanOrEqualTo(overlayRect.bottom));
+      expect(badgeRect.top, greaterThanOrEqualTo(capsuleRect.top));
+      expect(badgeRect.bottom, lessThanOrEqualTo(capsuleRect.bottom));
     },
   );
 
@@ -284,22 +295,25 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(find.text('FLAC 44.1 kHz / 16-bit'), findsOneWidget);
-      expect(find.byType(QualityBadge), findsOneWidget);
+      expect(find.byType(AudioQualityBadge), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('btn_now_playing_mode_cover')));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(find.text('FLAC 44.1 kHz / 16-bit'), findsOneWidget);
-      expect(find.byType(QualityBadge), findsOneWidget);
+      expect(find.byType(AudioQualityBadge), findsOneWidget);
 
       final overlayRect =
           tester.getRect(find.byKey(const Key('now_playing_overlay')));
+      final capsuleRect =
+          tester.getRect(find.byKey(const Key('liquid_glass_capsule')));
       final formatRect =
           tester.getRect(find.text('FLAC 44.1 kHz / 16-bit'));
       final badgeRect =
           tester.getRect(find.byKey(const Key('quality_badge_button')));
       expect(formatRect.bottom, lessThanOrEqualTo(overlayRect.bottom));
-      expect(badgeRect.bottom, lessThanOrEqualTo(overlayRect.bottom));
+      expect(badgeRect.top, greaterThanOrEqualTo(capsuleRect.top));
+      expect(badgeRect.bottom, lessThanOrEqualTo(capsuleRect.bottom));
     },
   );
 }

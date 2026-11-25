@@ -27,10 +27,10 @@ class AmbientPalette {
   });
 
   static const AmbientPalette defaultFallback = AmbientPalette(
-    colorA: Color(0xFF13283C),
-    colorB: Color(0xFF1F2347),
-    colorC: Color(0xFF0E3039),
-    colorD: Color(0xFF0B0F17),
+    colorA: Color(0xFF1E2922),
+    colorB: Color(0xFF211E38),
+    colorC: Color(0xFF172024),
+    colorD: Color(0xFF0E1014),
   );
 
   static const List<AmbientPalette> _fallbackPalettes = [
@@ -405,17 +405,30 @@ abstract final class ArtworkPaletteExtractor {
   static Future<AmbientPalette?> extractFromImageProvider(
     ImageProvider provider, {
     AmbientPalette? fallback,
+    Duration? timeout,
   }) async {
+    final effectiveTimeout = timeout ??
+        (Platform.environment.containsKey('FLUTTER_TEST')
+            ? null
+            : const Duration(seconds: 6));
     final completer = Completer<AmbientPalette?>();
-    final stream = provider.resolve(
-      const ImageConfiguration(size: Size(32, 32)),
-    );
+    late final ImageStream stream;
+    try {
+      stream = provider.resolve(
+        const ImageConfiguration(size: Size(32, 32)),
+      );
+    } catch (_) {
+      return null;
+    }
     late final ImageStreamListener listener;
+    Timer? timeoutTimer;
     var settled = false;
 
     void finish(AmbientPalette? result) {
       if (settled) return;
       settled = true;
+      timeoutTimer?.cancel();
+      timeoutTimer = null;
       stream.removeListener(listener);
       if (!completer.isCompleted) {
         completer.complete(result);
@@ -457,13 +470,12 @@ abstract final class ArtworkPaletteExtractor {
     );
 
     stream.addListener(listener);
-    return completer.future.timeout(
-      const Duration(seconds: 6),
-      onTimeout: () {
+    if (!settled && effectiveTimeout != null) {
+      timeoutTimer = Timer(effectiveTimeout, () {
         finish(null);
-        return null;
-      },
-    );
+      });
+    }
+    return completer.future;
   }
 }
 

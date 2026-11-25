@@ -1,6 +1,8 @@
 pub mod hifi;
+pub mod ingestion;
 pub mod streaming;
 pub use hifi::*;
+pub use ingestion::*;
 pub use streaming::*;
 
 use serde::{Deserialize, Serialize};
@@ -72,16 +74,22 @@ pub enum ProviderKind {
     Qobuz,
     Tidal,
     Deezer,
+    #[serde(rename = "apple_music")]
+    AppleMusic,
+    #[serde(rename = "youtube_music")]
+    YouTubeMusic,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 6] = [
+    pub const ALL: [ProviderKind; 8] = [
         ProviderKind::Local,
         ProviderKind::Smb,
         ProviderKind::WebDav,
         ProviderKind::Qobuz,
         ProviderKind::Tidal,
         ProviderKind::Deezer,
+        ProviderKind::AppleMusic,
+        ProviderKind::YouTubeMusic,
     ];
 
     #[inline]
@@ -93,6 +101,8 @@ impl ProviderKind {
             Self::Qobuz => "qobuz",
             Self::Tidal => "tidal",
             Self::Deezer => "deezer",
+            Self::AppleMusic => "apple_music",
+            Self::YouTubeMusic => "youtube_music",
         }
     }
 
@@ -104,11 +114,16 @@ impl ProviderKind {
             Self::Qobuz => "Qobuz",
             Self::Tidal => "Tidal",
             Self::Deezer => "Deezer",
+            Self::AppleMusic => "Apple Music",
+            Self::YouTubeMusic => "YouTube Music",
         }
     }
 
     pub const fn is_streaming(&self) -> bool {
-        matches!(self, Self::Qobuz | Self::Tidal | Self::Deezer)
+        matches!(
+            self,
+            Self::Qobuz | Self::Tidal | Self::Deezer | Self::AppleMusic | Self::YouTubeMusic
+        )
     }
 
     pub const fn is_local_or_network(&self) -> bool {
@@ -116,7 +131,15 @@ impl ProviderKind {
     }
 
     pub const fn requires_auth(&self) -> bool {
-        matches!(self, Self::Qobuz | Self::Tidal | Self::Deezer | Self::Smb | Self::WebDav)
+        matches!(
+            self,
+            Self::Qobuz
+                | Self::Tidal
+                | Self::Deezer
+                | Self::AppleMusic
+                | Self::Smb
+                | Self::WebDav
+        )
     }
 }
 
@@ -138,6 +161,8 @@ impl FromStr for ProviderKind {
             "qobuz" => Ok(Self::Qobuz),
             "tidal" => Ok(Self::Tidal),
             "deezer" => Ok(Self::Deezer),
+            "apple_music" | "applemusic" | "apple-music" => Ok(Self::AppleMusic),
+            "youtube_music" | "youtubemusic" | "youtube-music" | "ytm" => Ok(Self::YouTubeMusic),
             _ => Err(ValidationError::UnknownProvider(s.to_string())),
         }
     }

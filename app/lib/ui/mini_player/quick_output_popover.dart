@@ -6,6 +6,7 @@ import '../../models/playback_state.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/ui_scale_controller.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 
 class QuickOutputPopover extends StatefulWidget {
@@ -113,23 +114,20 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
           maxWidth: resolvedMaxWidth,
           maxHeight: resolvedMaxHeight ?? double.infinity,
         ),
-        child: Container(
+        child: FrostedGlassContainer(
           key: const Key('quick_output_popover'),
           width: resolvedMaxWidth,
-          decoration: BoxDecoration(
-            color: LuminaTokens.cardElevatedBg,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-            border: Border.all(
-              color: LuminaTokens.borderControl.withValues(alpha: 0.7),
+          blurSigma: LuminaTokens.glassDialogBlur,
+          color: LuminaTokens.glassDialogBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+          border: Border.all(color: LuminaTokens.glassCardBorder),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0xAA000000),
+              blurRadius: 28,
+              offset: Offset(0, 12),
             ),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0xAA000000),
-                blurRadius: 28,
-                offset: Offset(0, 12),
-              ),
-            ],
-          ),
+          ],
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -166,7 +164,7 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                             key: const Key('btn_popover_open_zones'),
                             borderRadius: BorderRadius.circular(6),
                             mouseCursor: SystemMouseCursors.click,
-                            hoverColor: LuminaTokens.cardHoverBg,
+                            hoverColor: LuminaTokens.glassRowHoverBg,
                             focusColor:
                                 LuminaTokens.focusRing.withValues(alpha: 0.25),
                             onTap: () {
@@ -183,7 +181,7 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                  color: LuminaTokens.accentBlue,
+                                  color: LuminaTokens.glassTextPrimary,
                                   fontSize: 11.5,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -202,9 +200,11 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                 child: Container(
                   padding: const EdgeInsets.all(3),
                   decoration: BoxDecoration(
-                    color: LuminaTokens.canvasBg,
+                    color: LuminaTokens.glassSegmentTrackBg,
                     borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                    border: Border.all(color: LuminaTokens.borderSubtle),
+                    border: Border.all(
+                      color: LuminaTokens.glassSegmentTrackBorder,
+                    ),
                   ),
                   child: Row(
                     children: [
@@ -228,7 +228,7 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                   ),
                 ),
               ),
-              const Divider(color: LuminaTokens.borderSubtle, height: 1),
+              const Divider(color: LuminaTokens.glassCardDivider, height: 1),
 
               // Device List (bounded container)
               Flexible(
@@ -282,7 +282,7 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                 ),
               ),
 
-              const Divider(color: LuminaTokens.borderSubtle, height: 1),
+              const Divider(color: LuminaTokens.glassCardDivider, height: 1),
 
               // Footer Toggle: Restore on startup ("啟動時恢復")
               Padding(
@@ -309,15 +309,6 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                     Switch(
                       key: const Key('switch_restore_output_startup'),
                       value: _restoreOnStartup,
-                      activeTrackColor: LuminaTokens.accentBlueStrong,
-                      activeThumbColor: LuminaTokens.textPrimary,
-                      inactiveThumbColor: LuminaTokens.textSecondary,
-                      inactiveTrackColor: LuminaTokens.canvasBg,
-                      trackOutlineColor: WidgetStateProperty.resolveWith(
-                        (states) => states.contains(WidgetState.focused)
-                            ? LuminaTokens.focusRing
-                            : LuminaTokens.borderControl,
-                      ),
                       mouseCursor: SystemMouseCursors.click,
                       onChanged: (val) {
                         setState(() => _restoreOnStartup = val);
@@ -345,11 +336,11 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
       key: Key('quick_output_dev_${dev.id}'),
       onTap: () => _selectDevice(dev),
       mouseCursor: SystemMouseCursors.click,
-      hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.72),
+      hoverColor: LuminaTokens.glassRowHoverBg,
       focusColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
       child: Container(
         color: isSelected
-            ? LuminaTokens.accentBlueStrong.withValues(alpha: 0.14)
+            ? LuminaTokens.glassNavActiveBg
             : Colors.transparent,
         padding: const EdgeInsets.symmetric(
           horizontal: 14,
@@ -364,8 +355,8 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                   Icons.volume_up_outlined,
                   size: 16,
                   color: isSelected
-                      ? LuminaTokens.accentBlue
-                      : LuminaTokens.textSecondary,
+                      ? Colors.white
+                      : LuminaTokens.glassTextSecondary,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -378,8 +369,8 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: isSelected
-                              ? LuminaTokens.accentBlue
-                              : LuminaTokens.textPrimary,
+                              ? Colors.white
+                              : LuminaTokens.glassTextPrimary,
                           fontSize: 13,
                           fontWeight:
                               isSelected ? FontWeight.w600 : FontWeight.w400,
@@ -409,9 +400,9 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                   ),
                   style: IconButton.styleFrom(
                     foregroundColor: isSelected
-                        ? LuminaTokens.accentBlue
-                        : LuminaTokens.textSecondary,
-                    hoverColor: LuminaTokens.cardHoverBg,
+                        ? Colors.white
+                        : LuminaTokens.glassTextSecondary,
+                    hoverColor: LuminaTokens.glassPillHoverBg,
                     focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
                   ).copyWith(
                     mouseCursor: const WidgetStatePropertyAll(
@@ -452,7 +443,7 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                     child: Icon(
                       Icons.check_rounded,
                       size: 16,
-                      color: LuminaTokens.accentBlue,
+                      color: Colors.white,
                     ),
                   ),
               ],
@@ -463,13 +454,14 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                 child: SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     trackHeight: 2,
+                    thumbColor: Colors.white,
                     thumbShape: const RoundSliderThumbShape(
                       enabledThumbRadius: 5,
                     ),
                     overlayShape: const RoundSliderOverlayShape(
                       overlayRadius: 10,
                     ),
-                    overlayColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
+                    overlayColor: LuminaTokens.glassPillHoverBg,
                   ),
                   child: Row(
                     children: [
@@ -482,8 +474,8 @@ class _QuickOutputPopoverState extends State<QuickOutputPopover> {
                           child: Slider(
                             key: Key('quick_output_vol_${dev.id}'),
                             value: devVol,
-                            activeColor: LuminaTokens.accentBlue,
-                            inactiveColor: LuminaTokens.borderControl,
+                            activeColor: LuminaTokens.glassTextPrimary,
+                            inactiveColor: LuminaTokens.glassTrackUnplayed,
                             mouseCursor: SystemMouseCursors.click,
                             onChanged: (v) async {
                               await widget.audioService.setDeviceVolume(
@@ -563,16 +555,16 @@ class _DriverSegmentButtonState extends State<_DriverSegmentButton> {
           padding: const EdgeInsets.symmetric(vertical: 7),
           decoration: BoxDecoration(
             color: widget.selected
-                ? LuminaTokens.cardHoverBg
+                ? LuminaTokens.glassSegmentSelectedBg
                 : (_hovered
-                      ? LuminaTokens.cardBg
+                      ? LuminaTokens.glassRowHoverBg
                       : Colors.transparent),
             borderRadius: BorderRadius.circular(6),
             border: Border.all(
               color: _focused
                   ? LuminaTokens.focusRing
                   : (widget.selected
-                        ? LuminaTokens.borderControl
+                        ? LuminaTokens.glassSegmentSelectedBorder
                         : Colors.transparent),
               width: 1,
             ),
@@ -582,8 +574,8 @@ class _DriverSegmentButtonState extends State<_DriverSegmentButton> {
             textAlign: TextAlign.center,
             style: TextStyle(
               color: widget.selected
-                  ? LuminaTokens.textPrimary
-                  : LuminaTokens.textSecondary,
+                  ? Colors.white
+                  : LuminaTokens.glassTextSecondary,
               fontSize: 12.5,
               fontWeight: widget.selected ? FontWeight.w700 : FontWeight.w500,
             ),

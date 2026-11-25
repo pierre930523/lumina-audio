@@ -1,4 +1,4 @@
-use crate::engine::{get_engine, EngineState};
+use crate::engine::{get_engine, EngineState, PlayDispatchCmd, StandbyDispatchCmd};
 use crate::error::{
     catch_unwind_ffi, set_last_error, string_to_c_char, take_last_error, LUMINA_ERR_AUDIO_BACKEND,
     LUMINA_ERR_GENERAL, LUMINA_ERR_NOT_INITIALIZED, LUMINA_OK,
@@ -9,16 +9,21 @@ use core_audio::{
 };
 use core_db::LibraryRepository;
 use core_types::{
-    AudioEngineOutputInfo, DsdOutputMode, DualDeckStatusSnapshot, OutputBackendKind,
-    StreamSourceSpec,
+    AudioEngineOutputInfo, DeckTrackMetadata, DsdOutputMode, DualDeckStatusSnapshot,
+    OutputBackendKind, StreamSourceSpec,
 };
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+const ADAPTIVE_RAPID_WINDOW_MS: u64 = 300;
+const ADAPTIVE_DEBOUNCE_MS: u64 = 130;
 
 fn demo_track_default_duration_ms(track_id: &str) -> u64 {
     match track_id {
@@ -37,6 +42,179 @@ fn is_http_url(s: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+fn first_non_empty_str(val: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for &k in keys {
+        if let Some(s) = val.get(k).and_then(|v| v.as_str()) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn infer_provider_id(
+    track_id: Option<&str>,
+    source: Option<&str>,
+    has_local_file: bool,
+) -> Option<String> {
+    if let Some(tid) = track_id {
+        let lower = tid.trim().to_ascii_lowercase();
+        if lower.starts_with("youtube_music:")
+            || lower.starts_with("ytm:")
+            || lower.starts_with("ytm_")
+            || lower.starts_with("ytm-")
+        {
+            return Some("youtube_music".to_string());
+        }
+        if lower.starts_with("qobuz:") || lower.starts_with("qb:") || lower.starts_with("qb-") {
+            return Some("qobuz".to_string());
+        }
+        if lower.starts_with("tidal:") || lower.starts_with("td:") || lower.starts_with("td-") {
+            return Some("tidal".to_string());
+        }
+        if lower.starts_with("deezer:") || lower.starts_with("dz:") || lower.starts_with("dz-") {
+            return Some("deezer".to_string());
+        }
+        if lower.starts_with("apple_music:")
+            || lower.starts_with("apple:")
+            || lower.starts_with("am:")
+            || lower.starts_with("am-")
+        {
+            return Some("apple_music".to_string());
+        }
+        if lower.starts_with("podcast_rss:") || lower.starts_with("rss:") {
+            return Some("podcast_rss".to_string());
+        }
+        if lower.starts_with("smb:") {
+            return Some("smb".to_string());
+        }
+        if lower.starts_with("webdav:") || lower.starts_with("web_dav:") {
+            return Some("web_dav".to_string());
+        }
+        if lower.starts_with("local:") {
+            return Some("local".to_string());
+        }
+    }
+    if let Some(src) = source {
+        let lower = src.trim().to_ascii_lowercase();
+        if lower.contains("youtube") || lower == "ytm" {
+            return Some("youtube_music".to_string());
+        }
+        if lower.contains("qobuz") {
+            return Some("qobuz".to_string());
+        }
+        if lower.contains("tidal") {
+            return Some("tidal".to_string());
+        }
+        if lower.contains("deezer") {
+            return Some("deezer".to_string());
+        }
+        if lower.contains("apple") {
+            return Some("apple_music".to_string());
+        }
+        if lower.contains("podcast") {
+            return Some("podcast_rss".to_string());
+        }
+        if lower.contains("smb") {
+            return Some("smb".to_string());
+        }
+        if lower.contains("webdav") || lower.contains("web_dav") {
+            return Some("web_dav".to_string());
+        }
+        if lower.contains("local") {
+            return Some("local".to_string());
+        }
+    }
+    if has_local_file {
+        return Some("local".to_string());
+    }
+    None
+}
+
+pub fn parse_deck_track_metadata(
+    raw: &str,
+    fallback_spec: Option<&StreamSourceSpec>,
+) -> Option<DeckTrackMetadata> {
+    let trimmed = raw.trim();
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let parsed_spec: Option<StreamSourceSpec> = if fallback_spec.is_none() {
+            val.get("source_spec")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+        } else {
+            None
+        };
+        let eff_spec = fallback_spec.or(parsed_spec.as_ref());
+
+        let track_id = first_non_empty_str(&val, &["track_id", "id", "external_track_id"])
+            .or_else(|| {
+                eff_spec
+                    .map(|s| s.key().track_id.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        let source_hint = first_non_empty_str(&val, &["source"]);
+        let has_local_file = first_non_empty_str(&val, &["file_path", "path"]).is_some()
+            || matches!(eff_spec, Some(StreamSourceSpec::LocalFile { .. }));
+        let provider_id = first_non_empty_str(&val, &["provider_id", "provider"])
+            .or_else(|| {
+                eff_spec
+                    .map(|s| s.key().provider_id.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| infer_provider_id(track_id.as_deref(), source_hint.as_deref(), has_local_file))
+            .unwrap_or_default();
+
+        let title = first_non_empty_str(&val, &["title"]).unwrap_or_default();
+        let artist = first_non_empty_str(&val, &["artist", "album_artist"]).unwrap_or_default();
+        let album = first_non_empty_str(&val, &["album"]).unwrap_or_default();
+        let cover_url = first_non_empty_str(&val, &["cover_url", "album_art_url", "artwork_url"]);
+        let duration_ms = val.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        if track_id.is_none()
+            && title.is_empty()
+            && artist.is_empty()
+            && album.is_empty()
+            && cover_url.is_none()
+        {
+            return None;
+        }
+
+        return Some(DeckTrackMetadata {
+            track_id: track_id.unwrap_or_default(),
+            provider_id,
+            title,
+            artist,
+            album,
+            cover_url,
+            duration_ms,
+        });
+    }
+
+    if !trimmed.is_empty() && !trimmed.contains('{') {
+        let track_id = fallback_spec
+            .map(|s| s.key().track_id.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| trimmed.to_string());
+        let provider_id = fallback_spec
+            .map(|s| s.key().provider_id.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| infer_provider_id(Some(&track_id), None, !is_http_url(trimmed)))
+            .unwrap_or_default();
+        return Some(DeckTrackMetadata {
+            track_id,
+            provider_id,
+            ..Default::default()
+        });
+    }
+
+    fallback_spec.map(|spec| DeckTrackMetadata {
+        track_id: spec.key().track_id.clone(),
+        provider_id: spec.key().provider_id.clone(),
+        ..Default::default()
+    })
+}
+
 fn parse_headers_field(val: &serde_json::Value) -> HashMap<String, String> {
     let Some(obj) = val
         .get("headers")
@@ -52,6 +230,7 @@ fn parse_headers_field(val: &serde_json::Value) -> HashMap<String, String> {
 
 struct ParsedPayloadHints {
     caller_epoch: Option<u64>,
+    debounced: bool,
     duration_ms: u64,
     source_spec: Option<StreamSourceSpec>,
     source_label: String,
@@ -90,6 +269,7 @@ fn parse_payload_hints(raw: &str) -> Result<ParsedPayloadHints, String> {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Ok(ParsedPayloadHints {
             caller_epoch: None,
+            debounced: false,
             duration_ms: 0,
             source_spec: None,
             source_label,
@@ -104,7 +284,16 @@ fn parse_payload_hints(raw: &str) -> Result<ParsedPayloadHints, String> {
     {
         source_label = src.to_string();
     }
-    let caller_epoch = val.get("epoch").and_then(|v| v.as_u64()).filter(|&e| e > 0);
+    let caller_epoch = val
+        .get("playback_epoch")
+        .or_else(|| val.get("playbackEpoch"))
+        .or_else(|| val.get("epoch"))
+        .and_then(|v| v.as_u64())
+        .filter(|&e| e > 0);
+    let debounced = val
+        .get("debounced")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let duration_ms = val.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
     let source_spec = match val.get("source_spec") {
         Some(spec_val) if !spec_val.is_null() => {
@@ -125,6 +314,7 @@ fn parse_payload_hints(raw: &str) -> Result<ParsedPayloadHints, String> {
     };
     Ok(ParsedPayloadHints {
         caller_epoch,
+        debounced,
         duration_ms,
         source_spec,
         source_label,
@@ -301,6 +491,13 @@ async fn resolve_candidate_async(
     })
 }
 
+fn is_play_cmd_current(engine: &EngineState, cmd: &PlayDispatchCmd) -> bool {
+    engine.async_generation.load(Ordering::SeqCst) == cmd.generation
+        && engine.play_request_id.load(Ordering::SeqCst) == cmd.request_id
+        && engine.current_playback_epoch() == cmd.task_epoch
+        && !cmd.cancel_token.is_cancelled()
+}
+
 fn fail_async_if_current(
     engine: &EngineState,
     generation: u64,
@@ -332,13 +529,9 @@ fn fail_async_if_current_with_code(
     code: Option<String>,
     provider: Option<String>,
 ) {
-    let _commit_guard = engine
-        .async_commit_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let is_stale = engine.async_generation.load(Ordering::SeqCst) != generation
         || engine.play_request_id.load(Ordering::SeqCst) != request_id
-        || engine.current_epoch() != task_epoch
+        || engine.current_playback_epoch() != task_epoch
         || cancel_token.is_cancelled();
     if !is_stale {
         if let Ok(mut err_lock) = engine.async_last_error.write() {
@@ -354,6 +547,426 @@ fn fail_async_if_current_with_code(
         engine.has_real_stream.store(false, Ordering::SeqCst);
         engine.playback_state.store(4, Ordering::SeqCst);
         engine.loaded_request_id.store(request_id, Ordering::SeqCst);
+    }
+}
+
+fn ensure_playback_loaders_started(engine: &Arc<EngineState>) {
+    if let Ok(mut rx_guard) = engine.play_cmd_rx.lock()
+        && let Some(rx) = rx_guard.take()
+    {
+        let eng = engine.clone();
+        engine
+            .runtime
+            .spawn(async move { run_track_loader_loop(eng, rx).await });
+    }
+    if let Ok(mut rx_guard) = engine.standby_cmd_rx.lock()
+        && let Some(rx) = rx_guard.take()
+    {
+        let eng = engine.clone();
+        engine
+            .runtime
+            .spawn(async move { run_standby_loader_loop(eng, rx).await });
+    }
+}
+
+async fn ensure_l2_initialized_in_background(engine: &Arc<EngineState>) {
+    let needs_l2 = engine
+        .l2_cache_manager
+        .read()
+        .ok()
+        .is_some_and(|g| g.is_none())
+        && engine.db_pool.read().ok().is_some_and(|g| g.is_some());
+    if needs_l2 {
+        let eng_l2 = engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::l2_cache::ensure_default_l2_cache_manager(&eng_l2);
+        })
+        .await;
+    }
+}
+
+async fn run_track_loader_loop(
+    engine: Arc<EngineState>,
+    mut rx: watch::Receiver<Option<PlayDispatchCmd>>,
+) {
+    while rx.changed().await.is_ok() {
+        loop {
+            let Some(cmd) = rx.borrow_and_update().clone() else {
+                break;
+            };
+            if !is_play_cmd_current(&engine, &cmd) {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            // Adaptive debounce: coalesce rapid skips (<=300ms) for 130ms unless caller already debounced.
+            if !cmd.debounced && cmd.rapid_within_300ms {
+                let superseded = tokio::select! {
+                    biased;
+                    _ = cmd.cancel_token.cancelled() => true,
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        true
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(ADAPTIVE_DEBOUNCE_MS)) => false,
+                };
+                if superseded || !is_play_cmd_current(&engine, &cmd) {
+                    if rx.has_changed().unwrap_or(false) {
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            ensure_l2_initialized_in_background(&engine).await;
+            if !is_play_cmd_current(&engine, &cmd) {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            let candidate = tokio::select! {
+                biased;
+                _ = cmd.cancel_token.cancelled() => {
+                    if rx.has_changed().unwrap_or(false) {
+                        continue;
+                    }
+                    break;
+                }
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                res = resolve_candidate_async(&engine, &cmd.payload) => match res {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        fail_async_if_current(
+                            &engine,
+                            cmd.generation,
+                            cmd.request_id,
+                            cmd.task_epoch,
+                            &cmd.cancel_token,
+                            msg,
+                        );
+                        if rx.has_changed().unwrap_or(false) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            };
+
+            if !is_play_cmd_current(&engine, &cmd) {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            let label = match &candidate {
+                ResolvedPlaybackCandidate::SourceSpec { source_label, .. }
+                | ResolvedPlaybackCandidate::Legacy { source_label, .. } => source_label.clone(),
+            };
+
+            let open_cancel = cmd.cancel_token.clone();
+            let open_res: Result<(OpenedStreamDecoder, Option<StreamSourceSpec>), CoreAudioError> =
+                match &candidate {
+                    ResolvedPlaybackCandidate::SourceSpec { spec, .. } => {
+                        let Some(player) = engine.player_clone() else {
+                            fail_async_if_current(
+                                &engine,
+                                cmd.generation,
+                                cmd.request_id,
+                                cmd.task_epoch,
+                                &cmd.cancel_token,
+                                "Audio player not initialized".to_string(),
+                            );
+                            if rx.has_changed().unwrap_or(false) {
+                                continue;
+                            }
+                            break;
+                        };
+                        tokio::select! {
+                            biased;
+                            _ = cmd.cancel_token.cancelled() => {
+                                if rx.has_changed().unwrap_or(false) {
+                                    continue;
+                                }
+                                break;
+                            }
+                            changed = rx.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                            res = player.open_source_spec_async_with_l2(
+                                spec.clone(),
+                                open_cancel.clone(),
+                                None,
+                            ) => res.map(|(dec, adopted)| (dec, Some(adopted))),
+                        }
+                    }
+                    ResolvedPlaybackCandidate::Legacy { stream, .. } => {
+                        tokio::select! {
+                            biased;
+                            _ = cmd.cancel_token.cancelled() => {
+                                if rx.has_changed().unwrap_or(false) {
+                                    continue;
+                                }
+                                break;
+                            }
+                            changed = rx.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                            res = AudioPlayer::open_stream_async(
+                                stream.clone(),
+                                open_cancel,
+                                Duration::from_secs(10),
+                            ) => res.map(|dec| (dec, None)),
+                        }
+                    }
+                };
+
+            let (decoder, adopted_spec) = match open_res {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let (err_code, err_provider, err_msg) = match &e {
+                        CoreAudioError::Decoder(DecoderError::StreamAuthRequired {
+                            provider_id,
+                            status,
+                        }) => (
+                            Some("AUTH_REQUIRED".to_string()),
+                            Some(provider_id.clone()),
+                            format!(
+                                "Authentication required for {provider_id} (HTTP {status})"
+                            ),
+                        ),
+                        _ => (None, None, format!("Failed to open stream ({label}): {e}")),
+                    };
+                    fail_async_if_current_with_code(
+                        &engine,
+                        cmd.generation,
+                        cmd.request_id,
+                        cmd.task_epoch,
+                        &cmd.cancel_token,
+                        err_msg,
+                        err_code,
+                        err_provider,
+                    );
+                    if rx.has_changed().unwrap_or(false) {
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            if !is_play_cmd_current(&engine, &cmd) {
+                drop(decoder);
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            let eng_commit = engine.clone();
+            let cmd_commit = cmd.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if !is_play_cmd_current(&eng_commit, &cmd_commit) {
+                    return;
+                }
+
+                let Some(player) = eng_commit.player_clone() else {
+                    fail_async_if_current(
+                        &eng_commit,
+                        cmd_commit.generation,
+                        cmd_commit.request_id,
+                        cmd_commit.task_epoch,
+                        &cmd_commit.cancel_token,
+                        "Audio player not initialized".to_string(),
+                    );
+                    return;
+                };
+
+                let start_res = match &candidate {
+                    ResolvedPlaybackCandidate::SourceSpec { spec, source_label } => {
+                        let effective_spec = adopted_spec.as_ref().unwrap_or(spec);
+                        let track_meta =
+                            parse_deck_track_metadata(&cmd_commit.payload, Some(effective_spec));
+                        player.start_opened_source_spec_with_metadata(
+                            effective_spec,
+                            decoder,
+                            source_label,
+                            cmd_commit.player_play_ep,
+                            cmd_commit.cancel_token.clone(),
+                            track_meta,
+                        )
+                    }
+                    ResolvedPlaybackCandidate::Legacy {
+                        stream,
+                        source_label,
+                    } => {
+                        let track_meta = parse_deck_track_metadata(&cmd_commit.payload, None);
+                        player.start_opened_decoder_with_epoch_and_metadata(
+                            stream,
+                            decoder,
+                            source_label,
+                            cmd_commit.player_play_ep,
+                            cmd_commit.cancel_token.clone(),
+                            track_meta,
+                        )
+                    }
+                };
+
+                if let Err(e) = start_res {
+                    let msg = format!("Failed to play stream ({label}): {e}");
+                    fail_async_if_current(
+                        &eng_commit,
+                        cmd_commit.generation,
+                        cmd_commit.request_id,
+                        cmd_commit.task_epoch,
+                        &cmd_commit.cancel_token,
+                        msg,
+                    );
+                    return;
+                }
+
+                if !is_play_cmd_current(&eng_commit, &cmd_commit) {
+                    return;
+                }
+
+                eng_commit.has_real_stream.store(true, Ordering::SeqCst);
+                eng_commit
+                    .duration_ms
+                    .store(player.duration_ms(), Ordering::Relaxed);
+                eng_commit.position_ms.store(0, Ordering::Relaxed);
+                eng_commit.playback_state.store(2, Ordering::SeqCst);
+                eng_commit
+                    .loaded_request_id
+                    .store(cmd_commit.request_id, Ordering::SeqCst);
+            })
+            .await;
+
+            if rx.has_changed().unwrap_or(false) {
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+async fn run_standby_loader_loop(
+    engine: Arc<EngineState>,
+    mut rx: watch::Receiver<Option<StandbyDispatchCmd>>,
+) {
+    while rx.changed().await.is_ok() {
+        loop {
+            let Some(cmd) = rx.borrow_and_update().clone() else {
+                break;
+            };
+            let is_stale = || {
+                cmd.cancel_token.is_cancelled()
+                    || cmd
+                        .eff_epoch
+                        .is_some_and(|ep| ep < engine.last_caller_epoch.load(Ordering::SeqCst))
+            };
+            if is_stale() {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            ensure_l2_initialized_in_background(&engine).await;
+            if is_stale() {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            let candidate = tokio::select! {
+                biased;
+                _ = cmd.cancel_token.cancelled() => {
+                    if rx.has_changed().unwrap_or(false) {
+                        continue;
+                    }
+                    break;
+                }
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                res = resolve_candidate_async(&engine, &cmd.payload) => match res {
+                    Ok(c) => c,
+                    Err(_) => {
+                        if rx.has_changed().unwrap_or(false) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            };
+
+            if is_stale() || rx.has_changed().unwrap_or(false) {
+                if rx.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+
+            let Some(player) = engine.player_clone() else {
+                break;
+            };
+            let eng_sb = engine.clone();
+            let cmd_sb = cmd.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if cmd_sb.cancel_token.is_cancelled()
+                    || cmd_sb
+                        .eff_epoch
+                        .is_some_and(|ep| ep < eng_sb.last_caller_epoch.load(Ordering::SeqCst))
+                {
+                    return;
+                }
+                let _ = match candidate {
+                    ResolvedPlaybackCandidate::SourceSpec { spec, source_label } => {
+                        let track_meta = parse_deck_track_metadata(&cmd_sb.payload, Some(&spec));
+                        let label_opt =
+                            (source_label != "Local Library").then_some(source_label.as_str());
+                        player.prepare_standby_spec_with_label_and_metadata(
+                            spec,
+                            label_opt,
+                            track_meta,
+                        )
+                    }
+                    ResolvedPlaybackCandidate::Legacy {
+                        stream,
+                        source_label,
+                    } => {
+                        let track_meta = parse_deck_track_metadata(&cmd_sb.payload, None);
+                        player.prepare_standby_with_metadata(stream, source_label, track_meta)
+                    }
+                };
+            })
+            .await;
+
+            if rx.has_changed().unwrap_or(false) {
+                continue;
+            }
+            break;
+        }
     }
 }
 
@@ -396,12 +1009,30 @@ pub extern "C" fn lumina_playback_play_async(
         if !engine.accept_caller_epoch(hints.caller_epoch) {
             return Ok(LUMINA_OK);
         }
-        let _ = crate::l2_cache::ensure_default_l2_cache_manager(&engine);
 
-        let cancel_token = CancellationToken::new();
+        let Some(player) = engine.player_clone() else {
+            set_last_error("Audio player not initialized");
+            return Ok(LUMINA_ERR_NOT_INITIALIZED);
+        };
+
+        // Non-blocking skip transition (<0.1ms): keeps WASAPI alive in silence, zero jh.join().
+        let (player_play_ep, cancel_token, task_epoch) = if let Some(ep) = hints.caller_epoch {
+            let tok = CancellationToken::new();
+            let Some(play_ep) = player.begin_skip_transition_with_epoch(ep, tok.clone()) else {
+                return Ok(LUMINA_OK);
+            };
+            let eff_ep = engine.sync_playback_epoch_from_player(&player, ep);
+            (play_ep, tok, eff_ep)
+        } else {
+            let (play_ep, tok) = player.begin_skip_transition();
+            let eff_ep = engine.advance_after_epochless_skip(&player);
+            (play_ep, tok, eff_ep)
+        };
+
         engine.swap_play_cancel_token(cancel_token.clone());
+        engine.cancel_active_standby_token();
+        let _ = engine.standby_cmd_tx.send_replace(None);
         let generation = engine.async_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        engine.play_request_id.store(0, Ordering::SeqCst);
         engine.loaded_request_id.store(0, Ordering::SeqCst);
         engine.play_request_id.store(request_id, Ordering::SeqCst);
         if let Ok(mut err_lock) = engine.async_last_error.write() {
@@ -414,6 +1045,7 @@ pub extern "C" fn lumina_playback_play_async(
             *prov_lock = None;
         }
         let _ = take_last_error();
+        let _ = player.take_last_error();
         engine.has_real_stream.store(false, Ordering::SeqCst);
         engine.position_ms.store(0, Ordering::Relaxed);
         engine.duration_ms.store(hints.duration_ms, Ordering::Relaxed);
@@ -423,218 +1055,22 @@ pub extern "C" fn lumina_playback_play_async(
             *lock = Some(payload.clone());
         }
 
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
-            player.stop();
-            let _ = player.take_last_error();
-        }
+        let now_ms = engine.elapsed_ms_since_start();
+        let prev_ms = engine.last_play_dispatch_ms.swap(now_ms, Ordering::SeqCst);
+        let rapid_within_300ms =
+            prev_ms > 0 && now_ms.saturating_sub(prev_ms) <= ADAPTIVE_RAPID_WINDOW_MS;
 
-        let task_epoch = engine.advance_epoch(hints.caller_epoch);
-        let player_play_ep = if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
-            let Some(ep) = player.begin_source_epoch(task_epoch, cancel_token.clone()) else {
-                return Ok(LUMINA_OK);
-            };
-            ep
-        } else {
-            set_last_error("Audio player not initialized");
-            return Ok(LUMINA_ERR_NOT_INITIALIZED);
-        };
-
-        let engine_bg = engine.clone();
-        engine.runtime.spawn(async move {
-            let is_stale = || {
-                engine_bg.async_generation.load(Ordering::SeqCst) != generation
-                    || engine_bg.play_request_id.load(Ordering::SeqCst) != request_id
-                    || engine_bg.current_epoch() != task_epoch
-                    || cancel_token.is_cancelled()
-            };
-
-            if is_stale() {
-                return;
-            }
-
-            let candidate = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => return,
-                res = resolve_candidate_async(&engine_bg, &payload) => match res {
-                    Ok(c) => c,
-                    Err(msg) => {
-                        fail_async_if_current(&engine_bg, generation, request_id, task_epoch, &cancel_token, msg);
-                        return;
-                    }
-                }
-            };
-
-            if is_stale() {
-                return;
-            }
-
-            let label = match &candidate {
-                ResolvedPlaybackCandidate::SourceSpec { source_label, .. }
-                | ResolvedPlaybackCandidate::Legacy { source_label, .. } => source_label.clone(),
-            };
-
-            let open_cancel = cancel_token.clone();
-            let open_res: Result<(OpenedStreamDecoder, Option<StreamSourceSpec>), CoreAudioError> =
-                match &candidate {
-                    ResolvedPlaybackCandidate::SourceSpec { spec, .. } => {
-                        let player_opt = engine_bg.player.read().ok().and_then(|g| g.clone());
-                        match player_opt {
-                            Some(player) => tokio::select! {
-                                biased;
-                                _ = cancel_token.cancelled() => return,
-                                res = player.open_source_spec_async_with_l2(
-                                    spec.clone(),
-                                    open_cancel.clone(),
-                                    None,
-                                ) => res.map(|(dec, adopted)| (dec, Some(adopted))),
-                            },
-                            None => {
-                                fail_async_if_current(
-                                    &engine_bg,
-                                    generation,
-                                    request_id,
-                                    task_epoch,
-                                    &cancel_token,
-                                    "Audio player not initialized".to_string(),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    ResolvedPlaybackCandidate::Legacy { stream, .. } => {
-                        tokio::select! {
-                            biased;
-                            _ = cancel_token.cancelled() => return,
-                            res = AudioPlayer::open_stream_async(
-                                stream.clone(),
-                                open_cancel,
-                                Duration::from_secs(10),
-                            ) => res.map(|dec| (dec, None)),
-                        }
-                    }
-                };
-
-            let (decoder, adopted_spec) = match open_res {
-                Ok(pair) => pair,
-                Err(e) => {
-                    let (err_code, err_provider, err_msg) = match &e {
-                        CoreAudioError::Decoder(DecoderError::StreamAuthRequired {
-                            provider_id,
-                            status,
-                        }) => (
-                            Some("AUTH_REQUIRED".to_string()),
-                            Some(provider_id.clone()),
-                            format!(
-                                "Authentication required for {provider_id} (HTTP {status})"
-                            ),
-                        ),
-                        _ => (None, None, format!("Failed to open stream ({label}): {e}")),
-                    };
-                    fail_async_if_current_with_code(
-                        &engine_bg,
-                        generation,
-                        request_id,
-                        task_epoch,
-                        &cancel_token,
-                        err_msg,
-                        err_code,
-                        err_provider,
-                    );
-                    return;
-                }
-            };
-
-            if is_stale() {
-                return;
-            }
-
-            let _ = tokio::task::spawn_blocking(move || {
-                let is_stale_blocking = || {
-                    engine_bg.async_generation.load(Ordering::SeqCst) != generation
-                        || engine_bg.play_request_id.load(Ordering::SeqCst) != request_id
-                        || engine_bg.current_epoch() != task_epoch
-                        || cancel_token.is_cancelled()
-                };
-
-                let _commit_guard = engine_bg
-                    .async_commit_lock
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if is_stale_blocking() {
-                    return;
-                }
-
-                if let Ok(player_guard) = engine_bg.player.read()
-                    && let Some(ref player) = *player_guard
-                {
-                    let start_res = match &candidate {
-                        ResolvedPlaybackCandidate::SourceSpec { spec, source_label } => {
-                            let effective_spec = adopted_spec.as_ref().unwrap_or(spec);
-                            player.start_opened_source_spec(
-                                effective_spec,
-                                decoder,
-                                source_label,
-                                player_play_ep,
-                                cancel_token.clone(),
-                            )
-                        }
-                        ResolvedPlaybackCandidate::Legacy {
-                            stream,
-                            source_label,
-                        } => player.start_opened_decoder_with_epoch(
-                            stream,
-                            decoder,
-                            source_label,
-                            player_play_ep,
-                            cancel_token.clone(),
-                        ),
-                    };
-                    if let Err(e) = start_res {
-                        let msg = format!("Failed to play stream ({label}): {e}");
-                        if !is_stale_blocking() {
-                            if let Ok(mut err_lock) = engine_bg.async_last_error.write() {
-                                *err_lock = Some(msg.clone());
-                            }
-                            set_last_error(msg);
-                            engine_bg.has_real_stream.store(false, Ordering::SeqCst);
-                            engine_bg.playback_state.store(4, Ordering::SeqCst);
-                            engine_bg
-                                .loaded_request_id
-                                .store(request_id, Ordering::SeqCst);
-                        }
-                        return;
-                    }
-                    if is_stale_blocking() {
-                        player.stop();
-                        return;
-                    }
-                    engine_bg.has_real_stream.store(true, Ordering::SeqCst);
-                    engine_bg
-                        .duration_ms
-                        .store(player.duration_ms(), Ordering::Relaxed);
-                    engine_bg.position_ms.store(0, Ordering::Relaxed);
-                    engine_bg.playback_state.store(2, Ordering::SeqCst);
-                    engine_bg
-                        .loaded_request_id
-                        .store(request_id, Ordering::SeqCst);
-                } else {
-                    if let Ok(mut err_lock) = engine_bg.async_last_error.write() {
-                        *err_lock = Some("Audio player not initialized".to_string());
-                    }
-                    set_last_error("Audio player not initialized");
-                    engine_bg.has_real_stream.store(false, Ordering::SeqCst);
-                    engine_bg.playback_state.store(4, Ordering::SeqCst);
-                    engine_bg
-                        .loaded_request_id
-                        .store(request_id, Ordering::SeqCst);
-                }
-            })
-            .await;
-        });
+        ensure_playback_loaders_started(&engine);
+        let _ = engine.play_cmd_tx.send_replace(Some(PlayDispatchCmd {
+            payload,
+            request_id,
+            generation,
+            task_epoch,
+            player_play_ep,
+            cancel_token,
+            debounced: hints.debounced,
+            rapid_within_300ms,
+        }));
 
         Ok(LUMINA_OK)
     })
@@ -655,31 +1091,40 @@ fn resolve_candidate_sync(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lumina_playback_cancel_pending(min_request_id: u64) -> c_int {
+pub extern "C" fn lumina_playback_cancel_pending(epoch: u64) -> c_int {
     catch_unwind_ffi(
         LUMINA_ERR_GENERAL,
         "lumina_playback_cancel_pending",
         || {
             let engine = get_engine();
-            let active_id = engine.play_request_id.load(Ordering::SeqCst);
-            let loaded_id = engine.loaded_request_id.load(Ordering::SeqCst);
-            if active_id > loaded_id && active_id >= min_request_id {
-                engine.async_generation.fetch_add(1, Ordering::SeqCst);
-                engine.cancel_active_play_token();
-                engine.advance_epoch(None);
-                let _commit_guard = engine
-                    .async_commit_lock
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                engine.loaded_request_id.store(active_id, Ordering::SeqCst);
-                engine.has_real_stream.store(false, Ordering::SeqCst);
-                engine.playback_state.store(1, Ordering::SeqCst);
-                if let Ok(player_guard) = engine.player.read()
-                    && let Some(ref player) = *player_guard
-                {
-                    player.stop();
-                }
+            if epoch > 0 && !engine.accept_caller_epoch(Some(epoch)) {
+                return Ok(LUMINA_OK);
             }
+
+            engine.async_generation.fetch_add(1, Ordering::SeqCst);
+            engine.clear_pending_commands();
+            engine.cancel_active_standby_token();
+
+            if let Some(player) = engine.player_clone() {
+                if epoch > 0 {
+                    let fresh = CancellationToken::new();
+                    let _ = player.begin_skip_transition_with_epoch(epoch, fresh.clone());
+                    engine.sync_playback_epoch_from_player(&player, epoch);
+                    engine.swap_play_cancel_token(fresh);
+                } else {
+                    let (_, fresh) = player.begin_skip_transition();
+                    let _ = engine.advance_after_epochless_skip(&player);
+                    engine.swap_play_cancel_token(fresh);
+                }
+            } else {
+                engine.cancel_active_play_token();
+                engine.advance_playback_epoch((epoch > 0).then_some(epoch));
+            }
+
+            let active_id = engine.play_request_id.load(Ordering::SeqCst);
+            engine.loaded_request_id.store(active_id, Ordering::SeqCst);
+            engine.has_real_stream.store(false, Ordering::SeqCst);
+            engine.playback_state.store(1, Ordering::SeqCst);
             Ok(LUMINA_OK)
         },
     )
@@ -746,53 +1191,19 @@ pub extern "C" fn lumina_playback_prepare_standby_async(
                 }
             }
 
-            let _ = crate::l2_cache::ensure_default_l2_cache_manager(&engine);
-
-            if let Some(spec) = hints.source_spec {
-                let Ok(player_guard) = engine.player.read() else {
-                    set_last_error("Audio player lock poisoned");
-                    return Ok(LUMINA_ERR_GENERAL);
-                };
-                let Some(ref player) = *player_guard else {
-                    set_last_error("Audio player not initialized");
-                    return Ok(LUMINA_ERR_NOT_INITIALIZED);
-                };
-                if let Err(e) = player.prepare_standby_spec(spec) {
-                    set_last_error(format!("Failed to prepare standby spec: {e}"));
-                    return Ok(LUMINA_ERR_AUDIO_BACKEND);
-                }
-                return Ok(LUMINA_OK);
+            if engine.player_clone().is_none() {
+                set_last_error("Audio player not initialized");
+                return Ok(LUMINA_ERR_NOT_INITIALIZED);
             }
 
-            let engine_bg = engine.clone();
-            engine.runtime.spawn(async move {
-                if let Some(ep) = eff_epoch
-                    && ep < engine_bg.last_caller_epoch.load(Ordering::SeqCst)
-                {
-                    return;
-                }
-                let Ok(candidate) = resolve_candidate_async(&engine_bg, &payload).await else {
-                    return;
-                };
-                if let Some(ep) = eff_epoch
-                    && ep < engine_bg.last_caller_epoch.load(Ordering::SeqCst)
-                {
-                    return;
-                }
-                if let Ok(player_guard) = engine_bg.player.read()
-                    && let Some(ref player) = *player_guard
-                {
-                    let _ = match candidate {
-                        ResolvedPlaybackCandidate::SourceSpec { spec, .. } => {
-                            player.prepare_standby_spec(spec)
-                        }
-                        ResolvedPlaybackCandidate::Legacy {
-                            stream,
-                            source_label,
-                        } => player.prepare_standby(stream, source_label),
-                    };
-                }
-            });
+            let cancel_token = CancellationToken::new();
+            engine.swap_standby_cancel_token(cancel_token.clone());
+            ensure_playback_loaders_started(&engine);
+            let _ = engine.standby_cmd_tx.send_replace(Some(StandbyDispatchCmd {
+                payload,
+                eff_epoch,
+                cancel_token,
+            }));
 
             Ok(LUMINA_OK)
         },
@@ -810,17 +1221,26 @@ pub extern "C" fn lumina_playback_skip_to_standby() -> c_int {
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         }
 
-        let Ok(player_guard) = engine.player.read() else {
-            set_last_error("Audio player lock poisoned");
-            return Ok(LUMINA_ERR_GENERAL);
-        };
-        let Some(ref player) = *player_guard else {
+        let Some(player) = engine.player_clone() else {
             set_last_error("Audio player not initialized");
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         };
 
+        engine.cancel_active_play_token();
+        engine.cancel_active_standby_token();
+        engine.clear_pending_commands();
+        engine.async_generation.fetch_add(1, Ordering::SeqCst);
+
         match player.skip_to_standby() {
             Ok(true) => {
+                let bumped = engine.advance_playback_epoch(None);
+                let _ = engine.sync_playback_epoch_from_player(&player, bumped);
+                if let Some(meta) = player.active_track_metadata()
+                    && let Ok(meta_json) = serde_json::to_string(&meta)
+                    && let Ok(mut lock) = engine.active_track_json.write()
+                {
+                    *lock = Some(meta_json);
+                }
                 engine.has_real_stream.store(true, Ordering::SeqCst);
                 engine
                     .duration_ms
@@ -852,13 +1272,13 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
         }
 
         if track_json.is_null() {
+            engine.clear_pending_commands();
             engine.cancel_active_play_token();
+            engine.cancel_active_standby_token();
             engine.async_generation.fetch_add(1, Ordering::SeqCst);
             engine.play_request_id.store(0, Ordering::SeqCst);
             engine.loaded_request_id.store(0, Ordering::SeqCst);
-            if let Ok(player_guard) = engine.player.read()
-                && let Some(ref player) = *player_guard
-            {
+            if let Some(player) = engine.player_clone() {
                 let state = player.state_code();
                 if state == 3 {
                     player.resume();
@@ -883,33 +1303,7 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
                     engine.playback_state.store(2, Ordering::SeqCst);
                     return Ok(LUMINA_OK);
                 }
-            }
-            if engine.has_real_stream.load(Ordering::SeqCst)
-                && let Ok(player_guard) = engine.player.read()
-                && let Some(ref player) = *player_guard
-            {
-                let state = player.state_code();
-                if state == 3 {
-                    player.resume();
-                    engine.playback_state.store(2, Ordering::SeqCst);
-                    return Ok(LUMINA_OK);
-                }
-                if state == 8 {
-                    player.seek_ms(0);
-                    player.resume();
-                    engine.position_ms.store(0, Ordering::Relaxed);
-                    engine.playback_state.store(2, Ordering::SeqCst);
-                    return Ok(LUMINA_OK);
-                }
-                if state == 2 {
-                    engine.playback_state.store(2, Ordering::SeqCst);
-                    return Ok(LUMINA_OK);
-                }
-            }
-            if let Ok(player_guard) = engine.player.read()
-                && let Some(ref player) = *player_guard
-            {
-                engine.advance_epoch(None);
+                let bumped = engine.advance_playback_epoch(None);
                 let stream = StreamSource::synth("trk-001", "Time", 245_000);
                 if let Err(e) = player.play_stream(stream, "Lumina Demo Synth") {
                     engine.has_real_stream.store(false, Ordering::SeqCst);
@@ -917,6 +1311,7 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
                     set_last_error(format!("Failed to play demo stream: {e}"));
                     return Ok(LUMINA_ERR_AUDIO_BACKEND);
                 }
+                let _ = engine.sync_playback_epoch_from_player(&player, bumped);
                 engine.has_real_stream.store(true, Ordering::SeqCst);
                 engine
                     .duration_ms
@@ -951,7 +1346,9 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
         let _ = crate::l2_cache::ensure_default_l2_cache_manager(&engine);
 
         let cancel_token = CancellationToken::new();
+        engine.clear_pending_commands();
         engine.swap_play_cancel_token(cancel_token.clone());
+        engine.cancel_active_standby_token();
         engine.async_generation.fetch_add(1, Ordering::SeqCst);
         engine.play_request_id.store(0, Ordering::SeqCst);
         engine.loaded_request_id.store(0, Ordering::SeqCst);
@@ -965,9 +1362,7 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
             *prov_lock = None;
         }
         let _ = take_last_error();
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        if let Some(player) = engine.player_clone() {
             let _ = player.take_last_error();
         }
         if let Ok(mut lock) = engine.active_track_json.write() {
@@ -987,26 +1382,30 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
             }
         };
 
-        let _commit_guard = engine
-            .async_commit_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
-            let task_epoch = engine.advance_epoch(hints.caller_epoch);
+        if let Some(player) = engine.player_clone() {
+            let task_epoch = engine.advance_playback_epoch(hints.caller_epoch);
             let label = match &candidate {
                 ResolvedPlaybackCandidate::SourceSpec { source_label, .. }
                 | ResolvedPlaybackCandidate::Legacy { source_label, .. } => source_label.clone(),
             };
             let play_res = match candidate {
                 ResolvedPlaybackCandidate::SourceSpec { spec, source_label } => {
-                    player.play_source_spec_with_label(spec, &source_label, task_epoch, cancel_token)
+                    let track_meta = parse_deck_track_metadata(s, Some(&spec));
+                    player.play_source_spec_with_metadata(
+                        spec,
+                        &source_label,
+                        task_epoch,
+                        cancel_token,
+                        track_meta,
+                    )
                 }
                 ResolvedPlaybackCandidate::Legacy {
                     stream,
                     source_label,
-                } => player.play_stream(stream, &source_label),
+                } => {
+                    let track_meta = parse_deck_track_metadata(s, None);
+                    player.play_stream_with_metadata(stream, &source_label, track_meta)
+                }
             };
             if let Err(e) = play_res {
                 let (err_code, err_provider, msg) = match &e {
@@ -1038,6 +1437,7 @@ pub extern "C" fn lumina_playback_play(track_json: *const c_char) -> c_int {
                 set_last_error(msg);
                 return Ok(LUMINA_ERR_AUDIO_BACKEND);
             }
+            let _ = engine.sync_playback_epoch_from_player(&player, task_epoch);
             engine.has_real_stream.store(true, Ordering::SeqCst);
             engine
                 .duration_ms
@@ -1063,8 +1463,7 @@ pub extern "C" fn lumina_playback_pause() -> c_int {
         }
 
         if engine.has_real_stream.load(Ordering::SeqCst)
-            && let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
+            && let Some(player) = engine.player_clone()
         {
             player.pause();
             engine
@@ -1086,19 +1485,17 @@ pub extern "C" fn lumina_playback_stop() -> c_int {
         }
 
         engine.async_generation.fetch_add(1, Ordering::SeqCst);
+        engine.clear_pending_commands();
         engine.cancel_active_play_token();
-        engine.advance_epoch(None);
-        let _commit_guard = engine
-            .async_commit_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        engine
-            .loaded_request_id
-            .store(engine.play_request_id.load(Ordering::SeqCst), Ordering::SeqCst);
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        engine.cancel_active_standby_token();
+        let bumped = engine.advance_playback_epoch(None);
+        engine.loaded_request_id.store(
+            engine.play_request_id.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+        if let Some(player) = engine.player_clone() {
             player.stop();
+            let _ = engine.sync_playback_epoch_from_player(&player, bumped);
         }
 
         if let Ok(mut err_lock) = engine.async_last_error.write() {
@@ -1119,9 +1516,7 @@ pub extern "C" fn lumina_playback_resume() -> c_int {
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         }
 
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        if let Some(player) = engine.player_clone() {
             player.resume();
             engine.playback_state.store(2, Ordering::SeqCst);
             return Ok(LUMINA_OK);
@@ -1140,9 +1535,7 @@ pub extern "C" fn lumina_playback_seek(position_ms: u64) -> c_int {
             return Ok(LUMINA_ERR_NOT_INITIALIZED);
         }
 
-        if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        if let Some(player) = engine.player_clone() {
             let state = player.state_code();
             if state == 0 || state == 4 {
                 set_last_error("Cannot seek in uninitialized or error state");
@@ -1170,9 +1563,7 @@ pub extern "C" fn lumina_playback_reconnect_device() -> c_int {
                 return Ok(LUMINA_ERR_NOT_INITIALIZED);
             }
 
-            if let Ok(guard) = engine.player.read()
-                && let Some(ref player) = *guard
-            {
+            if let Some(player) = engine.player_clone() {
                 let _ = player.take_last_error();
                 if let Ok(mut lock) = engine.async_last_error.write() {
                     *lock = None;
@@ -1205,6 +1596,7 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
         let engine = get_engine();
         let play_request_id = engine.play_request_id.load(Ordering::SeqCst);
         let loaded_request_id = engine.loaded_request_id.load(Ordering::SeqCst);
+        let player_opt = engine.player_clone();
         let (
             mut state_code,
             mut state_name,
@@ -1221,9 +1613,7 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             mut last_error_provider,
             device_lost,
             dual_deck,
-        ) = if let Ok(player_guard) = engine.player.read()
-            && let Some(ref player) = *player_guard
-        {
+        ) = if let Some(ref player) = player_opt {
             let code = player.state_code();
             let name = player.state_name();
             let pos = player.position_ms();
@@ -1302,14 +1692,15 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             )
         };
 
-        if play_request_id > loaded_request_id {
+        let engine_state = engine.playback_state.load(Ordering::SeqCst);
+        let has_real_stream = engine.has_real_stream.load(Ordering::SeqCst);
+        let is_loading = play_request_id > loaded_request_id;
+        if is_loading {
             state_code = 5;
             state_name = "Loading";
             position_ms = 0;
             duration_ms = engine.duration_ms.load(Ordering::Relaxed);
-        } else if !engine.has_real_stream.load(Ordering::SeqCst)
-            && engine.playback_state.load(Ordering::SeqCst) == 4
-        {
+        } else if !has_real_stream && engine_state == 4 {
             state_code = 4;
             state_name = "Error";
             duration_ms = 0;
@@ -1328,22 +1719,56 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             {
                 last_error_provider = g.clone();
             }
+        } else if !has_real_stream && engine_state == 1 {
+            state_code = 1;
+            state_name = "Stopped";
+            position_ms = 0;
         }
 
-        let current_track_id = engine.active_track_json.read().ok().and_then(|g| {
-            g.as_ref().and_then(|raw| {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
-                    val.get("id")
-                        .or_else(|| val.get("external_track_id"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                } else if !raw.trim().is_empty() && !raw.contains('{') {
-                    Some(raw.trim().to_string())
-                } else {
-                    None
+        let active_track_raw = engine.active_track_json.read().ok().and_then(|g| g.clone());
+        let current_track = if is_loading {
+            active_track_raw
+                .as_deref()
+                .and_then(|raw| parse_deck_track_metadata(raw, None))
+                .map(|mut t| {
+                    if duration_ms > 0 {
+                        t.duration_ms = duration_ms;
+                    }
+                    t
+                })
+        } else if !has_real_stream && (engine_state == 1 || engine_state == 4) {
+            None
+        } else {
+            dual_deck.active_track.clone().map(|mut t| {
+                if duration_ms > 0 {
+                    t.duration_ms = duration_ms;
                 }
+                t
             })
+        };
+
+        let fallback_track_id = active_track_raw.as_deref().and_then(|raw| {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+                val.get("track_id")
+                    .or_else(|| val.get("id"))
+                    .or_else(|| val.get("external_track_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            } else if !raw.trim().is_empty() && !raw.contains('{') {
+                Some(raw.trim().to_string())
+            } else {
+                None
+            }
         });
+
+        let current_track_id = current_track
+            .as_ref()
+            .map(|t| t.track_id.clone())
+            .filter(|id| !id.is_empty())
+            .or(fallback_track_id);
+
+        let playback_epoch = engine.current_playback_epoch().max(dual_deck.playback_epoch);
+        let epoch = engine.current_epoch().max(playback_epoch);
 
         let json_val = serde_json::json!({
             "state_code": state_code,
@@ -1352,7 +1777,9 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             "duration_ms": duration_ms,
             "clock_source": clock_source,
             "seek_epoch": seek_epoch,
-            "epoch": engine.current_epoch(),
+            "epoch": epoch,
+            "playback_epoch": playback_epoch,
+            "playbackEpoch": playback_epoch,
             "is_seeking": is_seeking,
             "dsp_bypassed": dsp_bypassed,
             "strict_bit_perfect": strict_bit_perfect,
@@ -1362,6 +1789,9 @@ pub extern "C" fn lumina_playback_get_state_json() -> *mut c_char {
             "last_error_provider": last_error_provider,
             "device_lost": device_lost,
             "current_track_id": current_track_id,
+            "current_track": current_track,
+            "swap_generation": dual_deck.swap_generation,
+            "swapGeneration": dual_deck.swap_generation,
             "play_request_id": play_request_id,
             "loaded_request_id": loaded_request_id,
             "active_deck": dual_deck.active_deck.as_str(),
@@ -1421,8 +1851,7 @@ pub extern "C" fn lumina_playback_get_state() -> c_int {
     }
     if engine.initialized.load(Ordering::SeqCst)
         && engine.has_real_stream.load(Ordering::SeqCst)
-        && let Ok(player_guard) = engine.player.read()
-        && let Some(ref player) = *player_guard
+        && let Some(player) = engine.player_clone()
     {
         return player.state_code();
     }
@@ -1438,8 +1867,7 @@ pub extern "C" fn lumina_playback_get_position_ms() -> u64 {
     }
     if engine.initialized.load(Ordering::SeqCst)
         && engine.has_real_stream.load(Ordering::SeqCst)
-        && let Ok(player_guard) = engine.player.read()
-        && let Some(ref player) = *player_guard
+        && let Some(player) = engine.player_clone()
     {
         return player.position_ms();
     }
@@ -1451,8 +1879,7 @@ pub extern "C" fn lumina_playback_get_duration_ms() -> u64 {
     let engine = get_engine();
     if engine.initialized.load(Ordering::SeqCst)
         && engine.has_real_stream.load(Ordering::SeqCst)
-        && let Ok(player_guard) = engine.player.read()
-        && let Some(ref player) = *player_guard
+        && let Some(player) = engine.player_clone()
     {
         return player.duration_ms();
     }
@@ -1463,9 +1890,7 @@ pub extern "C" fn lumina_playback_get_duration_ms() -> u64 {
 pub extern "C" fn lumina_audio_list_devices() -> *mut c_char {
     catch_unwind_ffi(std::ptr::null_mut(), "lumina_audio_list_devices", || {
         let engine = get_engine();
-        let devices = if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        let devices = if let Some(p) = engine.player_clone() {
             p.list_output_devices()
         } else {
             let real = core_audio::enumerate_cpal_devices();
@@ -1507,9 +1932,7 @@ pub extern "C" fn lumina_audio_select_device(
         };
 
         let engine = get_engine();
-        if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        if let Some(p) = engine.player_clone() {
             if let Err(e) = p.select_output_device(dev_id.as_deref(), backend) {
                 set_last_error(e.to_string());
                 return Ok(LUMINA_ERR_AUDIO_BACKEND);
@@ -1523,7 +1946,7 @@ pub extern "C" fn lumina_audio_select_device(
             engine.runtime.block_on(
                 engine
                     .zone_manager
-                    .sync_local_zone_selected_device(dev_id.as_deref(), Some(p)),
+                    .sync_local_zone_selected_device(dev_id.as_deref(), Some(&p)),
             );
             Ok(LUMINA_OK)
         } else {
@@ -1540,9 +1963,7 @@ pub extern "C" fn lumina_audio_get_output_info() -> *mut c_char {
         "lumina_audio_get_output_info",
         || {
             let engine = get_engine();
-            let info = if let Ok(guard) = engine.player.read()
-                && let Some(ref p) = *guard
-            {
+            let info = if let Some(p) = engine.player_clone() {
                 p.output_info()
             } else {
                 AudioEngineOutputInfo::default()
@@ -1562,9 +1983,7 @@ pub extern "C" fn lumina_audio_list_device_capabilities() -> *mut c_char {
         "lumina_audio_list_device_capabilities",
         || {
             let engine = get_engine();
-            let caps_with_meta = if let Ok(guard) = engine.player.read()
-                && let Some(ref p) = *guard
-            {
+            let caps_with_meta = if let Some(p) = engine.player_clone() {
                 p.list_device_capabilities_with_meta()
             } else {
                 AudioDeviceManager::list_devices_with_meta()
@@ -1612,9 +2031,7 @@ pub extern "C" fn lumina_audio_set_buffer_frames(frames: u32) -> c_int {
         "lumina_audio_set_buffer_frames",
         || {
             let engine = get_engine();
-            if let Ok(guard) = engine.player.read()
-                && let Some(ref p) = *guard
-            {
+            if let Some(p) = engine.player_clone() {
                 if let Err(e) = p.set_preferred_buffer_frames(frames) {
                     set_last_error(e.to_string());
                     return Ok(LUMINA_ERR_AUDIO_BACKEND);
@@ -1633,9 +2050,7 @@ pub extern "C" fn lumina_audio_set_strict_mode(enabled: c_int) -> c_int {
     catch_unwind_ffi(LUMINA_ERR_GENERAL, "lumina_audio_set_strict_mode", || {
         let engine = get_engine();
         let on = enabled != 0;
-        if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        if let Some(p) = engine.player_clone() {
             p.set_strict_bit_perfect(on)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             engine
@@ -1662,9 +2077,7 @@ pub extern "C" fn lumina_audio_set_dsd_mode(mode: c_int) -> c_int {
             _ => DsdOutputMode::Auto,
         };
         let engine = get_engine();
-        if let Ok(guard) = engine.player.read()
-            && let Some(ref p) = *guard
-        {
+        if let Some(p) = engine.player_clone() {
             p.set_dsd_output_mode(dsd_mode)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             Ok(LUMINA_OK)

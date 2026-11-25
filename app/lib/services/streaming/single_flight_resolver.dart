@@ -54,17 +54,24 @@ final class RefreshAfter403AuthRequired extends RefreshAfter403Result {
   });
 }
 
-/// Re-resolution failed for a non-auth error (network, 403/404, DRM, cancel).
+/// Re-resolution failed for a non-auth error (network, 403/404/451, DRM, cancel).
 final class RefreshAfter403Failed extends RefreshAfter403Result {
   final String message;
   final int? statusCode;
   final bool isCancelled;
+  final StreamingErrorKind? errorKind;
 
   const RefreshAfter403Failed({
     required this.message,
     this.statusCode,
     this.isCancelled = false,
+    this.errorKind,
   });
+
+  bool get isRegionRestricted =>
+      errorKind == StreamingErrorKind.regionRestricted;
+
+  bool get isUnavailable => errorKind == StreamingErrorKind.trackUnavailable;
 }
 
 /// Composite Single-Flight deduplication key:
@@ -405,6 +412,16 @@ class SingleFlightResolver {
             message: e.message,
             statusCode: e.statusCode,
             isCancelled: true,
+            errorKind: e.kind,
+          );
+        }
+        if (e.isRegionRestricted || e.isUnavailable) {
+          // Geo-blocked / taken-down tracks are permanent per-track failures:
+          // never trigger token refresh or trip the provider auth breaker.
+          return RefreshAfter403Failed(
+            message: e.message,
+            statusCode: e.statusCode,
+            errorKind: e.kind,
           );
         }
         if (AuthManager.isUnauthorizedError(e)) {
@@ -412,6 +429,7 @@ class SingleFlightResolver {
             return RefreshAfter403Failed(
               message: e.message,
               statusCode: e.statusCode,
+              errorKind: e.kind,
             );
           }
           if (auth != null) {
@@ -437,6 +455,7 @@ class SingleFlightResolver {
         return RefreshAfter403Failed(
           message: e.message,
           statusCode: e.statusCode,
+          errorKind: e.kind,
         );
       } catch (e) {
         return RefreshAfter403Failed(message: e.toString());

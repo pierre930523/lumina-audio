@@ -426,6 +426,7 @@ class YtDlpService extends ChangeNotifier {
   final String? _injectedPathEnv;
   final HttpClient Function() _httpClientFactory;
   final YtDlpProcessStarter _processStarter;
+  final bool _useSystemProcessStarter;
   final String? _injectedLicenseFilePath;
   final DateTime Function() _clock;
   final Uri _latestReleaseApiUri;
@@ -476,6 +477,7 @@ class YtDlpService extends ChangeNotifier {
        _injectedPathEnv = pathEnv,
        _httpClientFactory = httpClientFactory ?? HttpClient.new,
        _processStarter = processStarter ?? Process.start,
+       _useSystemProcessStarter = processStarter == null,
        _injectedLicenseFilePath = licenseFilePath,
        _clock = clock ?? DateTime.now,
        _latestReleaseApiUri = latestReleaseApiUri ?? defaultLatestReleaseApiUri;
@@ -2055,8 +2057,13 @@ class YtDlpService extends ChangeNotifier {
 
   /// Immediately kills active foreground `yt-dlp.exe` AND active `ffmpeg.exe`
   /// transcoding processes whose request ID does not match [exceptRequestId].
+  /// When [exceptRequestId] is null (full stop/cancel), also cancels any
+  /// background preload process.
   void cancelPlaybackProcesses({int? exceptRequestId}) {
     _killForegroundProcess(exceptRequestId: exceptRequestId);
+    if (exceptRequestId == null) {
+      _killPreloadProcess();
+    }
     _ffmpegProxy?.cancel(exceptRequestId: exceptRequestId);
   }
 
@@ -2167,7 +2174,11 @@ class YtDlpService extends ChangeNotifier {
       ),
     );
 
-    final handle = _ManagedProcessHandle(process, requestId: requestId);
+    final handle = _ManagedProcessHandle(
+      process,
+      requestId: requestId,
+      killProcessTreeOnWindows: _useSystemProcessStarter,
+    );
     onHandleCreated?.call(handle);
 
     const maxStdoutBytes = 64 * 1024 * 1024;
@@ -2464,12 +2475,17 @@ class _ProcessCapture {
 class _ManagedProcessHandle {
   final Process process;
   final int? requestId;
+  final bool killProcessTreeOnWindows;
   final Completer<void> _abortCompleter = Completer<void>();
 
   bool _cancelled = false;
   bool _timedOut = false;
 
-  _ManagedProcessHandle(this.process, {this.requestId});
+  _ManagedProcessHandle(
+    this.process, {
+    this.requestId,
+    this.killProcessTreeOnWindows = false,
+  });
 
   bool get cancelled => _cancelled;
   bool get timedOut => _timedOut;
@@ -2494,6 +2510,20 @@ class _ManagedProcessHandle {
   }
 
   void _kill() {
+    if (killProcessTreeOnWindows && Platform.isWindows) {
+      final pid = process.pid;
+      if (pid > 0) {
+        try {
+          unawaited(
+            Process.run(
+              'taskkill',
+              <String>['/PID', '$pid', '/T', '/F'],
+              runInShell: false,
+            ).catchError((_) => ProcessResult(0, -1, '', '')),
+          );
+        } catch (_) {}
+      }
+    }
     try {
       process.kill();
     } catch (_) {}

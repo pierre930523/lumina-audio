@@ -1032,7 +1032,7 @@ impl AsioRenderCore {
         let drv_bps = asio_sample_bytes(self.sample_type);
         let src_bps = self.wire.bytes_per_sample();
         let wire_bpf = src_bps * self.channels.max(1);
-        let valid_frames = if wire_bpf > 0 { aligned / wire_bpf } else { 0 };
+        let valid_frames = aligned.checked_div(wire_bpf).unwrap_or(0);
         let tail_start_phase = self.dop_silence_phase;
         let mut tail_next_phase = tail_start_phase;
 
@@ -1432,49 +1432,48 @@ impl AsioRenderCore {
         if matches!(
             fade_target,
             FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
-        ) {
-            if let Some(ref fc) = self.fade_ctrl {
-                if !self.fade.fade_out_enabled() || self.fade.gain() <= 0.0 {
-                    self.fade.set_zero();
-                    fc.mark_fade_out_done();
-                    if fade_target == FadeTarget::SeekFadeOut {
-                        self.buffering_gate = self.startup_watermark_bytes > 0;
-                    }
-                    self.fill_half_buffer_silence(channel_buffers, idx);
-                    return true;
+        ) && let Some(ref fc) = self.fade_ctrl
+        {
+            if !self.fade.fade_out_enabled() || self.fade.gain() <= 0.0 {
+                self.fade.set_zero();
+                fc.mark_fade_out_done();
+                if fade_target == FadeTarget::SeekFadeOut {
+                    self.buffering_gate = self.startup_watermark_bytes > 0;
                 }
-                let aligned = self
-                    .consumer
-                    .pop_slice_aligned(&mut self.scratch[..needed_bytes], wire_bpf);
-                if aligned > 0 {
-                    apply_fade_ramp_to_wire_bytes(
-                        &mut self.scratch[..aligned],
-                        self.wire,
-                        self.channels,
-                        &mut self.fade,
-                        FadeDirection::Down,
-                    );
-                } else {
-                    self.fade.set_zero();
-                }
-                if self.fade.gain() <= 0.0 {
-                    fc.mark_fade_out_done();
-                    if fade_target == FadeTarget::SeekFadeOut {
-                        self.buffering_gate = self.startup_watermark_bytes > 0;
-                    }
-                }
-                if aligned > 0 {
-                    self.write_interleaved_to_planar(
-                        channel_buffers,
-                        idx,
-                        aligned,
-                        frames_in_callback_bytes,
-                    );
-                } else {
-                    self.fill_half_buffer_silence(channel_buffers, idx);
-                }
+                self.fill_half_buffer_silence(channel_buffers, idx);
                 return true;
             }
+            let aligned = self
+                .consumer
+                .pop_slice_aligned(&mut self.scratch[..needed_bytes], wire_bpf);
+            if aligned > 0 {
+                apply_fade_ramp_to_wire_bytes(
+                    &mut self.scratch[..aligned],
+                    self.wire,
+                    self.channels,
+                    &mut self.fade,
+                    FadeDirection::Down,
+                );
+            } else {
+                self.fade.set_zero();
+            }
+            if self.fade.gain() <= 0.0 {
+                fc.mark_fade_out_done();
+                if fade_target == FadeTarget::SeekFadeOut {
+                    self.buffering_gate = self.startup_watermark_bytes > 0;
+                }
+            }
+            if aligned > 0 {
+                self.write_interleaved_to_planar(
+                    channel_buffers,
+                    idx,
+                    aligned,
+                    frames_in_callback_bytes,
+                );
+            } else {
+                self.fill_half_buffer_silence(channel_buffers, idx);
+            }
+            return true;
         }
 
         // 4. Detect ring flush epoch change (post-seek) and re-arm watermark gate.

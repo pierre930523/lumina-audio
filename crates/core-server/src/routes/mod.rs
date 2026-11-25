@@ -59,7 +59,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(library::post_artwork_override).delete(library::delete_artwork_override),
         )
         .route("/api/v1/library/scan", post(library::post_scan_library))
+        .route("/api/v1/library/scan/start", post(library::post_scan_start))
         .route("/api/v1/library/rescan", post(library::post_rescan_library))
+        .route(
+            "/api/v1/library/watch",
+            get(library::get_watched_roots)
+                .post(library::post_watched_root)
+                .delete(library::delete_watched_root),
+        )
+        .route("/api/v1/library/skipped", get(library::get_skipped_files))
+        .route(
+            "/api/v1/library/skipped/{id}/dismiss",
+            post(library::post_dismiss_skipped_file),
+        )
+        .route(
+            "/api/v1/library/skipped/{id}/retry",
+            post(library::post_retry_skipped_file),
+        )
+        .route(
+            "/api/v1/library/overrides/{entity_type}/{entity_id}",
+            get(library::get_metadata_overrides).put(library::put_metadata_override),
+        )
+        .route(
+            "/api/v1/library/overrides/{entity_type}/{entity_id}/{field_name}",
+            delete(library::delete_metadata_override),
+        )
+        .route(
+            "/api/v1/library/ingest",
+            post(library::post_ingest_external_catalog),
+        )
         .route("/api/v1/library/search", get(library::search_library))
         .route("/api/v1/library/deduplicate", post(library::post_deduplicate))
         .route("/api/v1/library/enrich", post(library::post_enrich))

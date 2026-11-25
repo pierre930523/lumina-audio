@@ -30,10 +30,6 @@ class ArtistsView extends StatefulWidget {
 }
 
 class _ArtistsViewState extends State<ArtistsView> {
-  static const _cardBg = LuminaTokens.cardBg;
-  static const _dividerColor = LuminaTokens.borderControl;
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   List<ArtistIndexEntry> _artists = const [];
   bool _loading = true;
   String _search = '';
@@ -242,14 +238,18 @@ class _ArtistsViewState extends State<ArtistsView> {
                 color: LuminaTokens.textMuted,
               ),
               filled: true,
-              fillColor: _cardBg,
+              fillColor: LuminaTokens.glassPillBg,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                borderSide: const BorderSide(color: _dividerColor),
+                borderSide: const BorderSide(
+                  color: LuminaTokens.glassPillBorder,
+                ),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                borderSide: const BorderSide(color: _dividerColor),
+                borderSide: const BorderSide(
+                  color: LuminaTokens.glassPillBorder,
+                ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
@@ -275,7 +275,7 @@ class _ArtistsViewState extends State<ArtistsView> {
               ? const Center(
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: _accentBlue,
+                    color: LuminaTokens.glassTextPrimary,
                   ),
                 )
               : filtered.isEmpty
@@ -339,7 +339,6 @@ class _ArtistTile extends StatefulWidget {
 }
 
 class _ArtistTileState extends State<_ArtistTile> {
-  static const _accentBlue = LuminaTokens.accentBlue;
   bool _hovered = false;
 
   @override
@@ -347,10 +346,8 @@ class _ArtistTileState extends State<_ArtistTile> {
     final artist = widget.artist;
     final isSelected = widget.isSelected;
     final bgColor = isSelected
-        ? _accentBlue.withValues(alpha: 0.14)
-        : (_hovered
-              ? LuminaTokens.cardHoverBg.withValues(alpha: 0.75)
-              : Colors.transparent);
+        ? LuminaTokens.glassNavActiveBg
+        : (_hovered ? LuminaTokens.glassRowHoverBg : Colors.transparent);
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -380,9 +377,9 @@ class _ArtistTileState extends State<_ArtistTile> {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
                 color: isSelected
-                    ? _accentBlue.withValues(alpha: 0.55)
+                    ? LuminaTokens.glassCoverRim
                     : (_hovered
-                          ? LuminaTokens.borderControl
+                          ? LuminaTokens.glassPillBorder
                           : Colors.transparent),
               ),
             ),
@@ -393,12 +390,13 @@ class _ArtistTileState extends State<_ArtistTile> {
                 height: 42,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: isSelected || _hovered
-                        ? [const Color(0xFF3730A3), _accentBlue]
-                        : [const Color(0xFF282B34), const Color(0xFF1E2028)],
+                  color: isSelected || _hovered
+                      ? LuminaTokens.glassNavActiveBg
+                      : LuminaTokens.glassPillBg,
+                  border: Border.all(
+                    color: isSelected || _hovered
+                        ? LuminaTokens.glassCoverRim
+                        : LuminaTokens.glassPillBorder,
                   ),
                 ),
                 child: Center(
@@ -409,7 +407,7 @@ class _ArtistTileState extends State<_ArtistTile> {
                     style: TextStyle(
                       color: isSelected || _hovered
                           ? Colors.white
-                          : Colors.white70,
+                          : LuminaTokens.glassTextSecondary,
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
                     ),
@@ -427,8 +425,8 @@ class _ArtistTileState extends State<_ArtistTile> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isSelected || _hovered
-                            ? _accentBlue
-                            : Colors.white,
+                            ? Colors.white
+                            : LuminaTokens.glassTextPrimary,
                         fontSize: 13.5,
                         fontWeight: isSelected || _hovered
                             ? FontWeight.w600
@@ -452,7 +450,7 @@ class _ArtistTileState extends State<_ArtistTile> {
                 Icons.chevron_right_rounded,
                 size: 18,
                 color: isSelected || _hovered
-                    ? _accentBlue
+                    ? Colors.white
                     : LuminaTokens.textMuted,
               ),
             ],

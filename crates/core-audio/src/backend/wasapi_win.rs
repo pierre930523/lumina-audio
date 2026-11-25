@@ -1,5 +1,8 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::ptr::null_mut;
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,11 +18,11 @@ use windows::Win32::Foundation::{
 use windows::Win32::Media::Audio::{
     eAll, eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, MMDeviceEnumerator, PKEY_AudioEndpoint_FormFactor,
-    AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_BUFFER_TOO_LARGE, AUDCLNT_E_DEVICE_INVALIDATED,
-    AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_NOT_STOPPED,
-    AUDCLNT_E_SERVICE_NOT_RUNNING, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
-    WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_BUFFER_TOO_LARGE,
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
+    AUDCLNT_E_NOT_STOPPED, AUDCLNT_E_SERVICE_NOT_RUNNING, AUDCLNT_SHAREMODE_EXCLUSIVE,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, DEVICE_STATE_ACTIVE,
+    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
 };
 use windows::Win32::Media::KernelStreaming::KSDATAFORMAT_SUBTYPE_PCM;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -146,7 +149,7 @@ pub fn build_waveformatextensible(
 
     WAVEFORMATEXTENSIBLE {
         Format: WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE,
             nChannels: ch,
             nSamplesPerSec: rate,
             nAvgBytesPerSec: avg_bytes_per_sec,
@@ -207,6 +210,9 @@ fn classify_transport(name: &str, enumerator: Option<&str>, form_factor: Option<
 
 /// Strictly checks `IAudioClient::IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, ...)`.
 /// Returns `true` ONLY if COM returns exact `S_OK` (`0`). Never accepts `S_FALSE` closest match!
+///
+/// # Safety
+/// `client` must be a valid initialized COM `IAudioClient` pointer on a COM-initialized thread.
 pub unsafe fn is_exclusive_format_exact_ok(
     client: &IAudioClient,
     rate: u32,
@@ -430,7 +436,7 @@ pub fn probe_wasapi_endpoints() -> Vec<WasapiEndpointProbe> {
 }
 
 /// Parameters required to open a native WASAPI Exclusive event-driven stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasapiExclusiveOpenSpec {
     pub device_id: Option<String>,
     pub sample_rate: u32,
@@ -721,6 +727,25 @@ impl WasapiStreamOps for RealWasapiStreamOps {
     }
 }
 
+/// Lock-free hot-swap payload allowing a live WASAPI Exclusive `IAudioClient` session to adopt
+/// a new track's ring buffer without stopping, dropping, or re-initializing the hardware driver.
+pub struct WasapiHotSwapPayload {
+    pub consumer: Consumer<u8>,
+    pub ver_tap: VerificationTapProducer,
+    pub watermark_bytes: usize,
+    pub eof_flag: Arc<AtomicBool>,
+    pub fade_ctrl: Option<Arc<AudioFadeControl>>,
+    pub session_id: u64,
+    pub expected_format_stamp: u64,
+}
+
+const WASAPI_SWAP_RETIRE_LEN: usize = 8;
+
+struct WasapiSwapEnvelope {
+    payload: WasapiHotSwapPayload,
+    expected_skip_seq: u64,
+}
+
 /// Shared synchronization & control block between `WasapiExclusiveSession` and the render thread.
 #[doc(hidden)]
 pub struct WasapiRenderControl {
@@ -738,6 +763,7 @@ pub struct WasapiRenderControl {
     pub state_code: Arc<AtomicI32>,
     pub last_error: Arc<RwLock<Option<String>>>,
     pub session_id: u64,
+    pub active_session_id: AtomicU64,
     pub current_session_id: Arc<AtomicU64>,
     pub flush_req_seq: AtomicU64,
     pub flush_ack_seq: AtomicU64,
@@ -750,6 +776,25 @@ pub struct WasapiRenderControl {
     pub published_format_stamp: Arc<AtomicU64>,
     pub expected_format_stamp: u64,
     pub wait_timeout_ms: AtomicU32,
+    pub skip_silence: AtomicBool,
+    pub skip_fade_requested: AtomicBool,
+    skip_silence_seq: AtomicU64,
+    loop_exited: AtomicBool,
+    swap_inbox: AtomicPtr<WasapiSwapEnvelope>,
+    retire_ring: [AtomicPtr<WasapiSwapEnvelope>; WASAPI_SWAP_RETIRE_LEN],
+    retire_head: AtomicUsize,
+}
+
+impl Drop for WasapiRenderControl {
+    fn drop(&mut self) {
+        let pending = self.swap_inbox.swap(null_mut(), Ordering::AcqRel);
+        if !pending.is_null() {
+            unsafe {
+                drop(Box::from_raw(pending));
+            }
+        }
+        self.drain_retired_swaps();
+    }
 }
 
 impl WasapiRenderControl {
@@ -782,6 +827,7 @@ impl WasapiRenderControl {
             state_code,
             last_error,
             session_id,
+            active_session_id: AtomicU64::new(session_id),
             current_session_id,
             flush_req_seq: AtomicU64::new(0),
             flush_ack_seq: AtomicU64::new(0),
@@ -794,6 +840,13 @@ impl WasapiRenderControl {
             published_format_stamp: Arc::new(AtomicU64::new(0)),
             expected_format_stamp: 0,
             wait_timeout_ms: AtomicU32::new(100),
+            skip_silence: AtomicBool::new(false),
+            skip_fade_requested: AtomicBool::new(false),
+            skip_silence_seq: AtomicU64::new(0),
+            loop_exited: AtomicBool::new(false),
+            swap_inbox: AtomicPtr::new(null_mut()),
+            retire_ring: std::array::from_fn(|_| AtomicPtr::new(null_mut())),
+            retire_head: AtomicUsize::new(0),
         }
     }
 
@@ -868,7 +921,8 @@ impl WasapiRenderControl {
                 ));
             }
             if self.stopped.load(Ordering::Acquire)
-                || self.current_session_id.load(Ordering::Relaxed) != self.session_id
+                || self.current_session_id.load(Ordering::Relaxed)
+                    != self.active_session_id.load(Ordering::Acquire)
             {
                 return Err(BackendError::DriverError(
                     "WASAPI session stopped during flush".into(),
@@ -907,6 +961,130 @@ impl WasapiRenderControl {
     pub fn clock_position_ns(&self) -> Option<u64> {
         self.clock_state.clock_position_ns()
     }
+
+    /// Transitions the live WASAPI render loop into lock-free 5 ms micro-fade -> silent keep-alive
+    /// (`AUDCLNT_BUFFERFLAGS_SILENT` for PCM, wire-silence for DoP/DSD) without stopping or
+    /// tearing down `IAudioClient`.
+    pub fn enter_skip_silence(&self) {
+        self.skip_silence_seq.fetch_add(1, Ordering::SeqCst);
+        self.skip_fade_requested.store(true, Ordering::Release);
+        self.skip_silence.store(true, Ordering::SeqCst);
+        self.wake_event.signal();
+    }
+
+    pub fn is_skip_silence(&self) -> bool {
+        self.skip_silence.load(Ordering::Acquire)
+    }
+
+    pub fn is_loop_exited(&self) -> bool {
+        self.loop_exited.load(Ordering::Acquire)
+    }
+
+    /// Frees any retired hot-swap payloads off the real-time thread.
+    pub fn drain_retired_swaps(&self) {
+        for slot in &self.retire_ring {
+            let ptr = slot.swap(null_mut(), Ordering::AcqRel);
+            if !ptr.is_null() {
+                unsafe {
+                    drop(Box::from_raw(ptr));
+                }
+            }
+        }
+    }
+
+    /// Atomically publishes a new track's ring buffer into the running WASAPI render loop,
+    /// avoiding `IAudioClient` teardown/reopen when formats match.
+    ///
+    /// Returns `Err(payload)` if the render loop has already exited or lost the device (e.g.,
+    /// EOF TOCTOU), signaling the caller to tear down and reopen `IAudioClient` cleanly.
+    /// `skip_silence` is cleared strictly on the RT thread upon adoption only when no newer
+    /// `enter_skip_silence()` or `current_session_id` raced with this hot-swap.
+    pub fn try_push_hot_swap(
+        &self,
+        payload: WasapiHotSwapPayload,
+    ) -> Result<(), WasapiHotSwapPayload> {
+        self.drain_retired_swaps();
+        if self.stopped.load(Ordering::SeqCst)
+            || self.loop_exited.load(Ordering::SeqCst)
+            || self.device_lost.load(Ordering::SeqCst)
+        {
+            return Err(payload);
+        }
+        let new_session_id = payload.session_id;
+        let expected_skip_seq = self.skip_silence_seq.load(Ordering::SeqCst);
+        let boxed = Box::into_raw(Box::new(WasapiSwapEnvelope {
+            payload,
+            expected_skip_seq,
+        }));
+        let prev = self.swap_inbox.swap(boxed, Ordering::SeqCst);
+        if !prev.is_null() {
+            unsafe {
+                drop(Box::from_raw(prev));
+            }
+        }
+        self.wake_event.signal();
+
+        // Dekker mutual-visibility check against `try_commit_loop_exit` on the RT thread:
+        // if the render loop committed to exiting before seeing `boxed`, reclaim `boxed` via
+        // CAS and return `Err` so the caller reopens `IAudioClient` instead of stalling.
+        if (self.loop_exited.load(Ordering::SeqCst)
+            || self.stopped.load(Ordering::SeqCst)
+            || self.device_lost.load(Ordering::SeqCst))
+            && self
+                .swap_inbox
+                .compare_exchange(boxed, null_mut(), Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            let env = unsafe { Box::from_raw(boxed) };
+            return Err(env.payload);
+        }
+
+        self.active_session_id
+            .store(new_session_id, Ordering::Release);
+        self.eof_drained.store(false, Ordering::Release);
+        self.format_mismatch_flag.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Convenience wrapper over [`Self::try_push_hot_swap`] returning `true` when handed off
+    /// to a live render loop and `false` when the loop had already exited.
+    pub fn push_hot_swap(&self, payload: WasapiHotSwapPayload) -> bool {
+        self.try_push_hot_swap(payload).is_ok()
+    }
+
+    #[inline]
+    fn retire_swap_ptr_rt(&self, ptr: *mut WasapiSwapEnvelope) {
+        if ptr.is_null() {
+            return;
+        }
+        let idx = self.retire_head.fetch_add(1, Ordering::Relaxed) % WASAPI_SWAP_RETIRE_LEN;
+        let displaced = self.retire_ring[idx].swap(ptr, Ordering::AcqRel);
+        let _ = displaced;
+    }
+}
+
+#[inline]
+fn try_commit_loop_exit(ctrl: &WasapiRenderControl) -> bool {
+    ctrl.loop_exited.store(true, Ordering::SeqCst);
+    if !ctrl.stopped.load(Ordering::SeqCst)
+        && !ctrl.device_lost.load(Ordering::SeqCst)
+        && (!ctrl.swap_inbox.load(Ordering::SeqCst).is_null()
+            || ctrl.skip_silence.load(Ordering::SeqCst))
+    {
+        ctrl.loop_exited.store(false, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
+struct LoopExitGuard<'a>(&'a WasapiRenderControl);
+
+impl Drop for LoopExitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.loop_exited.store(true, Ordering::SeqCst);
+        self.0.stopped.store(true, Ordering::SeqCst);
+        wake_all_flush_waiters(self.0);
+    }
 }
 
 #[inline]
@@ -938,13 +1116,13 @@ fn wake_all_flush_waiters(_ctrl: &WasapiRenderControl) {
 /// Lock-free real-time format stamp check. If the ring-buffer producer has switched to a
 /// different `WireFormatStamp`, sets `format_mismatch_flag` and forces silence output.
 #[inline]
-fn is_wasapi_format_mismatched(ctrl: &WasapiRenderControl) -> bool {
+fn is_wasapi_format_mismatched(ctrl: &WasapiRenderControl, expected_format_stamp: u64) -> bool {
     if ctrl.format_mismatch_flag.load(Ordering::Acquire) {
         return true;
     }
-    if ctrl.expected_format_stamp != 0 {
+    if expected_format_stamp != 0 {
         let published = ctrl.published_format_stamp.load(Ordering::Acquire);
-        if published != ctrl.expected_format_stamp {
+        if published != expected_format_stamp {
             ctrl.format_mismatch_flag.store(true, Ordering::Release);
             return true;
         }
@@ -961,7 +1139,7 @@ pub fn join_handle_bounded(handle: JoinHandle<()>, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(1));
     }
     let _ = handle.join();
     true
@@ -977,15 +1155,39 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
     scratch: &mut [u8],
     dop_phase: &mut bool,
     ctrl: &WasapiRenderControl,
+    active_eof_flag: &AtomicBool,
+    active_fade_ctrl: Option<&AudioFadeControl>,
+    active_expected_stamp: u64,
     buffering_gate: &mut bool,
     watermark_bytes: usize,
     fade: &mut LinearFadeState,
 ) -> Result<(), HRESULT> {
     let bytes_per_frame = spec.wire_format.bytes_per_sample() * (spec.channels.max(1) as usize);
     let needed = ((actual_frames as usize) * bytes_per_frame).min(scratch.len());
+    let is_dsd_or_dop = matches!(
+        spec.wire_format,
+        WireSampleFormat::Dop24In32MsbLe { .. } | WireSampleFormat::NativeDsd { .. }
+    );
 
     let ptr = ops.get_buffer(actual_frames)?;
-    if is_wasapi_format_mismatched(ctrl) {
+    if ctrl.skip_silence.load(Ordering::Acquire) {
+        if is_dsd_or_dop {
+            fill_wasapi_wire_silence(
+                &mut scratch[..needed],
+                spec.wire_format,
+                spec.channels,
+                dop_phase,
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+            }
+            ops.release_buffer(actual_frames, 0)?;
+        } else {
+            ops.release_buffer(actual_frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)?;
+        }
+        return Ok(());
+    }
+    if is_wasapi_format_mismatched(ctrl, active_expected_stamp) {
         fill_wasapi_wire_silence(
             &mut scratch[..needed],
             spec.wire_format,
@@ -999,7 +1201,7 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
         return Ok(());
     }
     if *buffering_gate {
-        if consumer.available_read() >= watermark_bytes || ctrl.eof_flag.load(Ordering::Acquire) {
+        if consumer.available_read() >= watermark_bytes || active_eof_flag.load(Ordering::Acquire) {
             *buffering_gate = false;
         } else {
             fill_wasapi_wire_silence(
@@ -1027,7 +1229,7 @@ fn prime_wasapi_buffer<O: WasapiStreamOps>(
                 FadeDirection::Up,
             );
         }
-        if let Some(ref fc) = ctrl.fade_ctrl {
+        if let Some(fc) = active_fade_ctrl {
             fc.mark_audible();
         }
         if matches!(spec.wire_format, WireSampleFormat::Dop24In32MsbLe { .. }) {
@@ -1084,6 +1286,10 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         verification.attach_rt_tap(spec.wire_format, spec.channels, spec.sample_rate, 1024 * 1024);
 
     let bytes_per_frame = spec.wire_format.bytes_per_sample() * (spec.channels.max(1) as usize);
+    let is_dsd_or_dop = matches!(
+        spec.wire_format,
+        WireSampleFormat::Dop24In32MsbLe { .. } | WireSampleFormat::NativeDsd { .. }
+    );
     let clock_rate = if matches!(spec.wire_format, WireSampleFormat::NativeDsd { .. }) {
         (spec.sample_rate / 8).max(44_100) as u64
     } else {
@@ -1091,11 +1297,14 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
     };
     let mut scratch = vec![0u8; (actual_frames as usize) * bytes_per_frame];
     let mut dop_phase = false;
-    let watermark_bytes = ctrl.startup_watermark_bytes.load(Ordering::Acquire);
-    let mut buffering_gate = watermark_bytes > 0;
+    let mut active_eof_flag = Arc::clone(&ctrl.eof_flag);
+    let mut active_fade_ctrl = ctrl.fade_ctrl.clone();
+    let mut active_session_id = ctrl.session_id;
+    let mut active_expected_stamp = ctrl.expected_format_stamp;
+    let mut active_watermark_bytes = ctrl.startup_watermark_bytes.load(Ordering::Acquire);
+    let mut buffering_gate = active_watermark_bytes > 0;
     let mut last_ring_epoch = consumer.epoch();
-    let (fade_in, fade_out) = ctrl
-        .fade_ctrl
+    let (fade_in, fade_out) = active_fade_ctrl
         .as_ref()
         .map(|fc| (fc.fade_in_enabled(), fc.fade_out_enabled()))
         .unwrap_or((false, false));
@@ -1105,6 +1314,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         fade_out,
         ctrl.paused.load(Ordering::Acquire),
     );
+    let skip_fade_frames = ((spec.sample_rate.max(8_000) as u64) * 5) / 1000;
+    let mut skip_fade = LinearFadeState::with_frames(skip_fade_frames, false, true, false);
+    let mut skip_fading = false;
 
     if let Err(hr) = prime_wasapi_buffer(
         ops,
@@ -1115,8 +1327,11 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         &mut scratch,
         &mut dop_phase,
         ctrl,
+        &active_eof_flag,
+        active_fade_ctrl.as_deref(),
+        active_expected_stamp,
         &mut buffering_gate,
-        watermark_bytes,
+        active_watermark_bytes,
         &mut fade,
     ) {
         record_wasapi_error(
@@ -1139,6 +1354,8 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         wake_all_flush_waiters(ctrl);
         return;
     }
+
+    let _exit_guard = LoopExitGuard(ctrl);
 
     let events = [
         ctrl.buf_event.raw(),
@@ -1163,16 +1380,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         };
         let wait = unsafe { WaitForMultipleObjects(&events, false, timeout_ms) };
 
-        let stop_fade_in_progress = ctrl.fade_ctrl.as_ref().is_some_and(|fc| {
-            fc.target() == FadeTarget::StopFadeOut && !fc.is_fade_out_done()
-        });
-        if ctrl.stopped.load(Ordering::Acquire)
-            || (!stop_fade_in_progress
-                && ctrl.current_session_id.load(Ordering::Relaxed) != ctrl.session_id)
-        {
-            break;
-        }
-        if wait.0 == WAIT_OBJECT_0.0 + 1 {
+        if ctrl.stopped.load(Ordering::Acquire) || wait.0 == WAIT_OBJECT_0.0 + 1 {
             break;
         }
         if wait.0 == 0xFFFF_FFFF {
@@ -1181,6 +1389,113 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                 *g = Some(format!("WASAPI WaitForMultipleObjects failed: {err}"));
             }
             ctrl.state_code.store(4, Ordering::SeqCst);
+            break;
+        }
+
+        // 0. Lock-free hot-swap adoption (zero alloc, zero drop, zero COM reopen on RT thread).
+        let incoming_swap = ctrl.swap_inbox.swap(null_mut(), Ordering::AcqRel);
+        if !incoming_swap.is_null() {
+            let adopted_skip_seq: u64;
+            unsafe {
+                let env = &mut *incoming_swap;
+                adopted_skip_seq = env.expected_skip_seq;
+                let p = &mut env.payload;
+                std::mem::swap(consumer, &mut p.consumer);
+                std::mem::swap(&mut ver_tap, &mut p.ver_tap);
+                std::mem::swap(&mut active_eof_flag, &mut p.eof_flag);
+                std::mem::swap(&mut active_fade_ctrl, &mut p.fade_ctrl);
+                active_watermark_bytes = p.watermark_bytes;
+                active_session_id = p.session_id;
+                active_expected_stamp = p.expected_format_stamp;
+            }
+            ctrl.retire_swap_ptr_rt(incoming_swap);
+            ctrl.active_session_id
+                .store(active_session_id, Ordering::Release);
+            // Clear `skip_silence` strictly on the RT thread and ONLY when no newer
+            // `enter_skip_silence()` or `current_session_id` raced with this hot-swap.
+            if ctrl.current_session_id.load(Ordering::SeqCst) == active_session_id
+                && ctrl.skip_silence_seq.load(Ordering::SeqCst) == adopted_skip_seq
+            {
+                ctrl.skip_fade_requested.store(false, Ordering::Release);
+                ctrl.skip_silence.store(false, Ordering::SeqCst);
+                if ctrl.skip_silence_seq.load(Ordering::SeqCst) != adopted_skip_seq
+                    || ctrl.current_session_id.load(Ordering::SeqCst) != active_session_id
+                {
+                    ctrl.skip_fade_requested.store(true, Ordering::Release);
+                    ctrl.skip_silence.store(true, Ordering::SeqCst);
+                }
+            }
+            last_ring_epoch = consumer.epoch();
+            buffering_gate = active_watermark_bytes > 0;
+            let (new_fi, new_fo) = active_fade_ctrl
+                .as_ref()
+                .map(|fc| (fc.fade_in_enabled(), fc.fade_out_enabled()))
+                .unwrap_or((false, false));
+            fade = LinearFadeState::new(
+                spec.sample_rate,
+                new_fi,
+                new_fo,
+                ctrl.paused.load(Ordering::Acquire),
+            );
+            skip_fading = false;
+            draining_eof = false;
+            drain_deadline = None;
+            ctrl.eof_drained.store(false, Ordering::Release);
+            dop_phase = false;
+            consecutive_timeouts = 0;
+            last_stall_probe = None;
+            stall_unmoved_ticks = 0;
+            if was_paused {
+                // Clear Track A's stale paused hardware buffer and force a fresh prime of Track B
+                // before `ops.start()` on resume.
+                if let Err(hr) = ops.reset() {
+                    if hr == AUDCLNT_E_NOT_STOPPED {
+                        let _ = ops.stop();
+                        if let Err(hr2) = ops.reset() {
+                            record_wasapi_error(
+                                ctrl,
+                                hr2,
+                                &format!(
+                                    "WASAPI Reset retry during paused hot-swap failed: HRESULT=0x{:08X}",
+                                    hr2.0 as u32
+                                ),
+                            );
+                            break;
+                        }
+                    } else {
+                        record_wasapi_error(
+                            ctrl,
+                            hr,
+                            &format!(
+                                "WASAPI Reset during paused hot-swap failed: HRESULT=0x{:08X}",
+                                hr.0 as u32
+                            ),
+                        );
+                        break;
+                    }
+                }
+                ops.reset_buf_event();
+                ctrl.clock_state.on_reset();
+                needs_prime = true;
+            }
+        }
+
+        let in_skip_silence = ctrl.skip_silence.load(Ordering::Acquire);
+        if in_skip_silence && draining_eof {
+            draining_eof = false;
+            drain_deadline = None;
+        }
+        let stop_fade_in_progress = active_fade_ctrl.as_ref().is_some_and(|fc| {
+            fc.target() == FadeTarget::StopFadeOut && !fc.is_fade_out_done()
+        });
+        if !stop_fade_in_progress
+            && !in_skip_silence
+            && ctrl.swap_inbox.load(Ordering::SeqCst).is_null()
+            && ctrl.current_session_id.load(Ordering::SeqCst) != active_session_id
+        {
+            if !try_commit_loop_exit(ctrl) {
+                continue;
+            }
             break;
         }
 
@@ -1232,7 +1547,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                 let _ = consumer.try_clear();
             }
             last_ring_epoch = consumer.epoch();
-            buffering_gate = watermark_bytes > 0;
+            buffering_gate = active_watermark_bytes > 0;
             fade.reset_for_play_start();
             ctrl.clock_state.on_reset();
             draining_eof = false;
@@ -1254,8 +1569,11 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     &mut scratch,
                     &mut dop_phase,
                     ctrl,
+                    &active_eof_flag,
+                    active_fade_ctrl.as_deref(),
+                    active_expected_stamp,
                     &mut buffering_gate,
-                    watermark_bytes,
+                    active_watermark_bytes,
                     &mut fade,
                 ) {
                     record_wasapi_error(
@@ -1314,6 +1632,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
             continue;
         } else if !now_paused && was_paused {
             if needs_prime {
+                fade.reset_for_play_start();
                 if let Err(hr) = prime_wasapi_buffer(
                     ops,
                     actual_frames,
@@ -1323,8 +1642,11 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     &mut scratch,
                     &mut dop_phase,
                     ctrl,
+                    &active_eof_flag,
+                    active_fade_ctrl.as_deref(),
+                    active_expected_stamp,
                     &mut buffering_gate,
-                    watermark_bytes,
+                    active_watermark_bytes,
                     &mut fade,
                 ) {
                     record_wasapi_error(
@@ -1365,7 +1687,12 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                         ctrl.clock_state.record_position(pos, qpc);
                     }
                     if padding == 0 || drain_deadline.is_some_and(|d| Instant::now() >= d) {
-                        if let Some(ref fc) = ctrl.fade_ctrl {
+                        if !try_commit_loop_exit(ctrl) {
+                            draining_eof = false;
+                            drain_deadline = None;
+                            continue;
+                        }
+                        if let Some(ref fc) = active_fade_ctrl {
                             fc.mark_silent();
                         }
                         ctrl.eof_drained.store(true, Ordering::SeqCst);
@@ -1443,7 +1770,95 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
         match ops.get_buffer(actual_frames) {
             Ok(ptr) => {
                 let needed = ((actual_frames as usize) * bytes_per_frame).min(scratch.len());
-                if is_wasapi_format_mismatched(ctrl) {
+                if in_skip_silence {
+                    if ctrl.skip_fade_requested.swap(false, Ordering::AcqRel) {
+                        if !is_dsd_or_dop && fade.gain() > 0.0 {
+                            skip_fade.set_gain(fade.gain());
+                            skip_fading = true;
+                        } else {
+                            skip_fading = false;
+                            fade.set_zero();
+                        }
+                    }
+                    if skip_fading {
+                        let aligned_bytes =
+                            consumer.pop_slice_aligned(&mut scratch[..needed], bytes_per_frame);
+                        if aligned_bytes > 0 {
+                            apply_fade_ramp_to_wire_bytes(
+                                &mut scratch[..aligned_bytes],
+                                spec.wire_format,
+                                spec.channels as usize,
+                                &mut skip_fade,
+                                FadeDirection::Down,
+                            );
+                            if aligned_bytes < needed {
+                                fill_wasapi_wire_silence(
+                                    &mut scratch[aligned_bytes..needed],
+                                    spec.wire_format,
+                                    spec.channels,
+                                    &mut dop_phase,
+                                );
+                                skip_fade.set_zero();
+                            }
+                            if skip_fade.gain() <= 0.0 {
+                                skip_fading = false;
+                                fade.set_zero();
+                            }
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                            }
+                            if let Err(hr) = ops.release_buffer(actual_frames, 0) {
+                                record_wasapi_error(
+                                    ctrl,
+                                    hr,
+                                    &format!(
+                                        "WASAPI ReleaseBuffer(skip-fade) failed: HRESULT=0x{:08X}",
+                                        hr.0 as u32
+                                    ),
+                                );
+                                break;
+                            }
+                            if let Ok((pos, qpc)) = ops.clock_position() {
+                                ctrl.clock_state.record_position(pos, qpc);
+                            }
+                            continue;
+                        } else {
+                            skip_fading = false;
+                            fade.set_zero();
+                        }
+                    }
+                    // Keep IAudioClient alive with full-period silent release during rapid skips.
+                    let rel_res = if is_dsd_or_dop {
+                        fill_wasapi_wire_silence(
+                            &mut scratch[..needed],
+                            spec.wire_format,
+                            spec.channels,
+                            &mut dop_phase,
+                        );
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(scratch.as_ptr(), ptr, needed);
+                        }
+                        ops.release_buffer(actual_frames, 0)
+                    } else {
+                        ops.release_buffer(actual_frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)
+                    };
+                    if let Err(hr) = rel_res {
+                        record_wasapi_error(
+                            ctrl,
+                            hr,
+                            &format!(
+                                "WASAPI ReleaseBuffer(skip-silence) failed: HRESULT=0x{:08X}",
+                                hr.0 as u32
+                            ),
+                        );
+                        break;
+                    }
+                    if let Ok((pos, qpc)) = ops.clock_position() {
+                        ctrl.clock_state.record_position(pos, qpc);
+                    }
+                    continue;
+                }
+                if is_wasapi_format_mismatched(ctrl, active_expected_stamp) {
                     fill_wasapi_wire_silence(
                         &mut scratch[..needed],
                         spec.wire_format,
@@ -1466,8 +1881,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     }
                     continue;
                 }
-                let fade_target = ctrl
-                    .fade_ctrl
+                let fade_target = active_fade_ctrl
                     .as_ref()
                     .map(|fc| fc.target())
                     .unwrap_or(FadeTarget::Playing);
@@ -1476,12 +1890,12 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     fade_target,
                     FadeTarget::PauseFadeOut | FadeTarget::StopFadeOut | FadeTarget::SeekFadeOut
                 ) {
-                    if let Some(ref fc) = ctrl.fade_ctrl {
+                    if let Some(ref fc) = active_fade_ctrl {
                         if !fade.fade_out_enabled() || fade.gain() <= 0.0 {
                             fade.set_zero();
                             fc.mark_fade_out_done();
                             if fade_target == FadeTarget::SeekFadeOut {
-                                buffering_gate = watermark_bytes > 0;
+                                buffering_gate = active_watermark_bytes > 0;
                             }
                             fill_wasapi_wire_silence(
                                 &mut scratch[..needed],
@@ -1514,7 +1928,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                             if fade.gain() <= 0.0 {
                                 fc.mark_fade_out_done();
                                 if fade_target == FadeTarget::SeekFadeOut {
-                                    buffering_gate = watermark_bytes > 0;
+                                    buffering_gate = active_watermark_bytes > 0;
                                 }
                             }
                         }
@@ -1563,7 +1977,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                         continue;
                     }
                     last_ring_epoch = consumer.epoch();
-                    buffering_gate = watermark_bytes > 0;
+                    buffering_gate = active_watermark_bytes > 0;
                     fade.reset_for_play_start();
                 }
 
@@ -1575,7 +1989,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                 }
 
                 if buffering_gate {
-                    if avail_before >= watermark_bytes || ctrl.eof_flag.load(Ordering::Acquire) {
+                    if avail_before >= active_watermark_bytes
+                        || active_eof_flag.load(Ordering::Acquire)
+                    {
                         buffering_gate = false;
                     } else {
                         fill_wasapi_wire_silence(
@@ -1615,14 +2031,14 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                             FadeDirection::Up,
                         );
                     }
-                    if let Some(ref fc) = ctrl.fade_ctrl {
+                    if let Some(ref fc) = active_fade_ctrl {
                         fc.mark_audible();
                     }
                     if matches!(spec.wire_format, WireSampleFormat::Dop24In32MsbLe { .. }) {
                         dop_phase = scratch[aligned_bytes - 1] == 0x05;
                     }
                     if aligned_bytes < needed {
-                        if !ctrl.eof_flag.load(Ordering::Acquire) {
+                        if !active_eof_flag.load(Ordering::Acquire) {
                             ctrl.underrun_count.fetch_add(1, Ordering::Relaxed);
                             fade_out_wire_tail(
                                 &mut scratch[..aligned_bytes],
@@ -1630,7 +2046,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                                 spec.channels as usize,
                                 128,
                             );
-                            if watermark_bytes > 0 {
+                            if active_watermark_bytes > 0 {
                                 buffering_gate = true;
                                 fade.reset_for_play_start();
                             }
@@ -1672,7 +2088,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     if let Ok((pos, qpc)) = ops.clock_position() {
                         ctrl.clock_state.record_position(pos, qpc);
                     }
-                } else if ctrl.eof_flag.load(Ordering::SeqCst)
+                } else if active_eof_flag.load(Ordering::SeqCst)
                     && consumer.available_read() < bytes_per_frame
                 {
                     // Release empty without pushing an extra full period of trailing silence.
@@ -1689,6 +2105,9 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     }
                     match ops.current_padding() {
                         Ok(0) => {
+                            if !try_commit_loop_exit(ctrl) {
+                                continue;
+                            }
                             if let Ok((pos, qpc)) = ops.clock_position() {
                                 ctrl.clock_state.record_position(pos, qpc);
                             }
@@ -1727,7 +2146,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
                     // Transient underrun while track still playing: increment atomic counter,
                     // emit format-appropriate silence, and re-arm watermark gate so recovery fades in cleanly.
                     ctrl.underrun_count.fetch_add(1, Ordering::Relaxed);
-                    if watermark_bytes > 0 {
+                    if active_watermark_bytes > 0 {
                         buffering_gate = true;
                         fade.reset_for_play_start();
                     }
@@ -1780,6 +2199,7 @@ pub fn run_wasapi_render_loop<O: WasapiStreamOps>(
 /// Active native Windows COM WASAPI Exclusive Event-Driven playback session.
 /// Bypasses Windows `audiodg.exe` mixer completely and transfers raw wire bytes directly to `IAudioRenderClient`.
 pub struct WasapiExclusiveSession {
+    pub spec: WasapiExclusiveOpenSpec,
     pub device_name: String,
     pub actual_buffer_frames: u32,
     pub wire_format: WireSampleFormat,
@@ -2003,9 +2423,10 @@ impl WasapiExclusiveSession {
 
         match ack_rx.recv() {
             Ok(Ok((device_name, actual_buffer_frames, ctrl))) => Ok(Self {
+                wire_format: spec.wire_format,
+                spec,
                 device_name,
                 actual_buffer_frames,
-                wire_format: spec.wire_format,
                 ctrl,
                 handle: Some(handle),
             }),
@@ -2062,36 +2483,50 @@ impl WasapiExclusiveSession {
         self.ctrl.clock_position_ns()
     }
 
+    pub fn control(&self) -> Arc<WasapiRenderControl> {
+        Arc::clone(&self.ctrl)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        !self.ctrl.stopped.load(Ordering::Acquire)
+            && !self.ctrl.is_loop_exited()
+            && !self.ctrl.is_device_lost()
+            && self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
+    pub fn matches_spec(&self, other: &WasapiExclusiveOpenSpec) -> bool {
+        self.spec == *other
+    }
+
+    pub fn enter_skip_silence(&self) {
+        self.ctrl.enter_skip_silence();
+    }
+
+    pub fn try_hot_swap(
+        &self,
+        payload: WasapiHotSwapPayload,
+    ) -> Result<(), WasapiHotSwapPayload> {
+        self.ctrl.try_push_hot_swap(payload)
+    }
+
+    pub fn hot_swap(&self, payload: WasapiHotSwapPayload) -> bool {
+        self.ctrl.push_hot_swap(payload)
+    }
+
     fn shutdown_internal(&mut self) {
         self.ctrl.stopped.store(true, Ordering::SeqCst);
         self.ctrl.stop_event.signal();
         self.ctrl.wake_event.signal();
         wake_all_flush_waiters(&self.ctrl);
-        if let Some(h) = self.handle.take() {
-            if self.ctrl.is_device_lost() {
-                if !join_handle_bounded(h, Duration::from_millis(500)) {
-                    tracing::warn!(
-                        "WASAPI Exclusive render thread wedged after device_lost; detaching after 500ms"
-                    );
-                }
-            } else {
-                let mut lost_deadline: Option<Instant> = None;
-                while !h.is_finished() {
-                    if self.ctrl.is_device_lost() {
-                        let dl = *lost_deadline
-                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(500));
-                        if Instant::now() >= dl {
-                            tracing::warn!(
-                                "WASAPI Exclusive render thread lost device during shutdown; detaching after 500ms"
-                            );
-                            return;
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                let _ = h.join();
-            }
+        if let Some(h) = self.handle.take()
+            && !join_handle_bounded(h, Duration::from_millis(500))
+        {
+            tracing::warn!(
+                "WASAPI Exclusive render thread wedged during shutdown (device_lost={}); detaching after 500ms",
+                self.ctrl.is_device_lost()
+            );
         }
+        self.ctrl.drain_retired_swaps();
     }
 
     pub fn stop(mut self) {

@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/signal_path.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
+import '../../services/recommendation_settings_controller.dart';
 import '../../services/streaming/yt_dlp_service.dart';
 import '../../services/ui_scale_controller.dart';
 import '../theme/lumina_tokens.dart';
@@ -14,11 +15,13 @@ import 'third_party_licenses_dialog.dart';
 class GeneralSettingsPanel extends StatefulWidget {
   final AudioService audioService;
   final UiScaleController scaleController;
+  final RecommendationSettingsController? recommendationSettings;
 
   const GeneralSettingsPanel({
     super.key,
     required this.audioService,
     required this.scaleController,
+    this.recommendationSettings,
   });
 
   @override
@@ -28,10 +31,18 @@ class GeneralSettingsPanel extends StatefulWidget {
 class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
   DspPipelineConfigModel _dspConfig = const DspPipelineConfigModel();
   StreamSubscription<SignalPath>? _signalPathSub;
+  late final TextEditingController _lastFmApiKeyController;
+  bool _obscureLastFmKey = true;
+  bool _lastFmSaved = false;
+  String _lastSyncedLastFmKey = '';
 
   @override
   void initState() {
     super.initState();
+    final initialKey = widget.recommendationSettings?.lastFmApiKey ?? '';
+    _lastSyncedLastFmKey = initialKey;
+    _lastFmApiKeyController = TextEditingController(text: initialKey);
+    widget.recommendationSettings?.addListener(_onRecommendationSettingsChanged);
     _loadDspConfig();
     _subscribeSignalPath();
   }
@@ -43,6 +54,31 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
       _signalPathSub?.cancel();
       _subscribeSignalPath();
       _loadDspConfig();
+    }
+    if (!identical(
+      oldWidget.recommendationSettings,
+      widget.recommendationSettings,
+    )) {
+      oldWidget.recommendationSettings?.removeListener(
+        _onRecommendationSettingsChanged,
+      );
+      widget.recommendationSettings?.addListener(
+        _onRecommendationSettingsChanged,
+      );
+      final nextKey = widget.recommendationSettings?.lastFmApiKey ?? '';
+      if (nextKey != _lastSyncedLastFmKey) {
+        _lastSyncedLastFmKey = nextKey;
+        _lastFmApiKeyController.text = nextKey;
+      }
+    }
+  }
+
+  void _onRecommendationSettingsChanged() {
+    final rec = widget.recommendationSettings;
+    if (!mounted || rec == null) return;
+    if (rec.lastFmApiKey != _lastSyncedLastFmKey) {
+      _lastSyncedLastFmKey = rec.lastFmApiKey;
+      _lastFmApiKeyController.text = rec.lastFmApiKey;
     }
   }
 
@@ -78,9 +114,308 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
 
   @override
   void dispose() {
+    widget.recommendationSettings?.removeListener(
+      _onRecommendationSettingsChanged,
+    );
+    _lastFmApiKeyController.dispose();
     _signalPathSub?.cancel();
     _signalPathSub = null;
     super.dispose();
+  }
+
+  static String _platformLabel(String id) => switch (id) {
+    'local' => '本地無損曲庫',
+    'tidal' => 'Tidal (HI_RES / LOSSLESS)',
+    'qobuz' => 'Qobuz',
+    'deezer' => 'Deezer',
+    'youtube_music' => 'YouTube Music (Guest 兜底)',
+    _ => id,
+  };
+
+  Future<void> _saveLastFmApiKey(RecommendationSettingsController rec) async {
+    final trimmed = _lastFmApiKeyController.text.trim();
+    _lastSyncedLastFmKey = trimmed;
+    await rec.setLastFmApiKey(trimmed);
+    if (!mounted) return;
+    setState(() {
+      _lastFmSaved = true;
+    });
+  }
+
+  Widget _buildRecommendationAutoplayCard(RecommendationSettingsController rec) {
+    return ListenableBuilder(
+      listenable: rec,
+      builder: (context, _) {
+        final priority = rec.platformPriority;
+        return SettingsGroupCard(
+          title: '自動推薦與無限接播',
+          children: [
+            SettingsSwitchRow(
+              key: const Key('switch_autoplay_enabled'),
+              title: '啟用無限自動接播（Autoplay）',
+              subtitle: '待播佇列即將播畢時，自動依據近期聆聽曲目接續推薦相似音樂。',
+              value: rec.autoplayEnabled,
+              onChanged: rec.setAutoplayEnabled,
+            ),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+            SettingsSwitchRow(
+              key: const Key('switch_cross_platform_routing'),
+              title: '跨平台高音質自動路由',
+              subtitle: '自動依下方優先順序匹配本地無損或已登入之高解析串流版本播放，遇 401 授權失效時自動跳過。',
+              value: rec.crossPlatformRoutingEnabled,
+              onChanged: rec.setCrossPlatformRoutingEnabled,
+            ),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: LuminaTokens.spaceMd + LuminaTokens.space2xs,
+                vertical: LuminaTokens.spaceSm,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '跨平台音源優先順序',
+                              style: TextStyle(
+                                color: LuminaTokens.textPrimary,
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              '進行跨平台匹配時由上而下依序嘗試取得最高音質來源。',
+                              style: TextStyle(
+                                color: LuminaTokens.textMuted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: LuminaTokens.spaceSm),
+                      OutlinedButton(
+                        key: const Key('btn_priority_reset'),
+                        style: LuminaSettingsStyles.outlinedButtonStyle(),
+                        onPressed: rec.resetPlatformPriority,
+                        child: const Text(
+                          '重設預設',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceSm),
+                  for (var index = 0; index < priority.length; index++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: LuminaTokens.glassPillBg,
+                          borderRadius: BorderRadius.circular(
+                            LuminaTokens.radiusSm,
+                          ),
+                          border: Border.all(
+                            color: LuminaTokens.glassCardBorder,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 22,
+                              height: 22,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: LuminaTokens.glassNavActiveBg,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                '${index + 1}',
+                                style: const TextStyle(
+                                  color: LuminaTokens.glassTextPrimary,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                _platformLabel(priority[index]),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: LuminaTokens.textPrimary,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              key: Key('btn_priority_up_${priority[index]}'),
+                              tooltip: '上移優先順序',
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                minWidth: 28,
+                                minHeight: 28,
+                              ),
+                              padding: EdgeInsets.zero,
+                              style: LuminaSettingsStyles.iconButtonStyle(),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_up_rounded,
+                                size: 18,
+                              ),
+                              onPressed: index > 0
+                                  ? () => rec.movePlatformPriority(
+                                      index,
+                                      index - 1,
+                                    )
+                                  : null,
+                            ),
+                            IconButton(
+                              key: Key('btn_priority_down_${priority[index]}'),
+                              tooltip: '下移優先順序',
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                minWidth: 28,
+                                minHeight: 28,
+                              ),
+                              padding: EdgeInsets.zero,
+                              style: LuminaSettingsStyles.iconButtonStyle(),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                                size: 18,
+                              ),
+                              onPressed: index < priority.length - 1
+                                  ? () => rec.movePlatformPriority(
+                                      index,
+                                      index + 1,
+                                    )
+                                  : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+            SettingsSwitchRow(
+              key: const Key('switch_listenbrainz_enabled'),
+              title: 'ListenBrainz 相似曲目推薦（免金鑰）',
+              subtitle: '使用 MusicBrainz 與 ListenBrainz 開放音樂圖譜進行無金鑰跨平台推薦。',
+              value: rec.listenBrainzEnabled,
+              onChanged: rec.setListenBrainzEnabled,
+            ),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: LuminaTokens.spaceMd + LuminaTokens.space2xs,
+                vertical: LuminaTokens.spaceSm,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Last.fm API Key',
+                    style: TextStyle(
+                      color: LuminaTokens.textPrimary,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    '選填：設定 Last.fm API Key 以在播放本地無損曲庫或離線音源時補充外部相似推薦。',
+                    style: TextStyle(
+                      color: LuminaTokens.textMuted,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                  const SizedBox(height: LuminaTokens.spaceSm),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          key: const Key('input_lastfm_api_key'),
+                          controller: _lastFmApiKeyController,
+                          obscureText: _obscureLastFmKey,
+                          onChanged: (_) {
+                            if (_lastFmSaved) {
+                              setState(() => _lastFmSaved = false);
+                            }
+                          },
+                          onSubmitted: (_) => _saveLastFmApiKey(rec),
+                          style: const TextStyle(
+                            color: LuminaTokens.textPrimary,
+                            fontSize: 13,
+                          ),
+                          decoration: LuminaSettingsStyles.inputDecoration(
+                            hintText: '輸入 Last.fm API Key（留空則停用）',
+                          ).copyWith(
+                            suffixIcon: IconButton(
+                              tooltip: _obscureLastFmKey ? '顯示金鑰' : '隱藏金鑰',
+                              icon: Icon(
+                                _obscureLastFmKey
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                                size: 17,
+                                color: LuminaTokens.glassTextSecondary,
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _obscureLastFmKey = !_obscureLastFmKey;
+                                });
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: LuminaTokens.spaceSm),
+                      ElevatedButton(
+                        key: const Key('btn_save_lastfm_api_key'),
+                        style: LuminaSettingsStyles.filledButtonStyle(),
+                        onPressed: () => _saveLastFmApiKey(rec),
+                        child: const Text(
+                          '儲存金鑰',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (_lastFmSaved) ...[
+                    const SizedBox(height: 6),
+                    const Text(
+                      '已儲存 Last.fm API Key',
+                      style: TextStyle(
+                        color: LuminaTokens.statusSuccess,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Widget _buildLoudnessNormalizationCard() {
@@ -185,48 +520,27 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                 message: strictLocked
                     ? '嚴格位元完美模式作用中，停用嚴格模式後方可調整響度標準化'
                     : '選擇 -14 LUFS 響度標準化模式（關閉／單曲增益／專輯增益）',
-                child: Wrap(
-                  spacing: LuminaTokens.spaceXs,
-                  runSpacing: LuminaTokens.spaceXs,
-                  children: [
-                    for (final mode in ReplayGainModeOption.values)
-                      ChoiceChip(
-                        key: Key('chip_loudness_mode_${mode.apiValue}'),
-                        label: Text(
-                          mode.label,
-                          style: TextStyle(
-                            color: strictLocked
-                                ? LuminaTokens.textDisabled
-                                : (currentMode == mode
-                                      ? LuminaTokens.textPrimary
-                                      : LuminaTokens.textSecondary),
-                            fontSize: 12.5,
-                            fontWeight: currentMode == mode
-                                ? FontWeight.w600
-                                : FontWeight.w500,
+                child: DecoratedBox(
+                  decoration: LuminaSettingsStyles.segmentedCapsuleDecoration(),
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        for (final mode in ReplayGainModeOption.values)
+                          LuminaSettingsStyles.frostedSegmentChip(
+                            key: Key('chip_loudness_mode_${mode.apiValue}'),
+                            label: mode.label,
+                            selected: currentMode == mode,
+                            disabled: strictLocked,
+                            onSelected: strictLocked
+                                ? null
+                                : (_) => _setLoudnessMode(mode),
                           ),
-                        ),
-                        selected: currentMode == mode,
-                        showCheckmark: false,
-                        selectedColor: strictLocked
-                            ? LuminaTokens.cardElevatedBg
-                            : LuminaTokens.accentBlueStrong.withValues(
-                                alpha: 0.28,
-                              ),
-                        backgroundColor: LuminaTokens.cardElevatedBg,
-                        disabledColor: LuminaTokens.cardElevatedBg,
-                        side: BorderSide(
-                          color: strictLocked
-                              ? LuminaTokens.borderSubtle
-                              : (currentMode == mode
-                                    ? LuminaTokens.accentBlue
-                                    : LuminaTokens.borderControl),
-                        ),
-                        onSelected: strictLocked
-                            ? null
-                            : (_) => _setLoudnessMode(mode),
-                      ),
-                  ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -263,7 +577,7 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                       value: scaleController.rememberPlaybackPosition,
                       onChanged: scaleController.setRememberPlaybackPosition,
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 1),
+                    const Divider(color: LuminaTokens.glassCardDivider, height: 1),
                     SettingsSwitchRow(
                       key: const Key('switch_notify_resample'),
                       title: '重取樣時顯示提示',
@@ -271,7 +585,7 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                       value: scaleController.notifyOnResample,
                       onChanged: scaleController.setNotifyOnResample,
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 1),
+                    const Divider(color: LuminaTokens.glassCardDivider, height: 1),
                     SettingsSwitchRow(
                       key: const Key('switch_minimize_to_tray_on_close'),
                       title: '關閉視窗時縮小至系統匣並繼續背景播放',
@@ -284,6 +598,12 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                 ),
                 const SizedBox(height: LuminaTokens.spaceMd),
                 _buildLoudnessNormalizationCard(),
+                if (widget.recommendationSettings != null) ...[
+                  const SizedBox(height: LuminaTokens.spaceMd),
+                  _buildRecommendationAutoplayCard(
+                    widget.recommendationSettings!,
+                  ),
+                ],
                 const SizedBox(height: LuminaTokens.spaceMd),
                 SettingsGroupCard(
                   title: '裝置與啟動恢復',
@@ -295,7 +615,7 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                       value: scaleController.restoreOutputOnStartup,
                       onChanged: scaleController.setRestoreOutputOnStartup,
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 1),
+                    const Divider(color: LuminaTokens.glassCardDivider, height: 1),
                     SettingsSwitchRow(
                       title: '啟動時恢復介面縮放比例',
                       subtitle: '保留目前設定的全域介面縮放比例（目前：${scaleController.percentage}%）。',
@@ -314,7 +634,7 @@ class _GeneralSettingsPanelState extends State<GeneralSettingsPanel> {
                           ? '已連結原生 core_ffi 引擎'
                           : '模擬工作室模式（Mock）',
                     ),
-                    const Divider(color: LuminaTokens.borderSubtle, height: 1),
+                    const Divider(color: LuminaTokens.glassCardDivider, height: 1),
                     SettingsInfoRow(
                       label: '目前連線架構',
                       value: audioService.connectionMode.label,
@@ -356,20 +676,20 @@ class AboutSettingsPanel extends StatelessWidget {
               label: '應用程式版本',
               value: 'v1.0.0 Studio Edition',
             ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             SettingsInfoRow(
               label: 'DSP 與音訊核心',
               value: audioService.isNativeBound
                   ? 'Rust 64-bit Float Core (FFI Active)'
                   : 'Rust Core Engine (Standby / Mock)',
             ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             const SettingsInfoRow(
               label: '支援協定與格式',
               value:
                   'FLAC · ALAC · WAV · DSD64/128 · DLNA · AirPlay · Apple Music · YouTube Music · Qobuz · Tidal',
             ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             SettingsActionRow(
               title: '第三方開源授權（yt-dlp / Deno / FFmpeg）',
               subtitle:

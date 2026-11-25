@@ -362,27 +362,88 @@ class YtmResidentResolver implements StreamResolver {
     }
   }
 
-  Future<bool> _probeVisitorDataFromMusicOrigin() async {
+  Future<bool> _probeVisitorDataFromMusicOrigin({
+    CancellationToken? cancelToken,
+  }) async {
+    if (_disposed || cancelToken?.isCancelled == true) return false;
     final authVisitor = authProvider?.call()?.visitorData?.trim();
     if (authVisitor != null && authVisitor.isNotEmpty) {
       _cachedVisitorData = authVisitor;
     }
-    try {
-      final uri = Uri.parse('${_cleanOrigin(musicBaseUrl)}/sw.js_data');
-      final req = await _httpClient.openUrl('GET', uri).timeout(warmupTimeout);
-      req.headers.set('User-Agent', _desktopChromeUserAgent);
-      final resp = await req.close().timeout(warmupTimeout);
-      final body = await utf8.decoder.bind(resp).join().timeout(warmupTimeout);
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
-        final extracted = _extractVisitorDataFromSwJsData(body);
-        if (extracted != null && extracted.isNotEmpty) {
-          _cachedVisitorData = extracted;
-        }
-        return true;
+    HttpClientRequest? activeReq;
+    StreamSubscription<String>? bodySub;
+    var aborted = false;
+    final completer = Completer<bool>();
+
+    void onCancel() {
+      aborted = true;
+      try {
+        activeReq?.abort();
+      } catch (_) {}
+      unawaited(bodySub?.cancel().catchError((_) {}));
+      if (!completer.isCompleted) {
+        completer.complete(false);
       }
-      return false;
-    } catch (_) {
-      return false;
+    }
+
+    cancelToken?.addListener(onCancel);
+    try {
+      () async {
+        try {
+          final uri = Uri.parse('${_cleanOrigin(musicBaseUrl)}/sw.js_data');
+          final req =
+              await _httpClient.openUrl('GET', uri).timeout(warmupTimeout);
+          if (aborted || _disposed) {
+            try {
+              req.abort();
+            } catch (_) {}
+            if (!completer.isCompleted) completer.complete(false);
+            return;
+          }
+          activeReq = req;
+          req.headers.set('User-Agent', _desktopChromeUserAgent);
+          final resp = await req.close().timeout(warmupTimeout);
+          if (aborted || _disposed) {
+            unawaited(resp.drain<void>().catchError((_) {}));
+            if (!completer.isCompleted) completer.complete(false);
+            return;
+          }
+          final buf = StringBuffer();
+          final bodyDone = Completer<String>();
+          bodySub = utf8.decoder.bind(resp).listen(
+            buf.write,
+            onDone: () {
+              if (!bodyDone.isCompleted) bodyDone.complete(buf.toString());
+            },
+            onError: (Object err, StackTrace st) {
+              if (!bodyDone.isCompleted) bodyDone.completeError(err, st);
+            },
+            cancelOnError: true,
+          );
+          final body = await bodyDone.future.timeout(warmupTimeout);
+          if (aborted || _disposed) {
+            if (!completer.isCompleted) completer.complete(false);
+            return;
+          }
+          if (resp.statusCode >= 200 && resp.statusCode < 300) {
+            final extracted = _extractVisitorDataFromSwJsData(body);
+            if (extracted != null && extracted.isNotEmpty) {
+              _cachedVisitorData = extracted;
+            }
+            if (!completer.isCompleted) completer.complete(true);
+            return;
+          }
+          if (!completer.isCompleted) completer.complete(false);
+        } catch (_) {
+          if (!completer.isCompleted) completer.complete(false);
+        }
+      }();
+      return await completer.future;
+    } finally {
+      cancelToken?.removeListener(onCancel);
+      if (aborted) {
+        unawaited(bodySub?.cancel().catchError((_) {}));
+      }
     }
   }
 
@@ -612,7 +673,9 @@ class YtmResidentResolver implements StreamResolver {
     if (requestHandler == null &&
         (initialGuestVisitor == null || initialGuestVisitor.isEmpty)) {
       cancelToken?.throwIfCancelled();
-      final fetched = await _probeVisitorDataFromMusicOrigin();
+      final fetched = await _probeVisitorDataFromMusicOrigin(
+        cancelToken: cancelToken,
+      );
       cancelToken?.throwIfCancelled();
       final refreshedVisitor = _cachedVisitorData?.trim();
       if (fetched &&
@@ -935,6 +998,7 @@ class YtmResidentResolver implements StreamResolver {
 
     final encoded = utf8.encode(jsonEncode(body));
     HttpClientRequest? activeReq;
+    StreamSubscription<String>? bodySub;
     final completer = Completer<YtmPlayerHttpResponse>();
     var aborted = false;
 
@@ -943,6 +1007,7 @@ class YtmResidentResolver implements StreamResolver {
       try {
         activeReq?.abort();
       } catch (_) {}
+      unawaited(bodySub?.cancel().catchError((_) {}));
       if (!completer.isCompleted) {
         completer.completeError(
           const StreamingException('操作已取消', isCancelled: true),
@@ -973,10 +1038,20 @@ class YtmResidentResolver implements StreamResolver {
             unawaited(resp.drain<void>().catchError((_) {}));
             return;
           }
-          final respBody = await utf8.decoder.bind(resp).join().timeout(
-            requestTimeout,
+          final buf = StringBuffer();
+          final bodyDone = Completer<String>();
+          bodySub = utf8.decoder.bind(resp).listen(
+            buf.write,
+            onDone: () {
+              if (!bodyDone.isCompleted) bodyDone.complete(buf.toString());
+            },
+            onError: (Object err, StackTrace st) {
+              if (!bodyDone.isCompleted) bodyDone.completeError(err, st);
+            },
+            cancelOnError: true,
           );
-          if (!completer.isCompleted) {
+          final respBody = await bodyDone.future.timeout(requestTimeout);
+          if (!aborted && !_disposed && !completer.isCompleted) {
             completer.complete(
               YtmPlayerHttpResponse(statusCode: resp.statusCode, body: respBody),
             );
@@ -1017,6 +1092,9 @@ class YtmResidentResolver implements StreamResolver {
       return await completer.future;
     } finally {
       cancelToken?.removeListener(onCancel);
+      if (aborted) {
+        unawaited(bodySub?.cancel().catchError((_) {}));
+      }
     }
   }
 

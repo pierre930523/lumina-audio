@@ -215,8 +215,14 @@ impl ByteStreamSource for HybridByteStream {
                     .await
                 {
                     Ok(remote_n) => return Ok(local_copy + remote_n),
+                    Err(StreamError::Cancelled) => return Err(StreamError::Cancelled),
+                    Err(_) if self.cancel.is_cancelled() => return Err(StreamError::Cancelled),
                     Err(_) => return Ok(local_copy),
                 },
+                Err(HybridVerifyFailure::Stream(StreamError::Cancelled)) => {
+                    return Err(StreamError::Cancelled);
+                }
+                Err(_) if self.cancel.is_cancelled() => return Err(StreamError::Cancelled),
                 Err(_) => {
                     // Deliver remaining cached prefix cleanly so Active Deck never drops audio.
                     return Ok(local_copy);
@@ -283,6 +289,7 @@ mod tests {
 
     struct MockRangeTransport {
         payload: Arc<RwLockPayload>,
+        #[allow(clippy::type_complexity)]
         ranges_seen: Arc<Mutex<Vec<Option<(u64, u64)>>>>,
         delay: Duration,
         request_count: Arc<AtomicUsize>,

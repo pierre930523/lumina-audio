@@ -107,8 +107,8 @@ impl VisualizerRingBuffer {
 pub fn generate_hann_window() -> [f32; FFT_SIZE] {
     let mut w = [0.0f32; FFT_SIZE];
     let n_minus_1 = (FFT_SIZE - 1) as f32;
-    for n in 0..FFT_SIZE {
-        w[n] = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * (n as f32) / n_minus_1).cos());
+    for (n, slot) in w.iter_mut().enumerate() {
+        *slot = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * (n as f32) / n_minus_1).cos());
     }
     w
 }
@@ -118,8 +118,8 @@ pub fn generate_hann_window() -> [f32; FFT_SIZE] {
 pub fn generate_band_edges() -> [f32; NUM_BANDS + 1] {
     let mut edges = [0.0f32; NUM_BANDS + 1];
     let ratio = MAX_FREQ / MIN_FREQ;
-    for m in 0..=NUM_BANDS {
-        edges[m] = MIN_FREQ * ratio.powf(m as f32 / NUM_BANDS as f32);
+    for (m, slot) in edges.iter_mut().enumerate() {
+        *slot = MIN_FREQ * ratio.powf(m as f32 / NUM_BANDS as f32);
     }
     edges
 }
@@ -251,7 +251,7 @@ impl VisualizerTap {
         let mut offset = 0;
         while offset < total_frames {
             let batch = (total_frames - offset).min(SCRATCH_FRAMES);
-            for i in 0..batch {
+            for (i, slot) in mono_scratch.iter_mut().enumerate().take(batch) {
                 let frame_idx = offset + i;
                 let byte_pos = frame_idx * bytes_per_frame;
                 let frame_slice = &wire_bytes[byte_pos..byte_pos + bytes_per_frame];
@@ -262,7 +262,7 @@ impl VisualizerTap {
                 } else {
                     s0
                 };
-                mono_scratch[i] = (s0 + s1) * 0.5;
+                *slot = (s0 + s1) * 0.5;
             }
             self.ring.push_slice(&mono_scratch[..batch]);
             offset += batch;
@@ -361,10 +361,8 @@ fn run_analysis_worker(
 
                 let mut sum = 0.0f32;
                 let mut peak = 0.0f32;
-                for k in k_start..k_end {
-                    let mag = (complex_buf[k].re * complex_buf[k].re
-                        + complex_buf[k].im * complex_buf[k].im)
-                        .sqrt();
+                for c in complex_buf.iter().take(k_end).skip(k_start) {
+                    let mag = (c.re * c.re + c.im * c.im).sqrt();
                     sum += mag;
                     if mag > peak {
                         peak = mag;
@@ -408,10 +406,10 @@ fn run_analysis_worker(
 
             // Ballistics decay during silence
             let mut any_nonzero = false;
-            for m in 0..NUM_BANDS {
-                smoothed[m] *= RELEASE_COEFF;
-                if smoothed[m] < 1e-4 {
-                    smoothed[m] = 0.0;
+            for s in smoothed.iter_mut() {
+                *s *= RELEASE_COEFF;
+                if *s < 1e-4 {
+                    *s = 0.0;
                 } else {
                     any_nonzero = true;
                 }
@@ -538,9 +536,9 @@ mod tests {
 
         // Generate 1000 Hz sine wave at 44.1 kHz
         let mut pcm = vec![0.0f32; 4096];
-        for i in 0..4096 {
+        for (i, sample) in pcm.iter_mut().enumerate().take(4096) {
             let t = i as f32 / 44100.0;
-            pcm[i] = (2.0 * std::f32::consts::PI * 1000.0 * t).sin();
+            *sample = (2.0 * std::f32::consts::PI * 1000.0 * t).sin();
         }
         ring.push_slice(&pcm);
 

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:material_ui/material_ui.dart';
 import '../theme/lumina_tokens.dart';
@@ -42,6 +41,7 @@ class TrackProgressBar extends StatefulWidget {
 }
 
 class _TrackProgressBarState extends State<TrackProgressBar> {
+  bool _isHovered = false;
   bool _isDragging = false;
   Duration? _dragPosition;
   bool _showRemaining = false;
@@ -150,58 +150,49 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
     final currentMs = displayPosition.inMilliseconds
         .toDouble()
         .clamp(0.0, maxMs);
-    final progressRatio = (currentMs / maxMs).clamp(0.0, 1.0);
+    final isActive = _isHovered || _isDragging;
 
-    final sliderWidget = ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: 60),
-      child: SizedBox(
-        height: widget.showWaveform ? 22 : 18,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            if (widget.showWaveform)
-              Positioned.fill(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  child: CustomPaint(
-                    painter: _WaveformProgressPainter(progress: progressRatio),
-                  ),
-                ),
+    final sliderWidget = MouseRegion(
+      onEnter: (_) {
+        if (!_isHovered) setState(() => _isHovered = true);
+      },
+      onExit: (_) {
+        if (_isHovered) setState(() => _isHovered = false);
+      },
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 60),
+        child: SizedBox(
+          height: 16,
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: isActive ? 3.0 : 2.5,
+              thumbShape: _GlowingDotThumbShape(
+                radius: isActive ? 5.5 : 3.5,
+                isActive: isActive,
               ),
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: widget.showWaveform ? 0.5 : 3,
-                thumbShape: RoundSliderThumbShape(
-                  enabledThumbRadius: _isDragging ? 6.0 : 4.0,
-                ),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                overlayColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
-                activeTrackColor: widget.showWaveform
-                    ? Colors.transparent
-                    : LuminaTokens.accentPurple,
-                inactiveTrackColor: widget.showWaveform
-                    ? Colors.transparent
-                    : LuminaTokens.borderControl.withValues(alpha: 0.45),
-                thumbColor: _isDragging
-                    ? LuminaTokens.accentBlue
-                    : LuminaTokens.textPrimary,
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
+              overlayColor: LuminaTokens.glassTextPrimary.withValues(
+                alpha: 0.14,
               ),
-              child: Semantics(
-                label: '播放進度條',
-                slider: true,
-                child: Slider(
-                  key: const Key('track_progress_slider'),
-                  value: currentMs,
-                  min: 0.0,
-                  max: maxMs,
-                  mouseCursor: SystemMouseCursors.click,
-                  onChangeStart: _handleDragStart,
-                  onChanged: _handleDragChange,
-                  onChangeEnd: _handleDragEnd,
-                ),
+              activeTrackColor: LuminaTokens.glassTextPrimary,
+              inactiveTrackColor: LuminaTokens.glassTrackUnplayed,
+              thumbColor: LuminaTokens.glassTextPrimary,
+            ),
+            child: Semantics(
+              label: '播放進度條',
+              slider: true,
+              child: Slider(
+                key: const Key('track_progress_slider'),
+                value: currentMs,
+                min: 0.0,
+                max: maxMs,
+                mouseCursor: SystemMouseCursors.click,
+                onChangeStart: _handleDragStart,
+                onChanged: _handleDragChange,
+                onChangeEnd: _handleDragEnd,
               ),
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -219,8 +210,8 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
           key: const Key('progress_position_text'),
           style: TextStyle(
             color: _isDragging
-                ? LuminaTokens.focusRing
-                : LuminaTokens.textSecondary,
+                ? LuminaTokens.glassTextPrimary
+                : LuminaTokens.glassTextTertiary,
             fontSize: 11,
             fontWeight: _isDragging ? FontWeight.w600 : FontWeight.normal,
             fontFeatures: const [ui.FontFeature.tabularFigures()],
@@ -240,7 +231,7 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
             child: InkWell(
               borderRadius: BorderRadius.circular(LuminaTokens.space2xs),
               mouseCursor: SystemMouseCursors.click,
-              hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.65),
+              hoverColor: LuminaTokens.glassRowHoverBg,
               focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
               onTap: _toggleRemaining,
               child: Padding(
@@ -252,8 +243,8 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
                   key: const Key('progress_duration_text'),
                   style: TextStyle(
                     color: _showRemaining
-                        ? LuminaTokens.accentBlue
-                        : LuminaTokens.textMuted,
+                        ? LuminaTokens.glassTextSecondary
+                        : LuminaTokens.glassTextTertiary,
                     fontSize: 11,
                     fontFeatures: const [ui.FontFeature.tabularFigures()],
                   ),
@@ -267,56 +258,46 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
   }
 }
 
-class _WaveformProgressPainter extends CustomPainter {
-  final double progress;
+class _GlowingDotThumbShape extends SliderComponentShape {
+  final double radius;
+  final bool isActive;
 
-  const _WaveformProgressPainter({required this.progress});
+  const _GlowingDotThumbShape({
+    required this.radius,
+    required this.isActive,
+  });
 
   @override
-  void paint(Canvas canvas, Size size) {
-    if (size.width <= 0 || size.height <= 0) return;
-    const barWidth = 1.5;
-    const barGap = 1.6;
-    const step = barWidth + barGap;
-    final count = (size.width / step).floor().clamp(8, 280);
-    final midY = size.height / 2;
+  Size getPreferredSize(bool isEnabled, bool isDiscrete) =>
+      Size.fromRadius(radius);
 
-    final unplayedPaint = Paint()
-      ..color = LuminaTokens.borderControl.withValues(alpha: 0.58)
-      ..strokeWidth = barWidth
-      ..strokeCap = StrokeCap.round;
+  @override
+  void paint(
+    PaintingContext context,
+    Offset center, {
+    required Animation<double> activationAnimation,
+    required Animation<double> enableAnimation,
+    required bool isDiscrete,
+    required TextPainter labelPainter,
+    required RenderBox parentBox,
+    required SliderThemeData sliderTheme,
+    required TextDirection textDirection,
+    required double value,
+    required double textScaleFactor,
+    required Size sizeWithOverflow,
+  }) {
+    final canvas = context.canvas;
+    final glowPaint = Paint()
+      ..color = Colors.white.withValues(alpha: isActive ? 0.48 : 0.24)
+      ..maskFilter = MaskFilter.blur(
+        BlurStyle.normal,
+        isActive ? 5.0 : 2.5,
+      );
+    canvas.drawCircle(center, radius + (isActive ? 2.0 : 1.0), glowPaint);
 
-    final playedPaint = Paint()
-      ..strokeWidth = barWidth
-      ..strokeCap = StrokeCap.round;
-
-    for (var i = 0; i < count; i++) {
-      final norm = i / count;
-      final amp = 0.16 +
-          0.82 *
-              (0.45 +
-                  0.32 * math.sin(i * 0.37) +
-                  0.23 * math.cos(i * 1.19))
-                  .clamp(0.0, 1.0);
-      final halfH = (size.height * 0.48) * amp;
-      final x = i * step + barWidth / 2;
-      if (norm <= progress) {
-        final nearPlayhead = ((progress - norm) < 0.04)
-            ? (1.0 - (progress - norm) / 0.04)
-            : 0.0;
-        playedPaint.color = Color.lerp(
-          LuminaTokens.accentBlueStrong,
-          const Color(0xFFEC5B7E),
-          nearPlayhead,
-        )!;
-        canvas.drawLine(Offset(x, midY - halfH), Offset(x, midY + halfH), playedPaint);
-      } else {
-        canvas.drawLine(Offset(x, midY - halfH), Offset(x, midY + halfH), unplayedPaint);
-      }
-    }
+    final dotPaint = Paint()
+      ..color = LuminaTokens.glassTextPrimary
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(center, radius, dotPaint);
   }
-
-  @override
-  bool shouldRepaint(covariant _WaveformProgressPainter oldDelegate) =>
-      (oldDelegate.progress - progress).abs() > 0.002;
 }

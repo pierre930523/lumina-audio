@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/lyric.dart';
 import '../../services/audio_service.dart';
 import '../../services/now_playing_view_controller.dart';
+import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
 import '../theme/smooth_scroll.dart';
 import 'word_by_word_text.dart';
@@ -444,82 +445,102 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
     final result = await showDialog<String>(
       context: context,
       barrierColor: LuminaTokens.scrimBg,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: LuminaTokens.cardBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-          side: const BorderSide(color: LuminaTokens.borderSubtle),
-        ),
-        title: const Text(
-          '手動載入歌詞檔案',
-          style: TextStyle(
-            color: LuminaTokens.textPrimary,
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '請輸入 .lrc 或 .txt 歌詞檔案的本機路徑：',
-              style: TextStyle(color: LuminaTokens.textSecondary, fontSize: 13),
-            ),
-            const SizedBox(height: LuminaTokens.spaceSm),
-            TextField(
-              controller: textController,
-              key: const Key('input_lyrics_file_path'),
-              style: const TextStyle(
-                color: LuminaTokens.textPrimary,
-                fontSize: 13,
-              ),
-              decoration: InputDecoration(
-                hintText: 'C:\\Music\\song.lrc',
-                hintStyle: const TextStyle(color: LuminaTokens.textMuted),
-                filled: true,
-                fillColor: LuminaTokens.cardElevatedBg,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                  borderSide: const BorderSide(
-                    color: LuminaTokens.borderControl,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: FrostedGlassContainer(
+            blurSigma: LuminaTokens.glassDialogBlur,
+            color: LuminaTokens.glassDialogBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '手動載入歌詞檔案',
+                  style: TextStyle(
+                    color: LuminaTokens.glassTextPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                  borderSide: const BorderSide(
-                    color: LuminaTokens.borderControl,
+                const SizedBox(height: LuminaTokens.spaceSm),
+                const Text(
+                  '請輸入 .lrc 或 .txt 歌詞檔案的本機路徑：',
+                  style: TextStyle(
+                    color: LuminaTokens.glassTextSecondary,
+                    fontSize: 13,
                   ),
                 ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                  borderSide: const BorderSide(
-                    color: LuminaTokens.focusRing,
-                    width: 2,
+                const SizedBox(height: LuminaTokens.spaceSm),
+                TextField(
+                  controller: textController,
+                  key: const Key('input_lyrics_file_path'),
+                  style: const TextStyle(
+                    color: LuminaTokens.glassTextPrimary,
+                    fontSize: 13,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: 'C:\\Music\\song.lrc',
+                    hintStyle: const TextStyle(
+                      color: LuminaTokens.glassTextTertiary,
+                    ),
+                    filled: true,
+                    fillColor: LuminaTokens.glassCardBg,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                      borderSide: const BorderSide(
+                        color: LuminaTokens.glassPillBorder,
+                      ),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                      borderSide: const BorderSide(
+                        color: LuminaTokens.glassPillBorder,
+                      ),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                      borderSide: const BorderSide(
+                        color: LuminaTokens.focusRing,
+                        width: 2,
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(height: LuminaTokens.spaceMd),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: LuminaTokens.glassTextSecondary,
+                      ),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('取消'),
+                    ),
+                    const SizedBox(width: LuminaTokens.spaceXs),
+                    FilledButton(
+                      key: const Key('btn_confirm_lyrics_path'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: LuminaTokens.glassSwitchOnTrack,
+                        foregroundColor: LuminaTokens.onAccentDark,
+                      ),
+                      onPressed: () =>
+                          Navigator.of(ctx).pop(textController.text.trim()),
+                      child: const Text('載入'),
+                    ),
+                  ],
+                ),
+              ],
             ),
-          ],
+          ),
         ),
-        actions: [
-          TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: LuminaTokens.textSecondary,
-            ),
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const Key('btn_confirm_lyrics_path'),
-            style: FilledButton.styleFrom(
-              backgroundColor: LuminaTokens.accentBlue,
-              foregroundColor: LuminaTokens.onAccentDark,
-            ),
-            onPressed: () => Navigator.of(ctx).pop(textController.text.trim()),
-            child: const Text('載入'),
-          ),
-        ],
       ),
     );
 
@@ -543,7 +564,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
   ButtonStyle _toolbarIconStyle(Color foreground) {
     return IconButton.styleFrom(
       foregroundColor: foreground,
-      hoverColor: LuminaTokens.cardHoverBg,
+      hoverColor: LuminaTokens.glassPillHoverBg,
       focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
@@ -565,10 +586,10 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
         vertical: LuminaTokens.space2xs,
       ),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.62),
+        color: LuminaTokens.glassDrawerBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
         border: Border.all(
-          color: Colors.white.withValues(alpha: 0.18),
+          color: LuminaTokens.glassPillBorder,
         ),
       ),
       child: Row(
@@ -578,7 +599,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_lyrics_font_down'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white70),
+            style: _toolbarIconStyle(LuminaTokens.glassTextSecondary),
             tooltip: '縮小歌詞字體',
             icon: const Icon(Icons.text_decrease_rounded, size: 17),
             onPressed: () => _updateFontScale(_fontScale - 0.1),
@@ -586,7 +607,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
           Text(
             '${(_fontScale * 100).round()}%',
             style: const TextStyle(
-              color: Colors.white,
+              color: LuminaTokens.glassTextPrimary,
               fontSize: 11.5,
               fontWeight: FontWeight.w600,
               fontFeatures: [ui.FontFeature.tabularFigures()],
@@ -596,7 +617,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_lyrics_font_up'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white70),
+            style: _toolbarIconStyle(LuminaTokens.glassTextSecondary),
             tooltip: '放大歌詞字體',
             icon: const Icon(Icons.text_increase_rounded, size: 17),
             onPressed: () => _updateFontScale(_fontScale + 0.1),
@@ -605,7 +626,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
           const SizedBox(
             height: 16,
             child: VerticalDivider(
-              color: Colors.white24,
+              color: LuminaTokens.glassPillBorder,
               width: 1,
             ),
           ),
@@ -614,7 +635,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_lyrics_offset_minus'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white70),
+            style: _toolbarIconStyle(LuminaTokens.glassTextSecondary),
             tooltip: '歌詞提前 0.5 秒',
             icon: const Icon(Icons.fast_rewind_rounded, size: 17),
             onPressed: () => _updateDisplayOffset(
@@ -627,7 +648,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
                 : '${_displayOffset.inMilliseconds > 0 ? '+' : ''}${(_displayOffset.inMilliseconds / 1000).toStringAsFixed(1)}s',
             key: const Key('lyrics_offset_label'),
             style: const TextStyle(
-              color: Colors.white,
+              color: LuminaTokens.glassTextPrimary,
               fontSize: 11.5,
               fontWeight: FontWeight.w600,
               fontFeatures: [ui.FontFeature.tabularFigures()],
@@ -637,7 +658,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_lyrics_offset_plus'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white70),
+            style: _toolbarIconStyle(LuminaTokens.glassTextSecondary),
             tooltip: '歌詞延後 0.5 秒',
             icon: const Icon(Icons.fast_forward_rounded, size: 17),
             onPressed: () => _updateDisplayOffset(
@@ -648,7 +669,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
           const SizedBox(
             height: 16,
             child: VerticalDivider(
-              color: Colors.white24,
+              color: LuminaTokens.glassPillBorder,
               width: 1,
             ),
           ),
@@ -657,7 +678,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_load_lyrics_file'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(LuminaTokens.accentBlue),
+            style: _toolbarIconStyle(LuminaTokens.glassTextPrimary),
             tooltip: '載入自訂 .lrc / .txt 歌詞',
             icon: const Icon(Icons.file_open_outlined, size: 17),
             onPressed: _promptManualLyrics,
@@ -666,7 +687,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_clear_lyrics_file'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white54),
+            style: _toolbarIconStyle(LuminaTokens.glassTextTertiary),
             tooltip: '清除自訂歌詞',
             icon: const Icon(Icons.delete_sweep_outlined, size: 17),
             onPressed: _clearManualLyrics,
@@ -675,7 +696,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
           const SizedBox(
             height: 16,
             child: VerticalDivider(
-              color: Colors.white24,
+              color: LuminaTokens.glassPillBorder,
               width: 1,
             ),
           ),
@@ -684,7 +705,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
             key: const Key('btn_lyrics_toolbar_close'),
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            style: _toolbarIconStyle(Colors.white60),
+            style: _toolbarIconStyle(LuminaTokens.glassTextSecondary),
             tooltip: '收合歌詞設定',
             icon: const Icon(Icons.close_rounded, size: 16),
             onPressed: () => _setSettingsExpanded(false),
@@ -704,16 +725,16 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
+              const Icon(
                 Icons.lyrics_outlined,
                 size: 54,
-                color: LuminaTokens.textMuted.withValues(alpha: 0.65),
+                color: LuminaTokens.glassTextTertiary,
               ),
               const SizedBox(height: LuminaTokens.spaceSm),
               const Text(
                 '尚無歌詞資訊',
                 style: TextStyle(
-                  color: LuminaTokens.textPrimary,
+                  color: LuminaTokens.glassTextPrimary,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                 ),
@@ -722,7 +743,10 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
               const Text(
                 '本曲目未內嵌歌詞，亦無同名 .lrc 歌詞檔',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: LuminaTokens.textMuted, fontSize: 12.5),
+                style: TextStyle(
+                  color: LuminaTokens.glassTextSecondary,
+                  fontSize: 12.5,
+                ),
               ),
               const SizedBox(height: LuminaTokens.spaceMd),
               OutlinedButton.icon(
@@ -731,8 +755,9 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
                 icon: const Icon(Icons.add_rounded, size: 17),
                 label: const Text('匯入外部歌詞 (.lrc / .txt)'),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: LuminaTokens.accentBlue,
-                  side: const BorderSide(color: LuminaTokens.borderControl),
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  side: const BorderSide(color: LuminaTokens.glassPillBorder),
                   padding: const EdgeInsets.symmetric(
                     horizontal: LuminaTokens.spaceMd,
                     vertical: LuminaTokens.spaceSm,
@@ -877,8 +902,8 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
                                       curve: Curves.easeOutCubic,
                                       style: TextStyle(
                                         color: isActive
-                                            ? LuminaTokens.textPrimary
-                                            : LuminaTokens.textSecondary,
+                                            ? LuminaTokens.glassTextPrimary
+                                            : LuminaTokens.glassTextSecondary,
                                         fontSize: (isActive ? 26.0 : 19.0) * _fontScale,
                                         fontWeight: isActive
                                             ? FontWeight.w800
@@ -937,8 +962,7 @@ class _LyricsViewState extends State<LyricsView> with WidgetsBindingObserver {
                                         mouseCursor: seekable
                                             ? SystemMouseCursors.click
                                             : SystemMouseCursors.basic,
-                                        hoverColor: LuminaTokens.cardHoverBg
-                                            .withValues(alpha: 0.38),
+                                        hoverColor: LuminaTokens.glassRowHoverBg,
                                         focusColor: LuminaTokens.focusRing
                                             .withValues(alpha: 0.2),
                                         onTap: seekable
@@ -1065,15 +1089,15 @@ class _LyricsToolbarToggleButtonState
               ),
               decoration: BoxDecoration(
                 color: _hovered
-                    ? Colors.white.withValues(alpha: 0.22)
-                    : Colors.black.withValues(alpha: 0.48),
+                    ? LuminaTokens.glassPillHoverBg
+                    : LuminaTokens.glassDrawerBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
                 border: Border.all(
                   color: _focused
                       ? LuminaTokens.focusRing
-                      : Colors.white.withValues(
-                          alpha: _hovered ? 0.35 : 0.18,
-                        ),
+                      : (_hovered
+                            ? LuminaTokens.glassCoverRim
+                            : LuminaTokens.glassPillBorder),
                   width: 1,
                 ),
               ),

@@ -35,11 +35,10 @@ class ProvidersAndRemotePanel extends StatefulWidget {
 }
 
 class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
-  static const _activeRowBg = LuminaTokens.cardElevatedBg;
-  static const _cardBg = LuminaTokens.cardBg;
-  static const _dividerColor = LuminaTokens.borderSubtle;
-  static const _accentLavender = LuminaTokens.accentPurpleText;
-  static const _accentBlue = LuminaTokens.accentBlue;
+  static const _activeRowBg = LuminaTokens.glassCardActiveBg;
+  static const _cardBg = LuminaTokens.glassCardBg;
+  static const _cardBorder = LuminaTokens.glassCardBorder;
+  static const _activeIndicator = LuminaTokens.glassSwitchOnTrack;
 
   final _webdavUriCtrl = TextEditingController();
   final _smbUriCtrl = TextEditingController();
@@ -298,7 +297,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                     ),
                     decoration: BoxDecoration(
                       color: _statusIsError
-                          ? LuminaTokens.statusErrorBg
+                          ? LuminaTokens.statusError.withValues(alpha: 0.14)
                           : LuminaTokens.statusSuccess.withValues(alpha: 0.14),
                       borderRadius: BorderRadius.circular(
                         LuminaTokens.radiusSm,
@@ -507,7 +506,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
               isReady: env.isYtDlpAvailable,
               tooltip: env.ytDlpPath,
             ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             _buildEngineStatusRow(
               key: const Key('deno_status_row'),
               label: 'Deno 執行時期',
@@ -515,7 +514,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
               isReady: env.isDenoAvailable,
               tooltip: env.denoPath,
             ),
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             _buildEngineStatusRow(
               key: const Key('ffmpeg_status_row'),
               label: 'FFmpeg 轉碼引擎',
@@ -527,7 +526,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
             ),
             if (env.lastUpdateMessage != null &&
                 env.lastUpdateMessage!.isNotEmpty) ...[
-              const Divider(color: LuminaTokens.borderSubtle, height: 1),
+              const Divider(color: LuminaTokens.glassCardDivider, height: 1),
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: LuminaTokens.spaceMd + LuminaTokens.space2xs,
@@ -540,7 +539,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                     color: env.lastUpdateMessage!.startsWith('更新失敗')
                         ? LuminaTokens.statusError
                         : (env.isUpdating
-                              ? LuminaTokens.accentBlue
+                              ? LuminaTokens.glassTextPrimary
                               : LuminaTokens.statusSuccess),
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
@@ -548,7 +547,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                 ),
               ),
             ],
-            const Divider(color: LuminaTokens.borderSubtle, height: 1),
+            const Divider(color: LuminaTokens.glassCardDivider, height: 1),
             Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: LuminaTokens.spaceMd + LuminaTokens.space2xs,
@@ -705,7 +704,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     final Color subtitleColor;
     if (isAuthenticating) {
       subtitleText = _streamingManager.progressMessageFor(kind) ?? '連線中...';
-      subtitleColor = LuminaTokens.accentBlue;
+      subtitleColor = LuminaTokens.glassTextPrimary;
     } else if (isConnected) {
       final accountLabel = info != null
           ? ((info.planTier != null && info.planTier!.isNotEmpty)
@@ -726,15 +725,15 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     }
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: LuminaTokens.space2xs),
+      padding: const EdgeInsets.only(bottom: LuminaTokens.spaceXs),
       child: Material(
-        color: isInUse ? _activeRowBg : Colors.transparent,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+        color: isInUse ? _activeRowBg : _cardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
         child: InkWell(
           key: Key('provider_row_$kind'),
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+          borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
           mouseCursor: SystemMouseCursors.click,
-          hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.6),
+          hoverColor: LuminaTokens.glassRowHoverBg,
           focusColor: LuminaTokens.focusRing.withValues(alpha: 0.16),
           onTap: isAuthenticating ? null : () => _openStreamingLoginDialog(meta),
           child: Container(
@@ -743,13 +742,13 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
               vertical: LuminaTokens.spaceSm,
             ),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
               border: Border.all(
                 color: isInUse
-                    ? LuminaTokens.borderControl
+                    ? LuminaTokens.glassCoverRim
                     : (isError
                           ? LuminaTokens.statusError.withValues(alpha: 0.5)
-                          : Colors.transparent),
+                          : _cardBorder),
               ),
             ),
             child: LayoutBuilder(
@@ -761,7 +760,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                       borderRadius: LuminaTokens.radiusSm,
                       overrideBackground: isInUse
                           ? meta.badgeColor
-                          : LuminaTokens.cardElevatedBg,
+                          : LuminaTokens.glassPillBg,
                       glyphOpacity: isInUse ? 1.0 : 0.88,
                     ),
                     const SizedBox(width: LuminaTokens.spaceSm),
@@ -842,13 +841,13 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                         height: 14,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: LuminaTokens.accentBlue,
+                          color: LuminaTokens.glassTextPrimary,
                         ),
                       ),
                       const Text(
                         '連線中...',
                         style: TextStyle(
-                          color: LuminaTokens.accentBlue,
+                          color: LuminaTokens.glassTextPrimary,
                           fontSize: 12.5,
                           fontWeight: FontWeight.w500,
                         ),
@@ -917,7 +916,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                               LuminaTokens.radiusPill,
                             ),
                             mouseCursor: SystemMouseCursors.click,
-                            hoverColor: LuminaTokens.cardHoverBg,
+                            hoverColor: LuminaTokens.glassPillHoverBg,
                             focusColor: LuminaTokens.focusRing.withValues(
                               alpha: 0.24,
                             ),
@@ -937,7 +936,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                                       width: 18,
                                       height: 18,
                                       decoration: const BoxDecoration(
-                                        color: _accentLavender,
+                                        color: _activeIndicator,
                                         shape: BoxShape.circle,
                                       ),
                                       child: Center(
@@ -957,7 +956,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                                       decoration: BoxDecoration(
                                         shape: BoxShape.circle,
                                         border: Border.all(
-                                          color: LuminaTokens.borderControl,
+                                          color: LuminaTokens.glassPillBorder,
                                           width: 1.5,
                                         ),
                                       ),
@@ -993,7 +992,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                     key: Key('btn_signin_$kind'),
                     onPressed: () => _openStreamingLoginDialog(meta),
                     style: TextButton.styleFrom(
-                      foregroundColor: LuminaTokens.accentBlue,
+                      foregroundColor: LuminaTokens.glassTextPrimary,
                       minimumSize: const Size(0, 32),
                       padding: const EdgeInsets.symmetric(
                         horizontal: LuminaTokens.spaceSm,
@@ -1125,18 +1124,18 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
     final isExpanded = _expandedSection == kind;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: LuminaTokens.space2xs),
+      padding: const EdgeInsets.only(bottom: LuminaTokens.spaceXs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Material(
-            color: isInUse ? _activeRowBg : Colors.transparent,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+            color: isInUse ? _activeRowBg : _cardBg,
+            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
             child: InkWell(
               key: Key('provider_row_$kind'),
-              borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
               mouseCursor: SystemMouseCursors.click,
-              hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.6),
+              hoverColor: LuminaTokens.glassRowHoverBg,
               focusColor: LuminaTokens.focusRing.withValues(alpha: 0.16),
               onTap: () => _toggleExpand(kind),
               child: Container(
@@ -1145,11 +1144,11 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                   vertical: LuminaTokens.spaceSm,
                 ),
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+                  borderRadius: BorderRadius.circular(
+                    LuminaTokens.glassCardRadius,
+                  ),
                   border: Border.all(
-                    color: isInUse
-                        ? LuminaTokens.borderControl
-                        : Colors.transparent,
+                    color: isInUse ? LuminaTokens.glassCoverRim : _cardBorder,
                   ),
                 ),
                 child: Row(
@@ -1158,9 +1157,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                       width: 28,
                       height: 28,
                       decoration: BoxDecoration(
-                        color: isInUse
-                            ? badgeColor
-                            : LuminaTokens.cardElevatedBg,
+                        color: isInUse ? badgeColor : LuminaTokens.glassPillBg,
                         borderRadius: BorderRadius.circular(
                           LuminaTokens.radiusSm,
                         ),
@@ -1168,8 +1165,8 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                             ? null
                             : Border.all(
                                 color: isConfigured
-                                    ? LuminaTokens.borderControl
-                                    : _dividerColor,
+                                    ? LuminaTokens.glassCoverRim
+                                    : _cardBorder,
                               ),
                       ),
                       child: Center(
@@ -1214,7 +1211,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                               child: Text(
                                 '已登入就緒',
                                 style: TextStyle(
-                                  color: LuminaTokens.accentBlue,
+                                  color: LuminaTokens.glassTextPrimary,
                                   fontSize: 12,
                                   fontWeight: FontWeight.w500,
                                 ),
@@ -1273,7 +1270,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                               LuminaTokens.radiusPill,
                             ),
                             mouseCursor: SystemMouseCursors.click,
-                            hoverColor: LuminaTokens.cardHoverBg,
+                            hoverColor: LuminaTokens.glassPillHoverBg,
                             focusColor: LuminaTokens.focusRing.withValues(
                               alpha: 0.24,
                             ),
@@ -1293,7 +1290,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                                       width: 18,
                                       height: 18,
                                       decoration: const BoxDecoration(
-                                        color: _accentLavender,
+                                        color: _activeIndicator,
                                         shape: BoxShape.circle,
                                       ),
                                       child: Center(
@@ -1313,7 +1310,7 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                                       decoration: BoxDecoration(
                                         shape: BoxShape.circle,
                                         border: Border.all(
-                                          color: LuminaTokens.borderControl,
+                                          color: LuminaTokens.glassPillBorder,
                                           width: 1.5,
                                         ),
                                       ),
@@ -1343,9 +1340,9 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                     decoration: BoxDecoration(
                       color: _cardBg,
                       borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusMd,
+                        LuminaTokens.glassCardRadius,
                       ),
-                      border: Border.all(color: _dividerColor),
+                      border: Border.all(color: _cardBorder),
                     ),
                     child: formBuilder(),
                   )
@@ -1365,12 +1362,12 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
       children: [
         Material(
           color: isRemoteActive ? _activeRowBg : _cardBg,
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+          borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
           child: InkWell(
             key: const Key('row_remote_pairing_toggle'),
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
             mouseCursor: SystemMouseCursors.click,
-            hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.6),
+            hoverColor: LuminaTokens.glassRowHoverBg,
             focusColor: LuminaTokens.focusRing.withValues(alpha: 0.16),
             onTap: () => _toggleExpand('remote'),
             child: Container(
@@ -1379,9 +1376,13 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                 vertical: LuminaTokens.spaceSm,
               ),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+                borderRadius: BorderRadius.circular(
+                  LuminaTokens.glassCardRadius,
+                ),
                 border: Border.all(
-                  color: isRemoteActive ? _accentBlue : _dividerColor,
+                  color: isRemoteActive
+                      ? LuminaTokens.glassCoverRim
+                      : _cardBorder,
                 ),
               ),
               child: Row(
@@ -1390,15 +1391,16 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                     width: 28,
                     height: 28,
                     decoration: BoxDecoration(
-                      color: _accentBlue.withValues(alpha: 0.2),
+                      color: LuminaTokens.glassPillBg,
                       borderRadius: BorderRadius.circular(
                         LuminaTokens.radiusSm,
                       ),
+                      border: Border.all(color: LuminaTokens.glassPillBorder),
                     ),
                     child: const Icon(
                       Icons.router_outlined,
                       size: 16,
-                      color: _accentBlue,
+                      color: LuminaTokens.glassTextPrimary,
                     ),
                   ),
                   const SizedBox(width: LuminaTokens.spaceSm),
@@ -1455,8 +1457,10 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                   padding: const EdgeInsets.all(LuminaTokens.spaceMd),
                   decoration: BoxDecoration(
                     color: _cardBg,
-                    borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                    border: Border.all(color: _dividerColor),
+                    borderRadius: BorderRadius.circular(
+                      LuminaTokens.glassCardRadius,
+                    ),
+                    border: Border.all(color: _cardBorder),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1520,9 +1524,9 @@ class _ProvidersAndRemotePanelState extends State<ProvidersAndRemotePanel> {
                               message:
                                   '帶入伺服器位址 ${srv.httpBaseUrl}',
                               child: ActionChip(
-                                backgroundColor: LuminaTokens.cardElevatedBg,
+                                backgroundColor: LuminaTokens.glassPillBg,
                                 side: const BorderSide(
-                                  color: LuminaTokens.borderControl,
+                                  color: LuminaTokens.glassPillBorder,
                                 ),
                                 labelStyle: const TextStyle(
                                   color: LuminaTokens.textPrimary,

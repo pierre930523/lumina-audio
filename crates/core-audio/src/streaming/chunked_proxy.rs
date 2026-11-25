@@ -838,7 +838,7 @@ impl ChunkedStreamProxy {
     /// Sets byte-boundary alignment for all HTTP `Range` requests (e.g. `6144` for Deezer stripes).
     pub fn with_range_alignment(mut self, alignment: usize) -> Self {
         self.alignment = alignment.max(1);
-        if self.alignment > 1 && self.initial_chunk_size % self.alignment != 0 {
+        if self.alignment > 1 && !self.initial_chunk_size.is_multiple_of(self.alignment) {
             self.initial_chunk_size = (self.initial_chunk_size / self.alignment)
                 .max(1)
                 .saturating_mul(self.alignment);
@@ -1230,7 +1230,11 @@ impl ChunkedStreamProxy {
             return Ok(len);
         }
 
-        let _probe_guard = self.probe_lock.lock().await;
+        let _probe_guard = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Err(StreamError::Cancelled),
+            g = self.probe_lock.lock() => g,
+        };
         if let Ok(guard) = self.content_length.lock()
             && let Some(len) = *guard
         {
@@ -1263,7 +1267,7 @@ impl ChunkedStreamProxy {
             let _ = tx.send(Some(res));
         });
 
-        let total_len = await_watch_result(&mut rx).await?;
+        let total_len = await_watch_result(&mut rx, &self.cancel).await?;
         if let Ok(mut guard) = self.content_length.lock() {
             *guard = Some(total_len);
         }
@@ -1425,7 +1429,7 @@ impl ChunkedStreamProxy {
                 }
             };
 
-            match await_watch_result(&mut rx).await {
+            match await_watch_result(&mut rx, &self.cancel).await {
                 Ok(bytes) => return Ok((start, bytes)),
                 Err(StreamError::HttpStatus(403 | 410)) if joined_bg_prefetch => {
                     // Background read-ahead silently aborted on 403/410 without consuming retries;
@@ -1725,12 +1729,10 @@ async fn fetch_range_chunk(
         }
 
         // Verify resumed Content-Range total matches previously known content_length
-        let resp_total = resp.content_range_total.or_else(|| {
-            if resp.status == 200 {
-                resp.content_length
-            } else {
-                None
-            }
+        let resp_total = resp.content_range_total.or(if resp.status == 200 {
+            resp.content_length
+        } else {
+            None
         });
         if let Some(actual_len) = resp_total {
             match ctx.known_content_length() {

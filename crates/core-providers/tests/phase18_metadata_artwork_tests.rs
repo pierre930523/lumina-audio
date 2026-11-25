@@ -37,6 +37,7 @@ fn encode_syncsafe(val: u32) -> [u8; 4] {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_id3v2_tag(
     title: Option<&str>,
     artist: Option<&str>,
@@ -116,7 +117,7 @@ fn create_wav_fixture(
 
     let bytes_per_sec = sample_rate * channels as u32 * (bit_depth as u32 / 8);
     let block_align = channels * (bit_depth / 8);
-    let data_len = bytes_per_sec * 1; // 1 second
+    let data_len = bytes_per_sec; // 1 second
 
     // Write dummy RIFF header (length will be patched or arbitrary valid length)
     file.write_all(b"RIFF\x00\x00\x00\x00WAVE").unwrap();
@@ -185,7 +186,7 @@ fn create_wav_fixture(
 
     // data chunk
     file.write_all(b"data").unwrap();
-    file.write_all(&(data_len as u32).to_le_bytes()).unwrap();
+    file.write_all(&data_len.to_le_bytes()).unwrap();
     file.write_all(&vec![0u8; data_len as usize]).unwrap();
 
     let total_len = file.metadata().unwrap().len() as u32;
@@ -909,7 +910,7 @@ async fn test_corrupt_artwork_rejected_at_max_dim_zero() {
     create_wav_fixture(&track_path, 44100, 2, 16, None, None);
 
     // Corrupt JPEG with valid FF D8 FF magic header followed by garbage bytes
-    fs::write(tmp.path().join("cover.jpg"), &[0xFF, 0xD8, 0xFF, 0x00, 0x01, 0x02]).unwrap();
+    fs::write(tmp.path().join("cover.jpg"), [0xFF, 0xD8, 0xFF, 0x00, 0x01, 0x02]).unwrap();
 
     let res = ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
         .await

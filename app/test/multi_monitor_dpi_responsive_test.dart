@@ -8,9 +8,9 @@ import 'package:lumina_app/services/media_sources_controller.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
 import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
+import 'package:lumina_app/ui/common/audio_quality_badge.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:lumina_app/ui/mini_player/playback_controls.dart';
-import 'package:lumina_app/ui/signal_path/quality_badge.dart';
 import 'package:material_ui/material_ui.dart';
 
 final List<int> _valid1x1Png = base64Decode(
@@ -238,7 +238,7 @@ void main() {
       );
       final playCenter = tester.getCenter(find.byKey(const Key('btn_play_pause')));
       expect((playCenter.dx - capsuleRect.center.dx).abs(), lessThan(1.0));
-      expect(find.byType(QualityBadge), findsOneWidget);
+      expect(find.byType(AudioQualityBadge), findsOneWidget);
 
       // Albums
       await tester.tap(find.byKey(const Key('nav_tab_albums')));
@@ -379,12 +379,16 @@ void main() {
 
       final thumbs = _findDecodedThumbnails(tester);
       expect(thumbs, isNotEmpty);
+      expect(
+        thumbs.any((item) => _decodedCacheWidth(item.image) != 128),
+        isTrue,
+      );
       for (final item in thumbs) {
         final expectedNoDouble = (item.view.size * 2.5).ceil().clamp(128, 2048);
         final wrongDoubleScaled =
             (item.view.size * 2.5 * 1.25).ceil().clamp(128, 2048);
         expect(_decodedCacheWidth(item.image), expectedNoDouble);
-        if (expectedNoDouble != 2048) {
+        if (expectedNoDouble != 128 && expectedNoDouble != 2048) {
           expect(_decodedCacheWidth(item.image), isNot(wrongDoubleScaled));
         }
       }

@@ -57,6 +57,7 @@ pub use stream::{
 };
 
 use core_types::{AudioFormat, OutputBackendKind, SignalPath};
+pub use core_types::DeckTrackMetadata;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

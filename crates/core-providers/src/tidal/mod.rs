@@ -538,10 +538,35 @@ impl TidalProvider {
     }
 
     fn map_http_error(&self, status: u16, context: &str, body: &str) -> Result<(), ProviderError> {
+        let lower = body.to_ascii_lowercase();
+        let is_geo_blocked = lower.contains("not available in your")
+            || lower.contains("region")
+            || lower.contains("territory")
+            || lower.contains("country")
+            || lower.contains("geo-block")
+            || lower.contains("geoblock");
+        let is_takedown = lower.contains("no longer available")
+            || lower.contains("takedown")
+            || lower.contains("asset is not ready")
+            || lower.contains("track unavailable")
+            || lower.contains("unavailable for streaming");
+
         match status {
             200..=299 => Ok(()),
             401 => Err(ProviderError::AuthenticationFailed(format!(
                 "Tidal {context} unauthorized (HTTP 401)"
+            ))),
+            451 => Err(ProviderError::RegionRestricted(format!(
+                "Tidal {context} region restricted (HTTP 451): {body}"
+            ))),
+            410 => Err(ProviderError::TrackUnavailable(format!(
+                "Tidal {context} track removed/unavailable (HTTP 410): {body}"
+            ))),
+            403 if is_geo_blocked => Err(ProviderError::RegionRestricted(format!(
+                "Tidal {context} geo-restricted (HTTP 403): {body}"
+            ))),
+            403 if is_takedown => Err(ProviderError::TrackUnavailable(format!(
+                "Tidal {context} track unavailable (HTTP 403): {body}"
             ))),
             403 => Err(ProviderError::StreamResolutionFailed(format!(
                 "Tidal {context} forbidden (HTTP 403): {body}"
@@ -947,8 +972,53 @@ impl StreamResolver for TidalProvider {
         validate_stream_key("tidal", key)?;
         let default_quality = self.config.read().await.audio_quality.clone();
         let requested_quality = tidal_audio_quality(&key.quality_key, &default_quality)?;
+        let fallback_tiers = tidal_quality_fallback_chain(&requested_quality);
+
+        let mut last_err: Option<ProviderError> = None;
+        for tier in fallback_tiers {
+            match self.resolve_source_for_quality(key, tier).await {
+                Ok(spec) => return Ok(spec),
+                Err(err) => {
+                    let can_downgrade = matches!(
+                        err,
+                        ProviderError::StreamResolutionFailed(_)
+                            | ProviderError::UnsupportedFormat(_)
+                    );
+                    if !can_downgrade {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            ProviderError::StreamResolutionFailed(format!(
+                "Tidal failed to resolve track '{}' at any quality tier",
+                key.track_id
+            ))
+        }))
+    }
+}
+
+fn tidal_quality_fallback_chain(requested: &str) -> Vec<&'static str> {
+    match requested {
+        "HI_RES_LOSSLESS" | "HI_RES" => vec!["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"],
+        "LOSSLESS" => vec!["LOSSLESS", "HIGH", "LOW"],
+        "HIGH" => vec!["HIGH", "LOW"],
+        "LOW" => vec!["LOW"],
+        _ => vec!["LOSSLESS", "HIGH", "LOW"],
+    }
+}
+
+impl TidalProvider {
+    async fn resolve_source_for_quality(
+        &self,
+        key: &StreamKey,
+        requested_quality: &str,
+    ) -> Result<StreamSourceSpec, ProviderError> {
         let (info, auth_header) = self
-            .fetch_playback_info(&key.track_id, &requested_quality)
+            .fetch_playback_info(&key.track_id, requested_quality)
             .await?;
 
         let headers = BTreeMap::from([("Authorization".to_string(), auth_header)]);
@@ -971,7 +1041,7 @@ impl StreamResolver for TidalProvider {
             .or_else(|| info.urls.into_iter().find(|s| !s.trim().is_empty()))
         {
             let format = audio_format_for_tidal_quality(
-                info.audio_quality.as_deref().or(Some(&requested_quality)),
+                info.audio_quality.as_deref().or(Some(requested_quality)),
                 info.sample_rate,
                 info.bit_depth,
             )?;
@@ -1042,7 +1112,7 @@ impl StreamResolver for TidalProvider {
 
         let bts = parse_tidal_bts_manifest(&manifest_b64)?;
         let format = audio_format_for_tidal_quality(
-            info.audio_quality.as_deref().or(Some(&requested_quality)),
+            info.audio_quality.as_deref().or(Some(requested_quality)),
             info.sample_rate,
             info.bit_depth,
         )?;
@@ -1432,5 +1502,76 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err_403, ProviderError::StreamResolutionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_tidal_quality_downgrade_and_region_restricted_451() {
+        let transport = Arc::new(MockHttpTransport::new());
+        transport
+            .register_fn("tracks/777/playbackinfo", |req| {
+                let quality = req
+                    .query_params
+                    .iter()
+                    .find(|(k, _)| k == "audioquality")
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("");
+                if quality == "HI_RES_LOSSLESS" {
+                    return Ok(HttpResponse {
+                        status: 403,
+                        headers: vec![],
+                        body: r#"{"userMessage":"Tier not entitled"}"#.to_string(),
+                    });
+                }
+                let manifest_json = serde_json::json!({
+                    "mimeType": "audio/flac",
+                    "codecs": "flac",
+                    "encryptionType": "NONE",
+                    "urls": ["https://sp-cf.tidal.com/777-lossless.flac"]
+                });
+                let b64 = STANDARD.encode(manifest_json.to_string().as_bytes());
+                Ok(HttpResponse::ok_json(
+                    serde_json::json!({
+                        "audioQuality": "LOSSLESS",
+                        "sampleRate": 44100,
+                        "bitDepth": 16,
+                        "manifestMimeType": "application/vnd.tidal.bts",
+                        "manifest": b64
+                    })
+                    .to_string(),
+                ))
+            })
+            .await;
+
+        transport
+            .register_exact(
+                "tracks/451/playbackinfo",
+                HttpResponse {
+                    status: 451,
+                    headers: vec![],
+                    body: r#"{"userMessage":"Not available in your country"}"#.to_string(),
+                },
+            )
+            .await;
+
+        let provider = make_logged_in_tidal(transport).await;
+
+        // HI_RES_LOSSLESS downgrades cleanly to LOSSLESS
+        let spec = provider
+            .resolve_source(&StreamKey::new("tidal", "777", "HI_RES_LOSSLESS"))
+            .await
+            .unwrap();
+        match spec {
+            StreamSourceSpec::DirectRange { url, .. } => {
+                assert_eq!(url, "https://sp-cf.tidal.com/777-lossless.flac");
+            }
+            other => panic!("expected DirectRange, got {other:?}"),
+        }
+
+        // HTTP 451 maps directly to RegionRestricted without downgrading
+        let err_451 = provider
+            .resolve_source(&StreamKey::new("tidal", "451", "LOSSLESS"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err_451, ProviderError::RegionRestricted(_)));
     }
 }

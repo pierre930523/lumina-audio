@@ -21,6 +21,7 @@ pub use l2_cache::*;
 pub use library::*;
 pub use lyrics::*;
 pub use playback::*;
+pub use providers::lumina_provider_list;
 pub use sidecar::*;
 pub use streaming_bridge::*;
 pub use visualizer::*;
@@ -124,8 +125,7 @@ pub extern "C" fn lumina_last_error_message() -> *mut c_char {
         }
         return string_to_c_char(&err);
     }
-    if let Ok(guard) = engine.player.read()
-        && let Some(ref player) = *guard
+    if let Some(player) = engine.player_clone()
         && let Some(err) = player.take_last_error()
     {
         return string_to_c_char(&err);

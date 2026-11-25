@@ -692,13 +692,35 @@ pub(crate) fn accepts_byte_ranges(headers: &HeaderMap) -> bool {
 
 pub(crate) async fn await_watch_result<T: Clone>(
     rx: &mut tokio::sync::watch::Receiver<Option<Result<T, StreamError>>>,
+    cancel: &CancellationToken,
 ) -> Result<T, StreamError> {
     loop {
         if let Some(res) = rx.borrow().clone() {
             return res;
         }
-        if rx.changed().await.is_err() {
+        if cancel.is_cancelled() {
+            // Brief 3 ms grace window so cooperative download tasks finish dropping
+            // `InFlightDownloadGuard` and their watch sender, while guaranteeing < 5 ms cancel.
+            let _ = tokio::time::timeout(Duration::from_millis(3), async {
+                while rx.changed().await.is_ok() {}
+            })
+            .await;
             return Err(StreamError::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let _ = tokio::time::timeout(Duration::from_millis(3), async {
+                    while rx.changed().await.is_ok() {}
+                })
+                .await;
+                return Err(StreamError::Cancelled);
+            }
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return Err(StreamError::Cancelled);
+                }
+            }
         }
     }
 }
@@ -776,8 +798,12 @@ pub(crate) async fn execute_with_epoch_watch(
                         "HTTP request interrupted repeatedly by network epoch change".to_string(),
                     ));
                 }
-                // Watch sender closed; continue awaiting original request.
-                return req_fut.await;
+                // Watch sender closed; continue awaiting original request while still honoring cancel.
+                return tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(StreamError::Cancelled),
+                    res = req_fut => res,
+                };
             }
         }
     }

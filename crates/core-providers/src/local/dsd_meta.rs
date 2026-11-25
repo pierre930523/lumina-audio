@@ -648,8 +648,7 @@ pub fn parse_id3v2_body(raw_body: &[u8], major: u8, tag_flags: u8) -> Id3v2Parse
                         }
                         found.unwrap_or(0)
                     } else {
-                        let pos = rest.iter().position(|&b| b == 0).map(|p| p + 1).unwrap_or(0);
-                        pos
+                        rest.iter().position(|&b| b == 0).map(|p| p + 1).unwrap_or(0)
                     };
                     if txt_start <= rest.len() {
                         let raw_lyrics = &rest[txt_start..];
@@ -660,48 +659,44 @@ pub fn parse_id3v2_body(raw_body: &[u8], major: u8, tag_flags: u8) -> Id3v2Parse
                     }
                 }
             }
-            "APIC" => {
-                if frame_payload.len() > 3 {
-                    let enc = frame_payload[0];
-                    let mut idx = 1;
-                    if let Some(me) = frame_payload[idx..].iter().position(|&b| b == 0) {
-                        let mime_raw = &frame_payload[idx..idx + me];
-                        let mime_str = String::from_utf8_lossy(mime_raw).to_ascii_lowercase();
-                        let mime_type = if mime_str.is_empty() || mime_str == "image/" {
-                            "image/jpeg".to_string()
-                        } else if mime_str == "jpg" {
-                            "image/jpeg".to_string()
-                        } else if mime_str == "png" {
-                            "image/png".to_string()
-                        } else {
-                            mime_str
-                        };
-                        idx += me + 1;
-                        if idx < frame_payload.len() {
-                            let pic_type_byte = frame_payload[idx];
-                            idx += 1;
-                            let desc_bytes = &frame_payload[idx..];
-                            let data_start = if enc == 1 || enc == 2 {
-                                let mut desc_end = desc_bytes.len();
-                                for i in (0..desc_bytes.len().saturating_sub(1)).step_by(2) {
-                                    if desc_bytes[i] == 0 && desc_bytes[i + 1] == 0 {
-                                        desc_end = i + 2;
-                                        break;
-                                    }
+            "APIC" if frame_payload.len() > 3 => {
+                let enc = frame_payload[0];
+                let mut idx = 1;
+                if let Some(me) = frame_payload[idx..].iter().position(|&b| b == 0) {
+                    let mime_raw = &frame_payload[idx..idx + me];
+                    let mime_str = String::from_utf8_lossy(mime_raw).to_ascii_lowercase();
+                    let mime_type = if mime_str.is_empty() || mime_str == "image/" || mime_str == "jpg" {
+                        "image/jpeg".to_string()
+                    } else if mime_str == "png" {
+                        "image/png".to_string()
+                    } else {
+                        mime_str
+                    };
+                    idx += me + 1;
+                    if idx < frame_payload.len() {
+                        let pic_type_byte = frame_payload[idx];
+                        idx += 1;
+                        let desc_bytes = &frame_payload[idx..];
+                        let data_start = if enc == 1 || enc == 2 {
+                            let mut desc_end = desc_bytes.len();
+                            for i in (0..desc_bytes.len().saturating_sub(1)).step_by(2) {
+                                if desc_bytes[i] == 0 && desc_bytes[i + 1] == 0 {
+                                    desc_end = i + 2;
+                                    break;
                                 }
-                                idx + desc_end
-                            } else {
-                                let desc_end = desc_bytes.iter().position(|&b| b == 0).map(|p| p + 1).unwrap_or(0);
-                                idx + desc_end
-                            };
-                            if data_start < frame_payload.len() {
-                                let img_data = frame_payload[data_start..].to_vec();
-                                tags.pictures.push(ExtractedPicture {
-                                    picture_type: PictureType::from_apic_byte(pic_type_byte),
-                                    mime_type,
-                                    data: img_data,
-                                });
                             }
+                            idx + desc_end
+                        } else {
+                            let desc_end = desc_bytes.iter().position(|&b| b == 0).map(|p| p + 1).unwrap_or(0);
+                            idx + desc_end
+                        };
+                        if data_start < frame_payload.len() {
+                            let img_data = frame_payload[data_start..].to_vec();
+                            tags.pictures.push(ExtractedPicture {
+                                picture_type: PictureType::from_apic_byte(pic_type_byte),
+                                mime_type,
+                                data: img_data,
+                            });
                         }
                     }
                 }

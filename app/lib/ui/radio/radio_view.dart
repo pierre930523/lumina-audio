@@ -17,8 +17,6 @@ class RadioView extends StatefulWidget {
 }
 
 class _RadioViewState extends State<RadioView> {
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   final List<_RadioStation> _stations = [
     _RadioStation(
       id: 'radio-001',
@@ -61,7 +59,11 @@ class _RadioViewState extends State<RadioView> {
       children: [
         Row(
           children: [
-            const Icon(Icons.radio_rounded, size: 20, color: _accentBlue),
+            const Icon(
+              Icons.radio_rounded,
+              size: 20,
+              color: LuminaTokens.glassTextSecondary,
+            ),
             const SizedBox(width: LuminaTokens.spaceSm),
             const Text(
               '廣播電台',
@@ -77,8 +79,9 @@ class _RadioViewState extends State<RadioView> {
               icon: const Icon(Icons.add_rounded, size: 16),
               label: const Text('新增電台', style: TextStyle(fontSize: 12.5)),
               style: OutlinedButton.styleFrom(
-                foregroundColor: _accentBlue,
-                side: const BorderSide(color: LuminaTokens.borderControl),
+                foregroundColor: LuminaTokens.glassTextPrimary,
+                backgroundColor: LuminaTokens.glassPillBg,
+                side: const BorderSide(color: LuminaTokens.glassPillBorder),
                 visualDensity: VisualDensity.compact,
                 padding: const EdgeInsets.symmetric(
                   horizontal: LuminaTokens.spaceSm,
@@ -180,8 +183,6 @@ class _RadioTile extends StatelessWidget {
   final VoidCallback onPlay;
   final VoidCallback onStop;
 
-  static const _accentBlue = LuminaTokens.accentBlue;
-
   const _RadioTile({
     super.key,
     required this.station,
@@ -194,7 +195,7 @@ class _RadioTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-      hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
+      hoverColor: LuminaTokens.glassRowHoverBg,
       onTap: isPlaying ? onStop : onPlay,
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -209,18 +210,22 @@ class _RadioTile extends StatelessWidget {
               height: 48,
               decoration: BoxDecoration(
                 color: isPlaying
-                    ? _accentBlue.withValues(alpha: 0.15)
-                    : LuminaTokens.cardElevatedBg,
+                    ? LuminaTokens.glassCardActiveBg
+                    : LuminaTokens.glassPillBg,
                 borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
                 border: Border.all(
-                  color: isPlaying ? _accentBlue : LuminaTokens.borderSubtle,
+                  color: isPlaying
+                      ? LuminaTokens.glassCoverRim
+                      : LuminaTokens.glassCardBorder,
                   width: 1.5,
                 ),
               ),
               child: Icon(
                 isPlaying ? Icons.graphic_eq_rounded : Icons.radio_rounded,
                 size: 24,
-                color: isPlaying ? _accentBlue : LuminaTokens.textMuted,
+                color: isPlaying
+                    ? Colors.white
+                    : LuminaTokens.glassTextSecondary,
               ),
             ),
             const SizedBox(width: LuminaTokens.spaceMd),
@@ -237,13 +242,16 @@ class _RadioTile extends StatelessWidget {
                             vertical: 1,
                           ),
                           decoration: BoxDecoration(
-                            color: _accentBlue.withValues(alpha: 0.2),
+                            color: LuminaTokens.glassNavActiveBg,
                             borderRadius: BorderRadius.circular(4),
+                            border: Border.all(
+                              color: LuminaTokens.glassCoverRim,
+                            ),
                           ),
                           child: const Text(
                             'LIVE',
                             style: TextStyle(
-                              color: _accentBlue,
+                              color: Colors.white,
                               fontSize: 9,
                               fontWeight: FontWeight.w700,
                               letterSpacing: 0.5,
@@ -259,7 +267,7 @@ class _RadioTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: isPlaying
-                                ? _accentBlue
+                                ? Colors.white
                                 : LuminaTokens.textPrimary,
                             fontSize: 14,
                             fontWeight: FontWeight.w600,
@@ -295,7 +303,7 @@ class _RadioTile extends StatelessWidget {
                     ? Icons.stop_circle_outlined
                     : Icons.play_circle_outline_rounded,
                 size: 26,
-                color: _accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
               onPressed: isPlaying ? onStop : onPlay,
               visualDensity: VisualDensity.compact,

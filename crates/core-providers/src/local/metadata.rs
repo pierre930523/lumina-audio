@@ -16,10 +16,24 @@ use super::dsd_meta::{
 };
 use crate::error::ProviderError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractOptions {
+    pub include_pictures: bool,
+}
+
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            include_pictures: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtractedMetadata {
     pub title: String,
     pub artist: String,
+    pub artists: Vec<String>,
     pub album: String,
     pub album_artist: Option<String>,
     pub track_number: u16,
@@ -47,6 +61,7 @@ impl Default for ExtractedMetadata {
         Self {
             title: String::new(),
             artist: String::new(),
+            artists: Vec::new(),
             album: String::new(),
             album_artist: None,
             track_number: 1,
@@ -75,25 +90,40 @@ pub struct MetadataExtractor;
 
 impl MetadataExtractor {
     pub fn extract(path: &Path) -> Result<ExtractedMetadata, ProviderError> {
+        Self::extract_with_options(path, ExtractOptions::default())
+    }
+
+    pub fn extract_with_options(
+        path: &Path,
+        opts: ExtractOptions,
+    ) -> Result<ExtractedMetadata, ProviderError> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
 
-        match ext.as_str() {
-            "wav" | "wave" => Self::extract_wav(path),
-            "dsf" => Self::extract_dsf(path),
-            "dff" => Self::extract_dff(path),
+        let mut meta = match ext.as_str() {
+            "wav" | "wave" => Self::extract_wav(path)?,
+            "dsf" => Self::extract_dsf(path)?,
+            "dff" => Self::extract_dff(path)?,
             "flac" => {
-                if let Ok(meta) = Self::extract_flac(path) {
-                    Ok(meta)
+                if let Ok(meta) = Self::extract_flac_with_options(path, opts) {
+                    meta
                 } else {
-                    Self::extract_symphonia(path, &ext)
+                    Self::extract_symphonia_with_options(path, &ext, opts)?
                 }
             }
-            _ => Self::extract_symphonia(path, &ext),
+            _ => Self::extract_symphonia_with_options(path, &ext, opts)?,
+        };
+
+        if !opts.include_pictures {
+            meta.pictures.clear();
         }
+        if meta.artists.is_empty() && !meta.artist.trim().is_empty() {
+            meta.artists = split_artists(&meta.artist);
+        }
+        Ok(meta)
     }
 
     pub fn extract_from_bytes(
@@ -122,7 +152,9 @@ impl MetadataExtractor {
             }
             "flac" => {
                 let cursor = Cursor::new(bytes.clone());
-                if let Ok(meta) = extract_flac_from_reader(cursor, fallback_path) {
+                if let Ok(meta) =
+                    extract_flac_from_reader(cursor, fallback_path, ExtractOptions::default())
+                {
                     Ok(meta)
                 } else {
                     let id3_fallback = scan_id3v2_from_slice(&bytes, &ext_lower);
@@ -132,6 +164,7 @@ impl MetadataExtractor {
                         &ext_lower,
                         fallback_path,
                         id3_fallback,
+                        ExtractOptions::default(),
                     )
                 }
             }
@@ -143,14 +176,18 @@ impl MetadataExtractor {
                     &ext_lower,
                     fallback_path,
                     id3_fallback,
+                    ExtractOptions::default(),
                 )
             }
         }
     }
 
-    fn extract_flac(path: &Path) -> Result<ExtractedMetadata, ProviderError> {
+    fn extract_flac_with_options(
+        path: &Path,
+        opts: ExtractOptions,
+    ) -> Result<ExtractedMetadata, ProviderError> {
         let file = File::open(path)?;
-        extract_flac_from_reader(file, path)
+        extract_flac_from_reader(file, path, opts)
     }
 
     fn extract_wav(path: &Path) -> Result<ExtractedMetadata, ProviderError> {
@@ -168,10 +205,14 @@ impl MetadataExtractor {
         Ok(build_dff_extracted(dsd, path))
     }
 
-    fn extract_symphonia(path: &Path, ext: &str) -> Result<ExtractedMetadata, ProviderError> {
+    fn extract_symphonia_with_options(
+        path: &Path,
+        ext: &str,
+        opts: ExtractOptions,
+    ) -> Result<ExtractedMetadata, ProviderError> {
         let id3_fallback = scan_id3v2_from_file(path, ext);
         let file = File::open(path)?;
-        Self::extract_symphonia_from_source(Box::new(file), ext, path, id3_fallback)
+        Self::extract_symphonia_from_source(Box::new(file), ext, path, id3_fallback, opts)
     }
 
     fn extract_symphonia_from_source(
@@ -179,6 +220,7 @@ impl MetadataExtractor {
         ext: &str,
         fallback_path: &Path,
         id3_fallback: Option<Id3v2ParsedTags>,
+        opts: ExtractOptions,
     ) -> Result<ExtractedMetadata, ProviderError> {
         let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
 
@@ -242,6 +284,7 @@ impl MetadataExtractor {
 
         let mut raw_title: Option<String> = None;
         let mut raw_artist: Option<String> = None;
+        let mut raw_artists: Vec<String> = Vec::new();
         let mut raw_album: Option<String> = None;
         let mut raw_album_artist: Option<String> = None;
         let mut raw_track_number: Option<u16> = None;
@@ -261,21 +304,23 @@ impl MetadataExtractor {
         let mut extracted_pictures: Vec<core_types::ExtractedPicture> = Vec::new();
 
         let mut check_meta = |meta: &symphonia::core::meta::MetadataRevision| {
-            for vis in meta.visuals() {
-                let pt = match vis.usage {
-                    Some(symphonia::core::meta::StandardVisualKey::FrontCover) => {
-                        core_types::PictureType::FrontCover
-                    }
-                    Some(symphonia::core::meta::StandardVisualKey::BackCover) => {
-                        core_types::PictureType::BackCover
-                    }
-                    _ => core_types::PictureType::Other,
-                };
-                extracted_pictures.push(core_types::ExtractedPicture {
-                    picture_type: pt,
-                    mime_type: vis.media_type.clone(),
-                    data: vis.data.to_vec(),
-                });
+            if opts.include_pictures {
+                for vis in meta.visuals() {
+                    let pt = match vis.usage {
+                        Some(symphonia::core::meta::StandardVisualKey::FrontCover) => {
+                            core_types::PictureType::FrontCover
+                        }
+                        Some(symphonia::core::meta::StandardVisualKey::BackCover) => {
+                            core_types::PictureType::BackCover
+                        }
+                        _ => core_types::PictureType::Other,
+                    };
+                    extracted_pictures.push(core_types::ExtractedPicture {
+                        picture_type: pt,
+                        mime_type: vis.media_type.clone(),
+                        data: vis.data.to_vec(),
+                    });
+                }
             }
 
             for tag in meta.tags() {
@@ -290,7 +335,12 @@ impl MetadataExtractor {
                 if let Some(std_key) = tag.std_key {
                     match std_key {
                         StandardTagKey::TrackTitle => raw_title = Some(tag_str),
-                        StandardTagKey::Artist => raw_artist = Some(tag_str),
+                        StandardTagKey::Artist => {
+                            append_split_artists(&mut raw_artists, &tag_str);
+                            if raw_artist.is_none() {
+                                raw_artist = Some(tag_str);
+                            }
+                        }
                         StandardTagKey::Album => raw_album = Some(tag_str),
                         StandardTagKey::AlbumArtist => raw_album_artist = Some(tag_str),
                         StandardTagKey::Genre => {
@@ -370,7 +420,12 @@ impl MetadataExtractor {
                     let norm_key = normalize_custom_tag_key(&tag.key);
                     match norm_key.as_str() {
                         "TITLE" if raw_title.is_none() => raw_title = Some(tag_str),
-                        "ARTIST" if raw_artist.is_none() => raw_artist = Some(tag_str),
+                        "ARTIST" => {
+                            append_split_artists(&mut raw_artists, &tag_str);
+                            if raw_artist.is_none() {
+                                raw_artist = Some(tag_str);
+                            }
+                        }
                         "ALBUM" if raw_album.is_none() => raw_album = Some(tag_str),
                         "ALBUMARTIST" if raw_album_artist.is_none() => {
                             raw_album_artist = Some(tag_str)
@@ -585,11 +640,18 @@ impl MetadataExtractor {
 
         let album_artist = raw_album_artist.filter(|s| !s.trim().is_empty());
         let track_number = raw_track_number.unwrap_or(track_num_fallback).max(1);
-        let disc_number = raw_disc_number.unwrap_or(1).max(1);
+        let disc_number = raw_disc_number
+            .or_else(|| disc_number_from_parent_dir(fallback_path))
+            .unwrap_or(1)
+            .max(1);
+        if raw_artists.is_empty() {
+            raw_artists = split_artists(&artist);
+        }
 
         Ok(ExtractedMetadata {
             title,
             artist,
+            artists: raw_artists,
             album,
             album_artist,
             track_number,
@@ -650,11 +712,17 @@ fn build_wav_extracted(wav: super::riff_meta::RiffWavMetadata, path: &Path) -> E
 
     let album_artist = wav.album_artist.filter(|s| !s.trim().is_empty());
     let track_number = wav.track_number.unwrap_or(track_num_fallback).max(1);
-    let disc_number = wav.disc_number.unwrap_or(1).max(1);
+    let disc_number = wav
+        .disc_number
+        .or_else(|| disc_number_from_parent_dir(path))
+        .unwrap_or(1)
+        .max(1);
+    let artists = split_artists(&artist);
 
     ExtractedMetadata {
         title,
         artist,
+        artists,
         album,
         album_artist,
         track_number,
@@ -717,11 +785,18 @@ fn build_dsf_extracted(dsd: super::dsd_meta::DsdMetadata, path: &Path) -> Extrac
 
     let album_artist = dsd.tags.album_artist.filter(|s| !s.trim().is_empty());
     let track_number = dsd.tags.track_number.unwrap_or(track_num_fallback).max(1);
-    let disc_number = dsd.tags.disc_number.unwrap_or(1).max(1);
+    let disc_number = dsd
+        .tags
+        .disc_number
+        .or_else(|| disc_number_from_parent_dir(path))
+        .unwrap_or(1)
+        .max(1);
+    let artists = split_artists(&artist);
 
     ExtractedMetadata {
         title,
         artist,
+        artists,
         album,
         album_artist,
         track_number,
@@ -784,11 +859,18 @@ fn build_dff_extracted(dsd: super::dsd_meta::DsdMetadata, path: &Path) -> Extrac
 
     let album_artist = dsd.tags.album_artist.filter(|s| !s.trim().is_empty());
     let track_number = dsd.tags.track_number.unwrap_or(track_num_fallback).max(1);
-    let disc_number = dsd.tags.disc_number.unwrap_or(1).max(1);
+    let disc_number = dsd
+        .tags
+        .disc_number
+        .or_else(|| disc_number_from_parent_dir(path))
+        .unwrap_or(1)
+        .max(1);
+    let artists = split_artists(&artist);
 
     ExtractedMetadata {
         title,
         artist,
+        artists,
         album,
         album_artist,
         track_number,
@@ -944,6 +1026,132 @@ pub fn derive_title_and_track_from_filename(path: &Path) -> (String, u16) {
     (final_title, track_num)
 }
 
+/// Splits multi-artist tag strings on `;`, ` / `, ` feat. `, ` ft. `, and ` featuring `
+/// while preserving order and deduplicating case-insensitively.
+pub fn split_artists(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    append_split_artists(&mut out, raw);
+    out
+}
+
+fn append_split_artists(out: &mut Vec<String>, raw: &str) {
+    let mut segments = vec![raw.to_string()];
+
+    // Split on ';' and " / "
+    for delim in [";", " / "] {
+        let mut next = Vec::new();
+        for seg in segments {
+            for part in seg.split(delim) {
+                next.push(part.to_string());
+            }
+        }
+        segments = next;
+    }
+
+    // Case-insensitive split on " featuring ", " feat. ", " feat ", " ft. ", " ft "
+    for kw in [" featuring ", " feat. ", " feat ", " ft. ", " ft "] {
+        let mut next = Vec::new();
+        for seg in segments {
+            split_case_insensitive_into(&seg, kw, &mut next);
+        }
+        segments = next;
+    }
+
+    for seg in segments {
+        let cleaned = seg
+            .trim()
+            .trim_matches(|c| c == '(' || c == ')' || c == '[' || c == ']')
+            .trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing.eq_ignore_ascii_case(cleaned)) {
+            out.push(cleaned.to_string());
+        }
+    }
+}
+
+fn split_case_insensitive_into(input: &str, needle_lower: &str, out: &mut Vec<String>) {
+    let lower = input.to_ascii_lowercase();
+    let mut start = 0usize;
+    let nlen = needle_lower.len();
+    while let Some(rel) = lower[start..].find(needle_lower) {
+        let idx = start + rel;
+        out.push(input[start..idx].to_string());
+        start = idx + nlen;
+    }
+    out.push(input[start..].to_string());
+}
+
+/// Extracts an explicit disc number from multi-disc subfolder names such as
+/// `CD1`, `CD 2`, `CD-02`, `Disc 1`, `Disc2`, `Disk 03`, `D1`.
+///
+/// Strictly requires a disc prefix followed by optional separator (` `, `-`, `_`, `.`)
+/// and digits only, so real album names like `"Disco Classics"` or `"CD-ROM"` return `None`.
+pub fn extract_disc_number_from_dir_name(name: &str) -> Option<u32> {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if let Some(r) = lower.strip_prefix("disc") {
+        r
+    } else if let Some(r) = lower.strip_prefix("disk") {
+        r
+    } else if let Some(r) = lower.strip_prefix("cd") {
+        r
+    } else {
+        let r = lower.strip_prefix('d')?;
+        // Only allow short form like "D1", "D02", "D-1", "D 2"
+        if r.starts_with(|c: char| c.is_ascii_digit() || matches!(c, ' ' | '-' | '_')) {
+            r
+        } else {
+            return None;
+        }
+    };
+
+    let digits = rest.trim_start_matches([' ', '-', '_', '.']);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = digits.parse::<u32>().ok()?;
+    (1..=99).contains(&parsed).then_some(parsed)
+}
+
+fn disc_number_from_parent_dir(path: &Path) -> Option<u16> {
+    let parent_name = path.parent()?.file_name()?.to_str()?;
+    extract_disc_number_from_dir_name(parent_name).map(|d| d as u16)
+}
+
+/// Detects replacement-character mojibake (`\u{FFFD}`) or unexpected control characters
+/// in extracted tag strings so callers can record a `SkipReason::GarbledTags` warning.
+pub fn detect_garbled_tags(meta: &ExtractedMetadata) -> Option<String> {
+    let fields: [(&str, Option<&str>); 6] = [
+        ("title", Some(meta.title.as_str())),
+        ("artist", Some(meta.artist.as_str())),
+        ("album", Some(meta.album.as_str())),
+        ("album_artist", meta.album_artist.as_deref()),
+        ("genre", meta.genre.as_deref()),
+        ("composer", meta.composer.as_deref()),
+    ];
+
+    for (field, val_opt) in fields {
+        if let Some(val) = val_opt {
+            if val.contains('\u{FFFD}') {
+                return Some(format!(
+                    "Field '{field}' contains Unicode replacement character (possible mojibake)"
+                ));
+            }
+            if val
+                .chars()
+                .any(|c| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r'))
+            {
+                return Some(format!(
+                    "Field '{field}' contains unexpected ASCII control characters"
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub fn is_generic_directory_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     matches!(
@@ -977,9 +1185,7 @@ pub fn is_generic_directory_name(name: &str) -> bool {
             | "users"
             | "user"
             | "home"
-    ) || lower.starts_with("cd")
-        || lower.starts_with("disc")
-        || lower.starts_with("disk")
+    ) || extract_disc_number_from_dir_name(name).is_some()
 }
 
 pub fn derive_album_and_artist_from_dir(path: &Path) -> (String, String) {
@@ -987,9 +1193,8 @@ pub fn derive_album_and_artist_from_dir(path: &Path) -> (String, String) {
     let mut album_dir = parent.and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
     let mut artist_dir = parent.and_then(|p| p.parent()).and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
 
-    // Detect multi-disc subfolders (CD1, Disc 2, etc.)
-    let lower_album = album_dir.trim().to_ascii_lowercase();
-    if lower_album.starts_with("cd") || lower_album.starts_with("disc") || lower_album.starts_with("disk") {
+    // Detect multi-disc subfolders (CD1, Disc 2, Disk 02, etc.) without false-matching "Disco Classics"
+    if extract_disc_number_from_dir_name(album_dir).is_some() {
         album_dir = artist_dir;
         artist_dir = parent
             .and_then(|p| p.parent())
@@ -1017,6 +1222,7 @@ pub fn derive_album_and_artist_from_dir(path: &Path) -> (String, String) {
 fn extract_flac_from_reader<R: Read + Seek>(
     mut reader: R,
     fallback_path: &Path,
+    opts: ExtractOptions,
 ) -> Result<ExtractedMetadata, ProviderError> {
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic)?;
@@ -1056,6 +1262,7 @@ fn extract_flac_from_reader<R: Read + Seek>(
 
     let mut raw_title: Option<String> = None;
     let mut raw_artist: Option<String> = None;
+    let mut raw_artists: Vec<String> = Vec::new();
     let mut raw_album: Option<String> = None;
     let mut raw_album_artist: Option<String> = None;
     let mut raw_track_number: Option<u16> = None;
@@ -1129,7 +1336,12 @@ fn extract_flac_from_reader<R: Read + Seek>(
                                 }
                                 match norm_k.as_str() {
                                     "TITLE" if raw_title.is_none() => raw_title = Some(val),
-                                    "ARTIST" if raw_artist.is_none() => raw_artist = Some(val),
+                                    "ARTIST" => {
+                                        append_split_artists(&mut raw_artists, &val);
+                                        if raw_artist.is_none() {
+                                            raw_artist = Some(val);
+                                        }
+                                    }
                                     "ALBUM" if raw_album.is_none() => raw_album = Some(val),
                                     "ALBUMARTIST" if raw_album_artist.is_none() => {
                                         raw_album_artist = Some(val)
@@ -1184,32 +1396,36 @@ fn extract_flac_from_reader<R: Read + Seek>(
                 }
             }
             6 => {
-                let mut data = vec![0u8; block_len];
-                if reader.read_exact(&mut data).is_ok() && data.len() >= 32 {
-                    let pic_type_val = u32::from_be_bytes(data[0..4].try_into().unwrap());
-                    let pic_type = match pic_type_val {
-                        3 => core_types::PictureType::FrontCover,
-                        4 => core_types::PictureType::BackCover,
-                        _ => core_types::PictureType::Other,
-                    };
-                    let mime_len = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
-                    let mut cur = 8;
-                    if cur + mime_len <= data.len() {
-                        let mime_str = String::from_utf8_lossy(&data[cur..cur + mime_len]).to_string();
-                        cur += mime_len;
-                        if cur + 4 <= data.len() {
-                            let desc_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
-                            cur += 4 + desc_len;
-                            if cur + 20 <= data.len() {
-                                cur += 16;
-                                let data_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
-                                cur += 4;
-                                if cur + data_len <= data.len() {
-                                    extracted_pictures.push(core_types::ExtractedPicture {
-                                        picture_type: pic_type,
-                                        mime_type: if mime_str.is_empty() { "image/jpeg".to_string() } else { mime_str },
-                                        data: data[cur..cur + data_len].to_vec(),
-                                    });
+                if !opts.include_pictures {
+                    let _ = reader.seek(SeekFrom::Current(block_len as i64));
+                } else {
+                    let mut data = vec![0u8; block_len];
+                    if reader.read_exact(&mut data).is_ok() && data.len() >= 32 {
+                        let pic_type_val = u32::from_be_bytes(data[0..4].try_into().unwrap());
+                        let pic_type = match pic_type_val {
+                            3 => core_types::PictureType::FrontCover,
+                            4 => core_types::PictureType::BackCover,
+                            _ => core_types::PictureType::Other,
+                        };
+                        let mime_len = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
+                        let mut cur = 8;
+                        if cur + mime_len <= data.len() {
+                            let mime_str = String::from_utf8_lossy(&data[cur..cur + mime_len]).to_string();
+                            cur += mime_len;
+                            if cur + 4 <= data.len() {
+                                let desc_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
+                                cur += 4 + desc_len;
+                                if cur + 20 <= data.len() {
+                                    cur += 16;
+                                    let data_len = u32::from_be_bytes(data[cur..cur + 4].try_into().unwrap()) as usize;
+                                    cur += 4;
+                                    if cur + data_len <= data.len() {
+                                        extracted_pictures.push(core_types::ExtractedPicture {
+                                            picture_type: pic_type,
+                                            mime_type: if mime_str.is_empty() { "image/jpeg".to_string() } else { mime_str },
+                                            data: data[cur..cur + data_len].to_vec(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1235,7 +1451,7 @@ fn extract_flac_from_reader<R: Read + Seek>(
         if raw_disc_number.is_none() { raw_disc_number = id3.disc_number; }
         if raw_year.is_none() { raw_year = id3.release_year; }
         if raw_isrc.is_none() { raw_isrc = id3.isrc; }
-        if extracted_pictures.is_empty() { extracted_pictures = id3.pictures; }
+        if opts.include_pictures && extracted_pictures.is_empty() { extracted_pictures = id3.pictures; }
     }
 
     let format = AudioFormat::pcm(
@@ -1259,11 +1475,18 @@ fn extract_flac_from_reader<R: Read + Seek>(
 
     let album_artist = raw_album_artist.filter(|s| !s.trim().is_empty());
     let track_number = raw_track_number.unwrap_or(track_num_fallback).max(1);
-    let disc_number = raw_disc_number.unwrap_or(1).max(1);
+    let disc_number = raw_disc_number
+        .or_else(|| disc_number_from_parent_dir(fallback_path))
+        .unwrap_or(1)
+        .max(1);
+    if raw_artists.is_empty() {
+        raw_artists = split_artists(&artist);
+    }
 
     Ok(ExtractedMetadata {
         title,
         artist,
+        artists: raw_artists,
         album,
         album_artist,
         track_number,

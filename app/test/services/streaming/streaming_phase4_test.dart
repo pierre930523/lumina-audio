@@ -397,10 +397,17 @@ void main() {
 
         expect(ffi.isStandbyDeckReady, isFalse);
         expect(ffi.lastDualDeckSnapshot, isNull);
-        expect(await ffi.getL2CacheTotalBytes(), isNull);
-        expect(await ffi.evictL2CacheNow(), isFalse);
-        expect(await ffi.flushL2CacheAccess(), isFalse);
-        expect(await ffi.runL2CacheOrphanSweep(), isFalse);
+        if (!ffi.isNativeBound) {
+          expect(await ffi.getL2CacheTotalBytes(), isNull);
+          expect(await ffi.evictL2CacheNow(), isFalse);
+          expect(await ffi.flushL2CacheAccess(), isFalse);
+          expect(await ffi.runL2CacheOrphanSweep(), isFalse);
+        } else {
+          expect(await ffi.getL2CacheTotalBytes(), greaterThanOrEqualTo(0));
+          expect(await ffi.evictL2CacheNow(), isA<bool>());
+          expect(await ffi.flushL2CacheAccess(), isA<bool>());
+          expect(await ffi.runL2CacheOrphanSweep(), isA<bool>());
+        }
         expect(await ffi.skipToStandby(), isFalse);
 
         // ExternalBackendSpec is strictly rejected by native AudioService.

@@ -17,13 +17,14 @@ pub(crate) fn ensure_default_l2_cache_manager(engine: &EngineState) -> Option<Ar
     if let Ok(guard) = engine.l2_cache_manager.read()
         && let Some(ref mgr) = *guard
     {
-        if let Ok(p_guard) = engine.player.read()
-            && let Some(ref player) = *p_guard
+        let mgr_clone = Arc::clone(mgr);
+        drop(guard);
+        if let Some(player) = engine.player_clone()
             && player.l2_cache_manager().is_none()
         {
-            player.set_l2_cache_manager(Some(Arc::clone(mgr)));
+            player.set_l2_cache_manager(Some(Arc::clone(&mgr_clone)));
         }
-        return Some(Arc::clone(mgr));
+        return Some(mgr_clone);
     }
 
     let pool = engine.db_pool.read().ok().and_then(|g| g.clone())?;
@@ -50,7 +51,9 @@ pub(crate) fn ensure_default_l2_cache_manager(engine: &EngineState) -> Option<Ar
         if let Some(ref existing) = *guard {
             let existing_clone = Arc::clone(existing);
             drop(guard);
-            let _ = engine.runtime.block_on(new_mgr.shutdown());
+            engine.runtime.spawn(async move {
+                let _ = new_mgr.shutdown().await;
+            });
             existing_clone
         } else {
             *guard = Some(Arc::clone(&new_mgr));
@@ -60,9 +63,7 @@ pub(crate) fn ensure_default_l2_cache_manager(engine: &EngineState) -> Option<Ar
         new_mgr
     };
 
-    if let Ok(p_guard) = engine.player.read()
-        && let Some(ref player) = *p_guard
-    {
+    if let Some(player) = engine.player_clone() {
         player.set_l2_cache_manager(Some(Arc::clone(&chosen)));
     }
 
@@ -122,9 +123,7 @@ pub extern "C" fn lumina_l2_cache_init(
             let _ = engine.runtime.block_on(old_mgr.shutdown());
         }
 
-        if let Ok(p_guard) = engine.player.read()
-            && let Some(ref player) = *p_guard
-        {
+        if let Some(player) = engine.player_clone() {
             player.set_l2_cache_manager(Some(mgr));
         }
 

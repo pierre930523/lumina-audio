@@ -67,13 +67,32 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, send_snapshot: b
     if send_snapshot {
         let mut pb = state.playback_state.read().await.clone();
         if let Some(ref player) = state.player {
-            pb.status = match player.state_code() {
-                2 => "playing".to_string(),
-                3 => "paused".to_string(),
-                _ => "stopped".to_string(),
-            };
-            pb.position_ms = player.position_ms();
-            pb.duration_ms = player.duration_ms();
+            let dd = player.dual_deck_status();
+            pb.swap_generation = dd.swap_generation;
+            pb.playback_epoch = state.current_playback_epoch();
+            if state.is_loading_pending() {
+                pb.status = "loading".to_string();
+                pb.position_ms = 0;
+            } else {
+                pb.status = match player.state_code() {
+                    2 => "playing".to_string(),
+                    3 => "paused".to_string(),
+                    5 => "loading".to_string(),
+                    8 => "ended".to_string(),
+                    4 => "error".to_string(),
+                    _ => "stopped".to_string(),
+                };
+                pb.position_ms = player.position_ms();
+                pb.duration_ms = player.duration_ms();
+                if let Some(ref active_track) = dd.active_track {
+                    if !active_track.track_id.is_empty() {
+                        pb.track_id = Some(active_track.track_id.clone());
+                    }
+                    pb.track = Some(active_track.clone());
+                }
+            }
+        } else {
+            pb.playback_epoch = state.current_playback_epoch();
         }
         let _ = direct_tx
             .send(WsMessage::PlaybackStateChanged { payload: pb })
@@ -155,13 +174,32 @@ async fn handle_client_action(
         "state.sync" => {
             let mut pb = state.playback_state.read().await.clone();
             if let Some(ref player) = state.player {
-                pb.status = match player.state_code() {
-                    2 => "playing".to_string(),
-                    3 => "paused".to_string(),
-                    _ => "stopped".to_string(),
-                };
-                pb.position_ms = player.position_ms();
-                pb.duration_ms = player.duration_ms();
+                let dd = player.dual_deck_status();
+                pb.swap_generation = dd.swap_generation;
+                pb.playback_epoch = state.current_playback_epoch();
+                if state.is_loading_pending() {
+                    pb.status = "loading".to_string();
+                    pb.position_ms = 0;
+                } else {
+                    pb.status = match player.state_code() {
+                        2 => "playing".to_string(),
+                        3 => "paused".to_string(),
+                        5 => "loading".to_string(),
+                        8 => "ended".to_string(),
+                        4 => "error".to_string(),
+                        _ => "stopped".to_string(),
+                    };
+                    pb.position_ms = player.position_ms();
+                    pb.duration_ms = player.duration_ms();
+                    if let Some(ref active_track) = dd.active_track {
+                        if !active_track.track_id.is_empty() {
+                            pb.track_id = Some(active_track.track_id.clone());
+                        }
+                        pb.track = Some(active_track.clone());
+                    }
+                }
+            } else {
+                pb.playback_epoch = state.current_playback_epoch();
             }
             let _ = direct_tx
                 .send(WsMessage::PlaybackStateChanged { payload: pb })
@@ -177,46 +215,77 @@ async fn handle_client_action(
             {
                 player.resume();
             }
-            let mut st = state.playback_state.write().await;
-            st.status = "playing".to_string();
-            let _ = state.broadcast_tx.send(WsMessage::PlaybackStateChanged {
-                payload: st.clone(),
-            });
+            let payload = {
+                let mut st = state.playback_state.write().await;
+                st.status = "playing".to_string();
+                st.playback_epoch = state.current_playback_epoch();
+                st.clone()
+            };
+            let _ = state
+                .broadcast_tx
+                .send(WsMessage::PlaybackStateChanged { payload });
         }
         "playback.pause" => {
             if let Some(ref player) = state.player {
                 player.pause();
             }
-            let mut st = state.playback_state.write().await;
-            st.status = "paused".to_string();
-            if let Some(ref player) = state.player {
-                st.position_ms = player.position_ms();
-            }
-            let _ = state.broadcast_tx.send(WsMessage::PlaybackStateChanged {
-                payload: st.clone(),
-            });
+            let payload = {
+                let mut st = state.playback_state.write().await;
+                st.status = "paused".to_string();
+                if let Some(ref player) = state.player {
+                    st.position_ms = player.position_ms();
+                }
+                st.playback_epoch = state.current_playback_epoch();
+                st.clone()
+            };
+            let _ = state
+                .broadcast_tx
+                .send(WsMessage::PlaybackStateChanged { payload });
         }
         "playback.stop" => {
+            let next_gen = state
+                .play_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            state
+                .loaded_generation
+                .store(next_gen, std::sync::atomic::Ordering::SeqCst);
+            state.cancel_active_play_token();
+            let _ = state.play_cmd_tx.send_replace(None);
+            let new_epoch = state.advance_playback_epoch(None);
             if let Some(ref player) = state.player {
                 player.stop();
             }
-            let mut st = state.playback_state.write().await;
-            st.status = "stopped".to_string();
-            st.position_ms = 0;
-            let _ = state.broadcast_tx.send(WsMessage::PlaybackStateChanged {
-                payload: st.clone(),
-            });
+            let eff_epoch = state.sync_playback_epoch_from_player(new_epoch);
+            let payload = {
+                let mut st = state.playback_state.write().await;
+                st.status = "stopped".to_string();
+                st.position_ms = 0;
+                st.track = None;
+                st.playback_epoch = eff_epoch;
+                if let Some(ref player) = state.player {
+                    st.swap_generation = player.swap_generation();
+                }
+                st.clone()
+            };
+            let _ = state
+                .broadcast_tx
+                .send(WsMessage::PlaybackStateChanged { payload });
         }
         "playback.seek" => {
             if let Some(pos_ms) = val.get("position_ms").and_then(|v| v.as_u64()) {
                 if let Some(ref player) = state.player {
                     player.seek_ms(pos_ms);
                 }
-                let mut st = state.playback_state.write().await;
-                st.position_ms = pos_ms;
-                let _ = state.broadcast_tx.send(WsMessage::PlaybackStateChanged {
-                    payload: st.clone(),
-                });
+                let payload = {
+                    let mut st = state.playback_state.write().await;
+                    st.position_ms = pos_ms;
+                    st.playback_epoch = state.current_playback_epoch();
+                    st.clone()
+                };
+                let _ = state
+                    .broadcast_tx
+                    .send(WsMessage::PlaybackStateChanged { payload });
             }
         }
         "playback.volume" => {

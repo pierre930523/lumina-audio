@@ -1,5 +1,4 @@
 ﻿import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:material_ui/material_ui.dart';
 
@@ -10,6 +9,7 @@ import '../../services/audio_service.dart';
 import '../../services/podcast_store.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../artwork/streaming_cover_image.dart';
+import '../common/frosted_glass_container.dart';
 import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 
@@ -41,13 +41,6 @@ class PodcastsView extends StatefulWidget {
 }
 
 class _PodcastsViewState extends State<PodcastsView> {
-  static const _accentBlue = LuminaTokens.accentBlue;
-  static const Color _toolbarGlassBg = Color(0xD81B2030);
-  static const List<Color> _accentPillGradient = <Color>[
-    Color(0xFF5264DF),
-    Color(0xFF6B60EA),
-  ];
-
   static const List<({int idx, String keyName, String label, IconData icon})>
       _tabs = <({int idx, String keyName, String label, IconData icon})>[
     (
@@ -421,71 +414,62 @@ class _PodcastsViewState extends State<PodcastsView> {
     final isWideSingleRow = availW >= 860;
     final isConnected = _isConnected;
 
-    return ClipRRect(
+    return FrostedGlassContainer(
       key: const Key('podcasts_compact_toolbar'),
+      blurSigma: LuminaTokens.glassPillBlur,
+      color: LuminaTokens.glassSidebarBg,
       borderRadius: BorderRadius.circular(14),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          padding: EdgeInsets.symmetric(
-            horizontal: availW < 540 ? 10 : 14,
-            vertical: isWideSingleRow ? 9 : 10,
-          ),
-          decoration: BoxDecoration(
-            color: _toolbarGlassBg,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.12),
-            ),
-          ),
-          child: isWideSingleRow
-              ? Row(
+      border: Border.all(color: LuminaTokens.glassSidebarBorder),
+      padding: EdgeInsets.symmetric(
+        horizontal: availW < 540 ? 10 : 14,
+        vertical: isWideSingleRow ? 9 : 10,
+      ),
+      child: isWideSingleRow
+          ? Row(
+              children: [
+                _buildToolbarTitleBadge(isConnected: isConnected),
+                const SizedBox(width: 12),
+                _buildSegmentedTabs(availW: availW),
+                const SizedBox(width: 12),
+                Expanded(child: _buildSearchField()),
+                const SizedBox(width: 8),
+                _buildQuickSearchAddButton(compact: availW < 1040),
+                const SizedBox(width: 6),
+                _buildRefreshButton(),
+              ],
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
                   children: [
-                    _buildToolbarTitleBadge(isConnected: isConnected),
-                    const SizedBox(width: 12),
-                    _buildSegmentedTabs(availW: availW),
-                    const SizedBox(width: 12),
-                    Expanded(child: _buildSearchField()),
-                    const SizedBox(width: 8),
-                    _buildQuickSearchAddButton(compact: availW < 1040),
+                    Expanded(
+                      child: _buildToolbarTitleBadge(
+                        isConnected: isConnected,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: _buildSegmentedTabs(availW: availW),
+                      ),
+                    ),
                     const SizedBox(width: 6),
                     _buildRefreshButton(),
                   ],
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
+                ),
+                const SizedBox(height: 8),
+                Row(
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _buildToolbarTitleBadge(
-                            isConnected: isConnected,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerRight,
-                            child: _buildSegmentedTabs(availW: availW),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        _buildRefreshButton(),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(child: _buildSearchField()),
-                        const SizedBox(width: 8),
-                        _buildQuickSearchAddButton(compact: availW < 520),
-                      ],
-                    ),
+                    Expanded(child: _buildSearchField()),
+                    const SizedBox(width: 8),
+                    _buildQuickSearchAddButton(compact: availW < 520),
                   ],
                 ),
-        ),
-      ),
+              ],
+            ),
     );
   }
 
@@ -497,16 +481,14 @@ class _PodcastsViewState extends State<PodcastsView> {
           width: 32,
           height: 32,
           decoration: BoxDecoration(
-            color: _accentBlue.withValues(alpha: 0.16),
+            color: LuminaTokens.glassPillBg,
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: _accentBlue.withValues(alpha: 0.45),
-            ),
+            border: Border.all(color: LuminaTokens.glassPillBorder),
           ),
           child: const Icon(
             Icons.podcasts_rounded,
             size: 18,
-            color: _accentBlue,
+            color: LuminaTokens.glassTextPrimary,
           ),
         ),
         const SizedBox(width: 9),
@@ -538,7 +520,7 @@ class _PodcastsViewState extends State<PodcastsView> {
                     decoration: BoxDecoration(
                       color: isConnected
                           ? LuminaTokens.statusSuccess
-                          : _accentBlue,
+                          : LuminaTokens.glassTextSecondary,
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -572,9 +554,9 @@ class _PodcastsViewState extends State<PodcastsView> {
       height: 34,
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.28),
+        color: LuminaTokens.glassSegmentTrackBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        border: Border.all(color: LuminaTokens.glassSegmentTrackBorder),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -602,8 +584,13 @@ class _PodcastsViewState extends State<PodcastsView> {
                   decoration: BoxDecoration(
                     borderRadius:
                         BorderRadius.circular(LuminaTokens.radiusPill),
-                    gradient: (_selectedTab == tab.idx && _searchQuery.isEmpty)
-                        ? const LinearGradient(colors: _accentPillGradient)
+                    color: (_selectedTab == tab.idx && _searchQuery.isEmpty)
+                        ? LuminaTokens.glassSegmentSelectedBg
+                        : Colors.transparent,
+                    border: (_selectedTab == tab.idx && _searchQuery.isEmpty)
+                        ? Border.all(
+                            color: LuminaTokens.glassSegmentSelectedBorder,
+                          )
                         : null,
                   ),
                   child: Row(
@@ -616,7 +603,7 @@ class _PodcastsViewState extends State<PodcastsView> {
                           color:
                               (_selectedTab == tab.idx && _searchQuery.isEmpty)
                                   ? Colors.white
-                                  : LuminaTokens.textSecondary,
+                                  : LuminaTokens.glassTextSecondary,
                         ),
                         const SizedBox(width: 5),
                       ],
@@ -626,7 +613,7 @@ class _PodcastsViewState extends State<PodcastsView> {
                           color:
                               (_selectedTab == tab.idx && _searchQuery.isEmpty)
                                   ? Colors.white
-                                  : LuminaTokens.textSecondary,
+                                  : LuminaTokens.glassTextSecondary,
                           fontSize: 12,
                           fontWeight:
                               (_selectedTab == tab.idx && _searchQuery.isEmpty)
@@ -651,10 +638,10 @@ class _PodcastsViewState extends State<PodcastsView> {
     return Container(
       height: 34,
       decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
         border: Border.all(
-          color: hasFocus ? LuminaTokens.focusRing : LuminaTokens.borderControl,
+          color: hasFocus ? LuminaTokens.focusRing : LuminaTokens.glassPillBorder,
           width: hasFocus ? 1.4 : 1.0,
         ),
       ),
@@ -682,7 +669,7 @@ class _PodcastsViewState extends State<PodcastsView> {
                 fontSize: 12.5,
                 height: 1.2,
               ),
-              cursorColor: _accentBlue,
+              cursorColor: LuminaTokens.glassTextPrimary,
               decoration: const InputDecoration(
                 isDense: true,
                 isCollapsed: true,
@@ -728,7 +715,7 @@ class _PodcastsViewState extends State<PodcastsView> {
         icon: const Icon(
           Icons.add_circle_outline_rounded,
           size: 18,
-          color: _accentBlue,
+          color: LuminaTokens.glassTextPrimary,
         ),
         onPressed: _focusSearch,
       );
@@ -742,8 +729,9 @@ class _PodcastsViewState extends State<PodcastsView> {
         style: TextStyle(fontSize: 12),
       ),
       style: OutlinedButton.styleFrom(
-        foregroundColor: _accentBlue,
-        side: const BorderSide(color: LuminaTokens.borderControl),
+        foregroundColor: LuminaTokens.glassTextPrimary,
+        backgroundColor: LuminaTokens.glassPillBg,
+        side: const BorderSide(color: LuminaTokens.glassPillBorder),
         visualDensity: VisualDensity.compact,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       ),
@@ -764,7 +752,7 @@ class _PodcastsViewState extends State<PodcastsView> {
               height: 15,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                color: _accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
             )
           : const Icon(
@@ -859,7 +847,7 @@ class _PodcastsViewState extends State<PodcastsView> {
           child: Center(
             child: CircularProgressIndicator(
               strokeWidth: 2.2,
-              color: _accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           ),
         ),
@@ -933,7 +921,7 @@ class _PodcastsViewState extends State<PodcastsView> {
             child: CircularProgressIndicator(
               key: Key('podcast_explore_loading'),
               strokeWidth: 2.2,
-              color: _accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           ),
         ),
@@ -963,6 +951,13 @@ class _PodcastsViewState extends State<PodcastsView> {
                 OutlinedButton.icon(
                   key: const Key('btn_podcast_explore_retry'),
                   onPressed: _refreshFeeds,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: LuminaTokens.glassTextPrimary,
+                    backgroundColor: LuminaTokens.glassPillBg,
+                    side: const BorderSide(
+                      color: LuminaTokens.glassPillBorder,
+                    ),
+                  ),
                   icon: const Icon(Icons.refresh_rounded, size: 16),
                   label: const Text('重試'),
                 ),
@@ -1041,8 +1036,9 @@ class _PodcastsViewState extends State<PodcastsView> {
                 icon: const Icon(Icons.expand_more_rounded, size: 18),
                 label: Text(_loadingMoreExplore ? '載入更多中...' : '載入更多推薦'),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: _accentBlue,
-                  side: const BorderSide(color: LuminaTokens.borderControl),
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  side: const BorderSide(color: LuminaTokens.glassPillBorder),
                 ),
               ),
             ),
@@ -1066,7 +1062,7 @@ class _PodcastsViewState extends State<PodcastsView> {
           child: Center(
             child: CircularProgressIndicator(
               strokeWidth: 2.2,
-              color: _accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           ),
         ),
@@ -1119,7 +1115,11 @@ class _PodcastsViewState extends State<PodcastsView> {
           padding: const EdgeInsets.only(bottom: 10),
           child: Row(
             children: [
-              const Icon(Icons.search_rounded, size: 17, color: _accentBlue),
+              const Icon(
+                Icons.search_rounded,
+                size: 17,
+                color: LuminaTokens.glassTextSecondary,
+              ),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -1136,6 +1136,9 @@ class _PodcastsViewState extends State<PodcastsView> {
               TextButton.icon(
                 key: const Key('btn_podcast_exit_search'),
                 onPressed: _clearSearch,
+                style: TextButton.styleFrom(
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                ),
                 icon: const Icon(Icons.arrow_back_rounded, size: 15),
                 label: const Text('返回列表', style: TextStyle(fontSize: 12.5)),
               ),
@@ -1153,7 +1156,7 @@ class _PodcastsViewState extends State<PodcastsView> {
             child: CircularProgressIndicator(
               key: Key('podcast_search_loading'),
               strokeWidth: 2.2,
-              color: _accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           ),
         ),
@@ -1245,11 +1248,9 @@ class _PodcastsViewState extends State<PodcastsView> {
       key: const Key('podcast_guest_login_card'),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        border: Border.all(
-          color: _accentBlue.withValues(alpha: 0.45),
-        ),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Wrap(
         spacing: 12,
@@ -1263,7 +1264,7 @@ class _PodcastsViewState extends State<PodcastsView> {
               const Icon(
                 Icons.cloud_sync_outlined,
                 size: 20,
-                color: _accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
               const SizedBox(width: 10),
               Flexible(
@@ -1308,7 +1309,7 @@ class _PodcastsViewState extends State<PodcastsView> {
                     ),
                   ),
                   style: FilledButton.styleFrom(
-                    backgroundColor: _accentBlue,
+                    backgroundColor: LuminaTokens.glassSwitchOnTrack,
                     foregroundColor: LuminaTokens.onAccentDark,
                     visualDensity: VisualDensity.compact,
                     padding: const EdgeInsets.symmetric(
@@ -1330,8 +1331,9 @@ class _PodcastsViewState extends State<PodcastsView> {
                   style: TextStyle(fontSize: 12.5),
                 ),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: _accentBlue,
-                  side: const BorderSide(color: LuminaTokens.borderControl),
+                  foregroundColor: LuminaTokens.glassTextPrimary,
+                  backgroundColor: LuminaTokens.glassPillBg,
+                  side: const BorderSide(color: LuminaTokens.glassPillBorder),
                   visualDensity: VisualDensity.compact,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
@@ -1351,9 +1353,9 @@ class _PodcastsViewState extends State<PodcastsView> {
       key: const Key('podcast_empty_my_shows_card'),
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1391,8 +1393,9 @@ class _PodcastsViewState extends State<PodcastsView> {
             icon: const Icon(Icons.explore_rounded, size: 16),
             label: const Text('瀏覽探索推薦'),
             style: OutlinedButton.styleFrom(
-              foregroundColor: _accentBlue,
-              side: const BorderSide(color: LuminaTokens.borderControl),
+              foregroundColor: LuminaTokens.glassTextPrimary,
+              backgroundColor: LuminaTokens.glassPillBg,
+              side: const BorderSide(color: LuminaTokens.glassPillBorder),
             ),
           ),
         ],
@@ -1408,7 +1411,7 @@ class _PodcastsViewState extends State<PodcastsView> {
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
-          Icon(icon, size: 17, color: _accentBlue),
+          Icon(icon, size: 17, color: LuminaTokens.glassTextSecondary),
           const SizedBox(width: 7),
           Expanded(
             child: Text(
@@ -1456,13 +1459,13 @@ class _PodcastsViewState extends State<PodcastsView> {
       key: Key('podcast_show_card_${show.id}'),
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.borderSubtle),
+        color: LuminaTokens.glassCardBg,
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        border: Border.all(color: LuminaTokens.glassCardBorder),
       ),
       child: InkWell(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        hoverColor: LuminaTokens.glassRowHoverBg,
         onTap: () => _openShow(show),
         child: Padding(
           padding: const EdgeInsets.all(11),
@@ -1528,7 +1531,9 @@ class _PodcastsViewState extends State<PodcastsView> {
                       ? Icons.bookmark_rounded
                       : Icons.bookmark_border_rounded,
                   size: 20,
-                  color: isBookmarked ? _accentBlue : LuminaTokens.textSecondary,
+                  color: isBookmarked
+                      ? LuminaTokens.glassTextPrimary
+                      : LuminaTokens.textSecondary,
                 ),
                 onPressed: () => _store.toggleBookmark(show),
               ),
@@ -1583,238 +1588,243 @@ class _PodcastsViewState extends State<PodcastsView> {
       trackBuilder: episode.toTrack,
       child: Container(
         key: Key('podcast_episode_tile_${episode.videoId}'),
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: isCurrentTrack
-            ? LuminaTokens.cardElevatedBg
-            : LuminaTokens.cardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
           color: isCurrentTrack
-              ? _accentBlue.withValues(alpha: 0.65)
-              : LuminaTokens.borderSubtle,
-        ),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.55),
-        onTap: () {
-          if (isCurrentTrack) {
-            widget.audioService.togglePlayPause();
-          } else {
-            _playEpisode(episode, contextEpisodes);
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(11),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildNetworkArtwork(
-                url: episode.artworkUrl,
-                size: isCompact ? 52 : 60,
-                borderRadius: 8,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      episode.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: isCurrentTrack
-                            ? _accentBlue
-                            : LuminaTokens.textPrimary,
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                        height: 1.25,
-                      ),
-                    ),
-                    if (metaParts.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Text(
-                            metaParts.join(' · '),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: LuminaTokens.textSecondary,
-                              fontSize: 12,
-                            ),
-                          ),
-                          if (progress != null &&
-                              (progress.positionSeconds > 0 ||
-                                  progress.completed))
-                            Container(
-                              key: Key(
-                                'podcast_episode_progress_${episode.videoId}',
-                              ),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: (progress.completed
-                                        ? LuminaTokens.statusSuccess
-                                        : _accentBlue)
-                                    .withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(
-                                  LuminaTokens.radiusPill,
-                                ),
-                              ),
-                              child: Text(
-                                progress.completed
-                                    ? '已播完'
-                                    : '已播 ${progress.formattedPosition}',
-                                style: TextStyle(
-                                  color: progress.completed
-                                      ? LuminaTokens.statusSuccess
-                                      : _accentBlue,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                    if (episode.description != null &&
-                        episode.description!.trim().isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        episode.description!.trim(),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: LuminaTokens.textMuted,
-                          fontSize: 11.5,
-                          height: 1.3,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isCurrentTrack) ...[
-                    IconButton(
-                      key: Key('btn_episode_skip_back_${episode.videoId}'),
-                      tooltip: '倒退 15 秒',
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(
-                        minWidth: 32,
-                        minHeight: 32,
-                      ),
-                      padding: EdgeInsets.zero,
-                      icon: const Icon(
-                        Icons.replay_10_rounded,
-                        size: 19,
-                        color: LuminaTokens.textSecondary,
-                      ),
-                      onPressed: () => PodcastPlaybackTracker.seekRelative(
-                        widget.audioService,
-                        PodcastPlaybackTracker.skipBackwardDelta,
-                        store: _store,
-                      ),
-                    ),
-                    IconButton(
-                      key: Key('btn_episode_skip_forward_${episode.videoId}'),
-                      tooltip: '快轉 30 秒',
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(
-                        minWidth: 32,
-                        minHeight: 32,
-                      ),
-                      padding: EdgeInsets.zero,
-                      icon: const Icon(
-                        Icons.forward_30_rounded,
-                        size: 19,
-                        color: LuminaTokens.textSecondary,
-                      ),
-                      onPressed: () => PodcastPlaybackTracker.seekRelative(
-                        widget.audioService,
-                        PodcastPlaybackTracker.skipForwardDelta,
-                        store: _store,
-                      ),
-                    ),
-                  ],
-                  if (episode.showId.trim().isNotEmpty &&
-                      widget.onOpenPodcastShow != null)
-                    IconButton(
-                      key: Key('btn_episode_open_show_${episode.videoId}'),
-                      tooltip: '開啟所屬 Podcast 節目',
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(
-                        minWidth: 32,
-                        minHeight: 32,
-                      ),
-                      padding: EdgeInsets.zero,
-                      icon: const Icon(
-                        Icons.podcasts_rounded,
-                        size: 18,
-                        color: LuminaTokens.textSecondary,
-                      ),
-                      onPressed: () => widget.onOpenPodcastShow!(
-                        episode.showId,
-                        show: PodcastShow(
-                          id: episode.showId,
-                          title: episode.showTitle.isNotEmpty
-                              ? episode.showTitle
-                              : episode.title,
-                          author: episode.author,
-                          artworkUrl: episode.artworkUrl,
-                        ),
-                      ),
-                    ),
-                  IconButton(
-                    key: Key('btn_play_episode_${episode.videoId}'),
-                    tooltip: isPlaying ? '暫停單集' : '播放單集',
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(
-                      minWidth: 36,
-                      minHeight: 36,
-                    ),
-                    padding: EdgeInsets.zero,
-                    icon: isLoading
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: _accentBlue,
-                            ),
-                          )
-                        : Icon(
-                            isPlaying
-                                ? Icons.pause_circle_filled_rounded
-                                : Icons.play_circle_fill_rounded,
-                            size: 26,
-                            color: _accentBlue,
-                          ),
-                    onPressed: () {
-                      if (isCurrentTrack) {
-                        widget.audioService.togglePlayPause();
-                      } else {
-                        _playEpisode(episode, contextEpisodes);
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
+              ? LuminaTokens.glassCardActiveBg
+              : LuminaTokens.glassCardBg,
+          borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+          border: Border.all(
+            color: isCurrentTrack
+                ? LuminaTokens.glassCoverRim
+                : LuminaTokens.glassCardBorder,
           ),
         ),
-      ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+          hoverColor: LuminaTokens.glassRowHoverBg,
+          onTap: () {
+            if (isCurrentTrack) {
+              widget.audioService.togglePlayPause();
+            } else {
+              _playEpisode(episode, contextEpisodes);
+            }
+          },
+          child: Padding(
+            padding: const EdgeInsets.all(11),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildNetworkArtwork(
+                  url: episode.artworkUrl,
+                  size: isCompact ? 52 : 60,
+                  borderRadius: 8,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        episode.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: isCurrentTrack
+                              ? Colors.white
+                              : LuminaTokens.glassTextPrimary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                          height: 1.25,
+                        ),
+                      ),
+                      if (metaParts.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              metaParts.join(' · '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: LuminaTokens.textSecondary,
+                                fontSize: 12,
+                              ),
+                            ),
+                            if (progress != null &&
+                                (progress.positionSeconds > 0 ||
+                                    progress.completed))
+                              Container(
+                                key: Key(
+                                  'podcast_episode_progress_${episode.videoId}',
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: progress.completed
+                                      ? LuminaTokens.statusSuccess
+                                          .withValues(alpha: 0.14)
+                                      : LuminaTokens.glassPillBg,
+                                  borderRadius: BorderRadius.circular(
+                                    LuminaTokens.radiusPill,
+                                  ),
+                                  border: progress.completed
+                                      ? null
+                                      : Border.all(
+                                          color: LuminaTokens.glassPillBorder,
+                                        ),
+                                ),
+                                child: Text(
+                                  progress.completed
+                                      ? '已播完'
+                                      : '已播 ${progress.formattedPosition}',
+                                  style: TextStyle(
+                                    color: progress.completed
+                                        ? LuminaTokens.statusSuccess
+                                        : LuminaTokens.glassTextSecondary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (episode.description != null &&
+                          episode.description!.trim().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          episode.description!.trim(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: LuminaTokens.textMuted,
+                            fontSize: 11.5,
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isCurrentTrack) ...[
+                      IconButton(
+                        key: Key('btn_episode_skip_back_${episode.videoId}'),
+                        tooltip: '倒退 15 秒',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 32,
+                          minHeight: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(
+                          Icons.replay_10_rounded,
+                          size: 19,
+                          color: LuminaTokens.textSecondary,
+                        ),
+                        onPressed: () => PodcastPlaybackTracker.seekRelative(
+                          widget.audioService,
+                          PodcastPlaybackTracker.skipBackwardDelta,
+                          store: _store,
+                        ),
+                      ),
+                      IconButton(
+                        key: Key('btn_episode_skip_forward_${episode.videoId}'),
+                        tooltip: '快轉 30 秒',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 32,
+                          minHeight: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(
+                          Icons.forward_30_rounded,
+                          size: 19,
+                          color: LuminaTokens.textSecondary,
+                        ),
+                        onPressed: () => PodcastPlaybackTracker.seekRelative(
+                          widget.audioService,
+                          PodcastPlaybackTracker.skipForwardDelta,
+                          store: _store,
+                        ),
+                      ),
+                    ],
+                    if (episode.showId.trim().isNotEmpty &&
+                        widget.onOpenPodcastShow != null)
+                      IconButton(
+                        key: Key('btn_episode_open_show_${episode.videoId}'),
+                        tooltip: '開啟所屬 Podcast 節目',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 32,
+                          minHeight: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(
+                          Icons.podcasts_rounded,
+                          size: 18,
+                          color: LuminaTokens.textSecondary,
+                        ),
+                        onPressed: () => widget.onOpenPodcastShow!(
+                          episode.showId,
+                          show: PodcastShow(
+                            id: episode.showId,
+                            title: episode.showTitle.isNotEmpty
+                                ? episode.showTitle
+                                : episode.title,
+                            author: episode.author,
+                            artworkUrl: episode.artworkUrl,
+                          ),
+                        ),
+                      ),
+                    IconButton(
+                      key: Key('btn_play_episode_${episode.videoId}'),
+                      tooltip: isPlaying ? '暫停單集' : '播放單集',
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
+                      padding: EdgeInsets.zero,
+                      icon: isLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: LuminaTokens.glassTextPrimary,
+                              ),
+                            )
+                          : Icon(
+                              isPlaying
+                                  ? Icons.pause_circle_filled_rounded
+                                  : Icons.play_circle_fill_rounded,
+                              size: 26,
+                              color: LuminaTokens.glassTextPrimary,
+                            ),
+                      onPressed: () {
+                        if (isCurrentTrack) {
+                          widget.audioService.togglePlayPause();
+                        } else {
+                          _playEpisode(episode, contextEpisodes);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1828,9 +1838,9 @@ class _PodcastsViewState extends State<PodcastsView> {
           width: size,
           height: size,
           decoration: BoxDecoration(
-            color: LuminaTokens.cardElevatedBg,
+            color: LuminaTokens.glassPillBg,
             borderRadius: BorderRadius.circular(borderRadius),
-            border: Border.all(color: LuminaTokens.borderSubtle),
+            border: Border.all(color: LuminaTokens.glassSidebarBorder),
           ),
           alignment: Alignment.center,
           child: const Icon(

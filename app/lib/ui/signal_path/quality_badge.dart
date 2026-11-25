@@ -35,78 +35,65 @@ class _QualityBadgeState extends State<QualityBadge> {
 
   @override
   Widget build(BuildContext context) {
-    final accent = QualityBadge.colorForQuality(widget.quality);
-    final labelColor = QualityBadge.textColorForQuality(widget.quality);
     final interactive = widget.onTap != null;
 
     final badge = Semantics(
       button: interactive,
       label: '訊號路徑品質：${widget.quality.label}',
-      child: Padding(
-        padding: const EdgeInsets.all(1),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            key: const Key('quality_badge_button'),
-            onTap: widget.onTap,
-            onHover: (v) {
-              if (interactive && _hovered != v) {
-                setState(() => _hovered = v);
-              }
-            },
-            onFocusChange: (v) {
-              if (interactive && _focused != v) {
-                setState(() => _focused = v);
-              }
-            },
-            mouseCursor: interactive
-                ? SystemMouseCursors.click
-                : SystemMouseCursors.basic,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-            hoverColor: Colors.transparent,
-            focusColor: Colors.transparent,
-            splashColor: accent.withValues(alpha: 0.22),
-            child: AnimatedContainer(
-              duration: LuminaTokens.focusDuration,
-              curve: LuminaTokens.motionCurve,
-              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-              decoration: BoxDecoration(
-                color: accent.withValues(
-                  alpha: _hovered ? 0.28 : (_focused ? 0.24 : 0.18),
-                ),
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-                border: Border.all(
-                  color: _focused
-                      ? LuminaTokens.focusRing
-                      : accent.withValues(alpha: _hovered ? 0.88 : 0.68),
-                  width: 1,
-                ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: const Key('quality_badge_button'),
+          onTap: widget.onTap,
+          onHover: (v) {
+            if (interactive && _hovered != v) {
+              setState(() => _hovered = v);
+            }
+          },
+          onFocusChange: (v) {
+            if (interactive && _focused != v) {
+              setState(() => _focused = v);
+            }
+          },
+          mouseCursor: interactive
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          borderRadius: BorderRadius.circular(4),
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          splashColor: LuminaTokens.hiResGoldText.withValues(alpha: 0.22),
+          child: AnimatedContainer(
+            duration: LuminaTokens.focusDuration,
+            curve: LuminaTokens.motionCurve,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: _hovered
+                  ? LuminaTokens.hiResGoldBorder.withValues(alpha: 0.20)
+                  : (_focused
+                        ? LuminaTokens.hiResGoldBorder.withValues(alpha: 0.16)
+                        : LuminaTokens.hiResGoldBg),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: _focused
+                    ? LuminaTokens.focusRing
+                    : LuminaTokens.hiResGoldBorder,
+                width: 1,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Container(
-                    key: const Key('quality_badge_dot'),
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: accent,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    widget.quality.label,
-                    style: TextStyle(
-                      color: labelColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.6,
-                      height: 1.25,
-                    ),
-                  ),
-                ],
+              boxShadow: const [
+                BoxShadow(
+                  color: LuminaTokens.hiResGoldGlow,
+                  blurRadius: 10,
+                ),
+              ],
+            ),
+            child: const Text(
+              'Hi-Res',
+              style: TextStyle(
+                color: LuminaTokens.hiResGoldText,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+                height: 1.2,
               ),
             ),
           ),

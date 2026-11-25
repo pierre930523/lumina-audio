@@ -153,7 +153,7 @@ fn crc16_flac(data: &[u8]) -> u16 {
 fn build_synthetic_flac_verbatim(rate: u32, ch: u16, bps: u8, interleaved: &[i32]) -> Vec<u8> {
     let block_frames = 256usize;
     let total_frames = interleaved.len() / (ch as usize);
-    assert!(total_frames % block_frames == 0);
+    assert!(total_frames.is_multiple_of(block_frames));
     let mut out = Vec::new();
     out.extend_from_slice(b"fLaC");
 
@@ -582,7 +582,7 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
         // Verify Native DSD (1-bit untouched)
         verify_exclusive_pipeline_roundtrip(
             reader.unified_format(),
-            &[chunk.clone()],
+            std::slice::from_ref(&chunk),
             WireSampleFormat::NativeDsd { channels: 2 },
             OutputMode::AsioNativeDsd,
             VerificationStatus::DsdNative,
@@ -591,7 +591,7 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
         // Verify DoP v1.1 alternating 0x05 / 0xFA markers & intact DSD payload
         verify_exclusive_pipeline_roundtrip(
             reader.unified_format(),
-            &[chunk.clone()],
+            std::slice::from_ref(&chunk),
             WireSampleFormat::Dop24In32MsbLe {
                 channels: 2,
                 is_lsb_first: true,

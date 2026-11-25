@@ -13,12 +13,12 @@ import 'package:lumina_app/services/now_playing_view_controller.dart';
 import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/shaders/mesh_fluid_painter.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
+import 'package:lumina_app/ui/common/audio_quality_badge.dart';
 import 'package:lumina_app/ui/lyrics/lyrics_view.dart';
 import 'package:lumina_app/ui/mini_player/floating_capsule.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_layout.dart';
 import 'package:lumina_app/ui/now_playing/now_playing_overlay.dart';
 import 'package:lumina_app/ui/now_playing/spectrum_visualizer.dart';
-import 'package:lumina_app/ui/signal_path/quality_badge.dart';
 import 'package:material_ui/material_ui.dart';
 
 Uint8List _solidRgba(
@@ -245,10 +245,15 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // Expand Now Playing overlay
+        // Expand Now Playing overlay (defaults to centered Focus View; switch to Split for lyrics)
         await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('now_playing_overlay')), findsOneWidget);
+        expect(viewController.mode, NowPlayingViewMode.cover);
+
+        await tester.tap(find.byKey(const Key('btn_now_playing_mode_split')));
+        await tester.pumpAndSettle();
+        expect(viewController.mode, NowPlayingViewMode.split);
 
         // Scroll lyrics list down
         await tester.drag(
@@ -635,9 +640,9 @@ void main() {
         mode: NowPlayingViewMode.cover,
       );
       expect(cover1080.arrangement, NowPlayingStageArrangement.coverVertical);
-      expect(cover1080.shadowBlur, 36.0);
-      expect(cover1080.shadowSpread, 2.0);
-      expect(cover1080.shadowOffsetY, 14.0);
+      expect(cover1080.shadowBlur, 48.0);
+      expect(cover1080.shadowSpread, 0.0);
+      expect(cover1080.shadowOffsetY, 20.0);
 
       // 1280x800
       final split800 = NowPlayingLayoutMetrics.compute(
@@ -800,7 +805,7 @@ void main() {
           ),
           findsNothing,
         );
-        expect(find.byType(QualityBadge), findsOneWidget);
+        expect(find.byType(AudioQualityBadge), findsOneWidget);
         coverSize = tester.getSize(
           find.descendant(
             of: find.byKey(const Key('now_playing_overlay')),

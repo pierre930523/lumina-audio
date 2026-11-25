@@ -267,6 +267,30 @@ impl LibrarySyncService {
                 version_id_map.insert(ver.id.clone(), authoritative_id.clone());
                 report.versions_upserted += 1;
 
+                if let Some(meta) = album_meta.get(&album.id) {
+                    if let Some(vmeta) = meta.version_metadata.get(&ver.id) {
+                        if let Some(ref toc) = vmeta.toc_signature {
+                            let _ = core_db::IngestionRepository::update_album_version_toc(
+                                pool,
+                                &authoritative_id,
+                                &toc.digest,
+                                vmeta.disc_count.max(1),
+                                vmeta.track_count,
+                            )
+                            .await;
+                        }
+                    } else if let Some(ref toc) = meta.toc_signature {
+                        let _ = core_db::IngestionRepository::update_album_version_toc(
+                            pool,
+                            &authoritative_id,
+                            &toc.digest,
+                            meta.disc_count.max(1),
+                            meta.track_count,
+                        )
+                        .await;
+                    }
+                }
+
                 // Persist this version's tracks immediately so subsequent albums in the same batch
                 // discover overlapping ISRCs via `find_canonical_album_ids_by_isrcs`.
                 if let Some(ver_tracks) = tracks_by_version.get(ver.id.as_str()) {
@@ -493,11 +517,15 @@ impl LibrarySyncService {
 
         let roots: Vec<PathBuf> = if let Some(d) = dir_or_null {
             let p = PathBuf::from(d.trim());
-            if p.exists() {
-                vec![p]
-            } else {
-                Vec::new()
+            // Offline root guard: never prune tracks if the requested directory/volume is offline!
+            if !p.exists() || !p.is_dir() {
+                report.errors.push(format!(
+                    "Root directory '{}' is offline or unreachable; skipping rescan without pruning",
+                    d.trim()
+                ));
+                return Ok(report);
             }
+            vec![p]
         } else {
             let rows: Vec<(String,)> = sqlx::query_as(
                 "SELECT DISTINCT external_track_id FROM track_sources WHERE provider_id = 'local'",
@@ -512,7 +540,15 @@ impl LibrarySyncService {
                     dirs.insert(parent.to_path_buf());
                 }
             }
-            dirs.into_iter().collect()
+            let reachable: Vec<PathBuf> = dirs.into_iter().filter(|d| d.exists() && d.is_dir()).collect();
+            if reachable.is_empty() && !rows_is_empty_check(pool).await {
+                report.errors.push(
+                    "All known local library directories are currently offline; skipping prune"
+                        .to_string(),
+                );
+                return Ok(report);
+            }
+            reachable
         };
 
         let mut scanner = DirectoryScanner::new(false);
@@ -592,11 +628,18 @@ impl LibrarySyncService {
             let persist_rep = Self::persist_provider_albums(pool, &albums, &tracks, &album_meta).await?;
             report.updated = persist_rep.tracks_upserted;
 
-            // Update mtime/size cache info in SQLite
-            for (p, _, mt, sz) in items_to_persist {
+            // Update mtime/size/embedded_lyrics cache info in SQLite without clobbering metadata_overrides
+            for (p, meta, mt, sz) in items_to_persist {
                 let norm = normalize_path(&p);
                 if let Ok(Some(info)) = LibraryRepository::get_track_file_cache_info(pool, "local", &norm).await {
                     let _ = LibraryRepository::update_track_file_cache_info(pool, &info.track_id, Some(mt), Some(sz), None).await;
+                    if let Some(ref lyrics) = meta.embedded_lyrics {
+                        let _ = sqlx::query("UPDATE track_sources SET embedded_lyrics = ? WHERE id = ?")
+                            .bind(lyrics)
+                            .bind(&info.track_id)
+                            .execute(pool)
+                            .await;
+                    }
                 }
             }
         }
@@ -604,6 +647,15 @@ impl LibrarySyncService {
         rebuild_search_index(pool).await.map_err(db_err)?;
         Ok(report)
     }
+}
+
+async fn rows_is_empty_check(pool: &SqlitePool) -> bool {
+    let cnt: Option<(i64,)> =
+        sqlx::query_as("SELECT COUNT(*) FROM track_sources WHERE provider_id = 'local'")
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+    cnt.map(|(n,)| n == 0).unwrap_or(true)
 }
 
 pub(crate) fn db_err(e: impl std::fmt::Display) -> ProviderError {

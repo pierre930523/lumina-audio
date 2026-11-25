@@ -4,15 +4,19 @@ import 'package:crypto/crypto.dart';
 
 import '../../../models/audio_format.dart';
 import '../../../models/playback_state.dart';
+import '../../../models/recommendation_models.dart';
 import '../../../models/stream_source_spec.dart';
 import '../../../models/streaming_models.dart';
 import '../../../models/studio_models.dart';
+import '../recommendation_provider.dart';
 import '../stream_resolver.dart';
 import '../streaming_provider.dart';
+import '../track_matcher.dart';
 
 /// Real Qobuz API v0.2 provider supporting MD5 credential login, token
 /// verification, Hi-Res catalog sync, and MD5 `request_sig` stream signing.
-class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
+class QobuzProvider extends BaseStreamingProvider
+    implements StreamResolver, RecommendationProvider {
   static const List<int> _preferredFormatIds = <int>[27, 7, 6, 5];
 
   final String baseUrl;
@@ -801,26 +805,56 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
       );
 
       if (res.statusCode == 401 || res.statusCode == 403) {
+        final msg = StreamingHttpClient.extractApiErrorMessage(
+          res.json,
+          res.rawBody,
+          res.statusCode,
+        );
         throw StreamingException(
-          StreamingHttpClient.extractApiErrorMessage(
-            res.json,
-            res.rawBody,
-            res.statusCode,
-          ),
+          msg,
           statusCode: res.statusCode,
           isTokenExpired: res.statusCode == 401,
+          kind: res.statusCode == 401
+              ? StreamingErrorKind.authExpired
+              : StreamingException.classifyKind(
+                  statusCode: res.statusCode,
+                  message: msg,
+                ),
+        );
+      }
+
+      if (res.statusCode == 451) {
+        final msg = StreamingHttpClient.extractApiErrorMessage(
+          res.json,
+          res.rawBody,
+          res.statusCode,
+        );
+        throw StreamingException(
+          msg,
+          statusCode: res.statusCode,
+          kind: StreamingErrorKind.regionRestricted,
         );
       }
 
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        lastFailure = StreamingException(
-          StreamingHttpClient.extractApiErrorMessage(
-            res.json,
-            res.rawBody,
-            res.statusCode,
-          ),
-          statusCode: res.statusCode,
+        final msg = StreamingHttpClient.extractApiErrorMessage(
+          res.json,
+          res.rawBody,
+          res.statusCode,
         );
+        final classified = StreamingException.classifyKind(
+          statusCode: res.statusCode,
+          message: msg,
+        );
+        final err = StreamingException(
+          msg,
+          statusCode: res.statusCode,
+          kind: classified,
+        );
+        if (err.isRegionRestricted) {
+          throw err;
+        }
+        lastFailure = err;
         continue;
       }
 
@@ -837,16 +871,34 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
             isTokenExpired: true,
           );
         }
-        lastFailure = StreamingException(msg, statusCode: code);
+        final classified = StreamingException.classifyKind(
+          statusCode: code,
+          message: msg,
+        );
+        final err = StreamingException(msg, statusCode: code, kind: classified);
+        if (err.isRegionRestricted || err.isUnavailable) {
+          throw err;
+        }
+        lastFailure = err;
         continue;
       }
 
       final restrictions = res.json['restrictions'];
       if (restrictions is List && restrictions.isNotEmpty) {
-        lastFailure = StreamingException(
-          'Qobuz 曲目受權限限制：${restrictions.first}',
+        final restrictionSummary = restrictions.map((r) => '$r').join(', ');
+        final classified = StreamingException.classifyKind(
+          message: restrictionSummary,
           isDrmRestricted: true,
         );
+        final err = StreamingException(
+          'Qobuz 曲目受權限限制：${restrictions.first}',
+          isDrmRestricted: classified == StreamingErrorKind.drmRestricted,
+          kind: classified ?? StreamingErrorKind.drmRestricted,
+        );
+        if (err.isRegionRestricted || err.isUnavailable) {
+          throw err;
+        }
+        lastFailure = err;
         continue;
       }
 
@@ -898,6 +950,10 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
           sampleRateHz: sampleRateHz,
           bitDepth: bitDepth,
           channels: 2,
+          bitrateKbps:
+              bitrateBps != null && bitrateBps > 0
+                  ? (bitrateBps / 1000.0).round()
+                  : null,
         ),
         bitrateBps: bitrateBps,
         expireAt: expireAt,
@@ -1005,6 +1061,14 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
           ? (rawSr <= 1000 ? (rawSr.toDouble() * 1000).round() : rawSr.round())
           : 44100;
       final bitDepth = (map['maximum_bit_depth'] as num?)?.toInt() ?? 16;
+      final rawIsrc = map['isrc']?.toString().trim();
+      final isrc = (rawIsrc != null && rawIsrc.isNotEmpty) ? rawIsrc : null;
+      final rawArtistId =
+          (performer?['id'] ?? albumArtist?['id'])?.toString().trim();
+      final artistId =
+          (rawArtistId != null && rawArtistId.isNotEmpty) ? rawArtistId : null;
+      final qualityLabel =
+          (bitDepth > 16 || srHz > 48000) ? 'HI_RES' : 'LOSSLESS';
 
       list.add(
         TrackInfo(
@@ -1024,6 +1088,9 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
             channels: 2,
           ),
           providerName: 'Qobuz',
+          isrc: isrc,
+          qualityLabel: qualityLabel,
+          artistId: artistId,
         ),
       );
     }
@@ -1103,12 +1170,12 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
     }
     if (imageObj is! Map) return null;
     for (final key in const [
-      'large',
+      'mega',
       'extralarge',
+      'large',
+      'medium',
       'small',
       'thumbnail',
-      'medium',
-      'mega',
       'back',
     ]) {
       final url = BaseStreamingProvider.normalizeCoverUrl(
@@ -1117,5 +1184,365 @@ class QobuzProvider extends BaseStreamingProvider implements StreamResolver {
       if (url != null) return url;
     }
     return null;
+  }
+
+  // ─── RecommendationProvider ────────────────────────────────────────────────
+
+  @override
+  String get recommendationProviderId => kind;
+
+  void _requireRecAuth() {
+    if (authState != StreamingAuthState.connected ||
+        (_appId?.trim().isEmpty ?? true) ||
+        (_userAuthToken?.trim().isEmpty ?? true)) {
+      throw RecError(
+        kind: RecErrorKind.authRequired,
+        message: lastError ?? 'Qobuz 尚未登入或授權已失效，請重新登入',
+        statusCode: 401,
+        providerId: kind,
+      );
+    }
+  }
+
+  RecError _mapRecError(Object e) {
+    if (e is RecError) return e;
+    if (e is StreamingException) {
+      if (e.isCancelled) {
+        return RecError(
+          kind: RecErrorKind.cancelled,
+          message: e.message,
+          statusCode: e.statusCode,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 401 || e.isTokenExpired) {
+        return RecError(
+          kind: RecErrorKind.authRequired,
+          message: e.message,
+          statusCode: 401,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 429) {
+        return RecError(
+          kind: RecErrorKind.rateLimited,
+          message: e.message,
+          statusCode: 429,
+          providerId: kind,
+        );
+      }
+      if (e.statusCode == 404) {
+        return RecError(
+          kind: RecErrorKind.notFound,
+          message: e.message,
+          statusCode: 404,
+          providerId: kind,
+        );
+      }
+      return RecError(
+        kind: RecErrorKind.network,
+        message: e.message,
+        statusCode: e.statusCode,
+        providerId: kind,
+      );
+    }
+    return RecError(
+      kind: RecErrorKind.unknown,
+      message: e.toString(),
+      providerId: kind,
+    );
+  }
+
+  @override
+  Future<RadioPage> getTrackRadio(
+    TrackMetadata seed, {
+    int limit = 10,
+    String? cursor,
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    _requireRecAuth();
+
+    final effectiveLimit = limit > 0 ? limit : 10;
+    final rawOffset = int.tryParse(cursor?.trim() ?? '') ?? 0;
+    final offset = rawOffset < 0 ? 0 : rawOffset;
+
+    final lowerId = seed.trackId.trim().toLowerCase();
+    final isQobuzSeed = seed.providerId == kind ||
+        lowerId.startsWith('qobuz:') ||
+        lowerId.startsWith('streaming:qobuz:');
+    final cleanSeedId = isQobuzSeed
+        ? BaseStreamingProvider.stripTrackPrefix(
+            BaseStreamingProvider.stripTrackPrefix(
+              seed.trackId.trim(),
+              'streaming:qobuz',
+            ),
+            'qobuz',
+          )
+        : '';
+
+    var artistQuery = seed.primaryArtist.trim().isNotEmpty
+        ? seed.primaryArtist.trim()
+        : seed.artist.trim();
+
+    if (cleanSeedId.isNotEmpty) {
+      try {
+        final trackJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/track/get',
+            <String, String>{'track_id': cleanSeedId},
+          ),
+          headers: _authHeaders(),
+          cancel: cancel,
+        );
+        final performer = trackJson['performer'] as Map?;
+        final albumArtist = (trackJson['album'] as Map?)?['artist'] as Map?;
+        final resolvedArtist =
+            performer?['name']?.toString().trim() ??
+            albumArtist?['name']?.toString().trim();
+        if (resolvedArtist != null && resolvedArtist.isNotEmpty) {
+          artistQuery = resolvedArtist;
+        }
+      } on StreamingException catch (e) {
+        if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+          throw _mapRecError(e);
+        }
+        if (e.statusCode != 403 && e.statusCode != 404) {
+          throw _mapRecError(e);
+        }
+      }
+    }
+
+    final tracks = <TrackMetadata>[];
+    final seenIds = <String>{};
+
+    void addParsedTracks(List<TrackInfo> parsed) {
+      for (final t in parsed) {
+        final tid = BaseStreamingProvider.stripTrackPrefix(t.id, 'qobuz');
+        if (tid.isEmpty || (cleanSeedId.isNotEmpty && tid == cleanSeedId)) {
+          continue;
+        }
+        if (seenIds.add(tid)) {
+          tracks.add(TrackMetadata.fromTrackInfo(t, providerIdOverride: kind));
+        }
+      }
+    }
+
+    if (artistQuery.isNotEmpty) {
+      try {
+        final searchJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/catalog/search',
+            <String, String>{
+              'query': artistQuery,
+              'limit': '$effectiveLimit',
+              if (offset > 0) 'offset': '$offset',
+            },
+          ),
+          headers: _authHeaders(),
+          cancel: cancel,
+        );
+        final tracksObj = searchJson['tracks'] as Map?;
+        addParsedTracks(_parseTracks(tracksObj?['items']));
+      } on StreamingException catch (e) {
+        if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+          throw _mapRecError(e);
+        }
+        if (e.statusCode != 403 && e.statusCode != 404) {
+          throw _mapRecError(e);
+        }
+      }
+    }
+
+    if (tracks.isEmpty) {
+      try {
+        final featuredJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/album/getFeatured',
+            <String, String>{
+              'type': 'ideal-discography',
+              'limit': '$effectiveLimit',
+              if (offset > 0) 'offset': '$offset',
+            },
+          ),
+          headers: _authHeaders(),
+          cancel: cancel,
+        );
+        final featuredTracksObj = featuredJson['tracks'] as Map?;
+        addParsedTracks(_parseTracks(featuredTracksObj?['items']));
+      } on StreamingException catch (e) {
+        if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+          throw _mapRecError(e);
+        }
+        if (e.statusCode != 403 && e.statusCode != 404) {
+          throw _mapRecError(e);
+        }
+      }
+    }
+
+    final pageTracks = tracks.take(effectiveLimit).toList(growable: false);
+    final nextCursor = tracks.length >= effectiveLimit
+        ? '${offset + effectiveLimit}'
+        : null;
+
+    return RadioPage(
+      tracks: pageTracks,
+      nextCursor: nextCursor,
+      sourceLabel: 'Qobuz Track Radio',
+    );
+  }
+
+  @override
+  Future<List<FeedSection>> getPersonalizedFeed({
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    if (authState != StreamingAuthState.connected ||
+        (_appId?.trim().isEmpty ?? true) ||
+        (_userAuthToken?.trim().isEmpty ?? true)) {
+      return const <FeedSection>[];
+    }
+
+    final sections = <FeedSection>[];
+
+    try {
+      final featuredJson = await http.requestJson(
+        method: 'GET',
+        uri: BaseStreamingProvider.buildUri(
+          baseUrl,
+          '/album/getFeatured',
+          const <String, String>{'type': 'new-releases-full', 'limit': '16'},
+        ),
+        headers: _authHeaders(),
+        cancel: cancel,
+      );
+      final albumsObj = featuredJson['albums'] as Map?;
+      final albums = _parseAlbums(
+        albumsObj?['items'] ?? featuredJson['items'],
+      );
+      final tracksObj = featuredJson['tracks'] as Map?;
+      final tracks = _parseTracks(tracksObj?['items'])
+          .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+          .toList(growable: false);
+      if (albums.isNotEmpty || tracks.isNotEmpty) {
+        sections.add(
+          FeedSection(
+            id: 'qobuz_featured',
+            title: 'Qobuz Featured Releases',
+            providerId: kind,
+            tracks: tracks,
+            albums: albums,
+          ),
+        );
+      }
+    } on StreamingException catch (e) {
+      if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+        throw _mapRecError(e);
+      }
+    }
+
+    try {
+      final favJson = await http.requestJson(
+        method: 'GET',
+        uri: BaseStreamingProvider.buildUri(
+          baseUrl,
+          '/favorite/getUserFavorites',
+          const <String, String>{'limit': '20'},
+        ),
+        headers: _authHeaders(),
+        cancel: cancel,
+      );
+      final tracksObj = favJson['tracks'] as Map?;
+      final albumsObj = favJson['albums'] as Map?;
+      final tracks = _parseTracks(tracksObj?['items'])
+          .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+          .toList(growable: false);
+      final albums = _parseAlbums(albumsObj?['items']);
+      if (tracks.isNotEmpty || albums.isNotEmpty) {
+        sections.add(
+          FeedSection(
+            id: 'qobuz_favorites',
+            title: 'Qobuz Favorites',
+            providerId: kind,
+            tracks: tracks,
+            albums: albums,
+          ),
+        );
+      }
+    } on StreamingException catch (e) {
+      if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+        throw _mapRecError(e);
+      }
+    }
+
+    return List<FeedSection>.unmodifiable(sections);
+  }
+
+  @override
+  Future<TrackMetadata?> matchTrack(
+    TrackMatchQuery query, {
+    CancellationToken? cancel,
+  }) async {
+    cancel?.throwIfCancelled();
+    _requireRecAuth();
+
+    final normIsrc = TrackMatcher.normalizeIsrc(query.isrc);
+    if (normIsrc != null) {
+      try {
+        final isrcJson = await http.requestJson(
+          method: 'GET',
+          uri: BaseStreamingProvider.buildUri(
+            baseUrl,
+            '/catalog/search',
+            <String, String>{'query': normIsrc, 'limit': '10'},
+          ),
+          headers: _authHeaders(),
+          cancel: cancel,
+        );
+        final tracksObj = isrcJson['tracks'] as Map?;
+        final exactMatches = _parseTracks(tracksObj?['items'])
+            .map(
+              (t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind),
+            )
+            .where((m) => TrackMatcher.normalizeIsrc(m.isrc) == normIsrc)
+            .toList(growable: false);
+        if (exactMatches.isNotEmpty) {
+          return TrackMatcher.selectBestMatch(query, exactMatches);
+        }
+      } on StreamingException catch (e) {
+        if (e.isCancelled || e.statusCode == 401 || e.isTokenExpired) {
+          throw _mapRecError(e);
+        }
+      }
+    }
+
+    final searchText = '${query.artist.trim()} ${query.title.trim()}'.trim();
+    if (searchText.isEmpty) return null;
+
+    try {
+      final json = await http.requestJson(
+        method: 'GET',
+        uri: BaseStreamingProvider.buildUri(
+          baseUrl,
+          '/catalog/search',
+          <String, String>{'query': searchText, 'limit': '15'},
+        ),
+        headers: _authHeaders(),
+        cancel: cancel,
+      );
+      final tracksObj = json['tracks'] as Map?;
+      final candidates = _parseTracks(tracksObj?['items'])
+          .map((t) => TrackMetadata.fromTrackInfo(t, providerIdOverride: kind))
+          .toList(growable: false);
+      return TrackMatcher.selectBestMatch(query, candidates);
+    } on StreamingException catch (e) {
+      throw _mapRecError(e);
+    }
   }
 }

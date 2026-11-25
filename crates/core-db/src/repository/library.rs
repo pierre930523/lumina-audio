@@ -256,7 +256,7 @@ pub fn deterministic_artist_id(name: &str) -> String {
     format!("art:{hex32}")
 }
 
-fn normalize_local_path_for_compare(path: &str) -> String {
+pub(crate) fn normalize_local_path_for_compare(path: &str) -> String {
     let mut s = path.trim().replace('\\', "/");
     if s.get(..8)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
@@ -282,7 +282,7 @@ fn normalize_local_path_for_compare(path: &str) -> String {
     }
 }
 
-fn path_in_scope(track_norm: &str, scope_norm: &str) -> bool {
+pub(crate) fn path_in_scope(track_norm: &str, scope_norm: &str) -> bool {
     if scope_norm.is_empty() {
         return true;
     }
@@ -303,7 +303,7 @@ pub fn normalize_match_key(input: &str) -> String {
         .join(" ")
 }
 
-fn parse_provider_kind(raw: &str) -> ProviderKind {
+pub(crate) fn parse_provider_kind(raw: &str) -> ProviderKind {
     match raw {
         "local" => ProviderKind::Local,
         "smb" => ProviderKind::Smb,
@@ -311,11 +311,13 @@ fn parse_provider_kind(raw: &str) -> ProviderKind {
         "qobuz" => ProviderKind::Qobuz,
         "tidal" => ProviderKind::Tidal,
         "deezer" => ProviderKind::Deezer,
+        "apple_music" | "applemusic" => ProviderKind::AppleMusic,
+        "youtube_music" | "youtubemusic" | "ytm" => ProviderKind::YouTubeMusic,
         _ => ProviderKind::Local,
     }
 }
 
-fn parse_audio_codec(raw: &str) -> AudioCodec {
+pub(crate) fn parse_audio_codec(raw: &str) -> AudioCodec {
     match raw {
         "flac" => AudioCodec::Flac,
         "alac" => AudioCodec::Alac,
@@ -372,7 +374,17 @@ impl LibraryRepository {
         .fetch_optional(pool)
         .await?;
 
-        Ok(row.map(Artist::from))
+        match row.map(Artist::from) {
+            Some(mut artist) => {
+                let ovs = super::ingestion::IngestionRepository::get_overrides_for_entity(
+                    pool, "artist", &artist.id,
+                )
+                .await?;
+                super::ingestion::IngestionRepository::apply_artist_overrides(&mut artist, &ovs);
+                Ok(Some(artist))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn search_artists_by_name(
@@ -388,7 +400,10 @@ impl LibraryRepository {
         .fetch_all(pool)
         .await?;
 
-        Ok(rows.into_iter().map(Artist::from).collect())
+        let mut artists: Vec<Artist> = rows.into_iter().map(Artist::from).collect();
+        super::ingestion::IngestionRepository::apply_artist_overrides_batch(pool, &mut artists)
+            .await?;
+        Ok(artists)
     }
 
     pub async fn list_artists(
@@ -405,7 +420,10 @@ impl LibraryRepository {
         .fetch_all(pool)
         .await?;
 
-        Ok(rows.into_iter().map(Artist::from).collect())
+        let mut artists: Vec<Artist> = rows.into_iter().map(Artist::from).collect();
+        super::ingestion::IngestionRepository::apply_artist_overrides_batch(pool, &mut artists)
+            .await?;
+        Ok(artists)
     }
 
     pub async fn upsert_artist_by_mbid_or_name(
@@ -707,6 +725,8 @@ impl LibraryRepository {
                 versions,
             });
         }
+        super::ingestion::IngestionRepository::apply_album_overrides_batch(pool, &mut albums)
+            .await?;
         Ok(albums)
     }
 
@@ -1529,7 +1549,9 @@ impl LibraryRepository {
                 embedded_lyrics = excluded.embedded_lyrics, \
                 file_mtime = excluded.file_mtime, \
                 file_size = excluded.file_size, \
-                metadata_hash = excluded.metadata_hash \
+                metadata_hash = excluded.metadata_hash, \
+                file_status = 'present', \
+                missing_since = NULL \
              RETURNING id",
         )
         .bind(&track.id)
@@ -1994,7 +2016,10 @@ impl LibraryRepository {
         .fetch_all(pool)
         .await?;
 
-        Self::map_track_rows(rows)
+        let mut tracks = Self::map_track_rows(rows)?;
+        super::ingestion::IngestionRepository::apply_track_overrides_batch(pool, &mut tracks)
+            .await?;
+        Ok(tracks)
     }
 
     pub async fn find_track_sources_by_isrc(
@@ -2013,7 +2038,10 @@ impl LibraryRepository {
         .fetch_all(pool)
         .await?;
 
-        Self::map_track_rows(rows)
+        let mut tracks = Self::map_track_rows(rows)?;
+        super::ingestion::IngestionRepository::apply_track_overrides_batch(pool, &mut tracks)
+            .await?;
+        Ok(tracks)
     }
 
     pub async fn find_track_source_by_id(
@@ -2034,7 +2062,9 @@ impl LibraryRepository {
 
         match row {
             Some(r) => {
-                let list = Self::map_track_rows(vec![r])?;
+                let mut list = Self::map_track_rows(vec![r])?;
+                super::ingestion::IngestionRepository::apply_track_overrides_batch(pool, &mut list)
+                    .await?;
                 Ok(list.into_iter().next())
             }
             None => Ok(None),

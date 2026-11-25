@@ -44,6 +44,12 @@ pub enum ProviderError {
     #[error("DRM restricted: {0}")]
     DrmRestricted(String),
 
+    #[error("Region restricted: {0}")]
+    RegionRestricted(String),
+
+    #[error("Track unavailable: {0}")]
+    TrackUnavailable(String),
+
     #[error("Other error: {0}")]
     Other(String),
 }

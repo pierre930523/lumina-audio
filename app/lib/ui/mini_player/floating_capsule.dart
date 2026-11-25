@@ -1,18 +1,22 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/playback_state.dart';
-import '../../models/signal_path.dart';
 import '../../models/streaming_provider_meta.dart';
 import '../../services/audio_service.dart';
 import '../../services/escape_dismiss_registry.dart';
 import '../../services/library_index_cache.dart';
 import '../../services/podcast_store.dart';
+import '../../services/recommendation_settings_controller.dart';
+import '../../services/streaming/autoplay_controller.dart';
+import '../../services/streaming/streaming_playback_coordinator.dart';
 import '../../services/ui_scale_controller.dart';
 import '../artwork/album_artwork_view.dart';
-import '../signal_path/quality_badge.dart';
+import '../common/audio_info_popover.dart';
+import '../common/frosted_glass_container.dart';
 import '../signal_path/signal_path_modal.dart';
 import '../theme/lumina_tokens.dart';
 import '../theme/responsive_layout.dart';
@@ -27,11 +31,15 @@ class FloatingCapsuleMiniPlayer extends StatefulWidget {
   final LibraryIndexCache? libraryCache;
   final bool showLyrics;
   final bool isNowPlayingExpanded;
+  final bool isQueueDrawerOpen;
   final VoidCallback onToggleLyrics;
   final VoidCallback? onToggleNowPlaying;
+  final VoidCallback? onToggleNowPlayingQueue;
+  final VoidCallback? onToggleNowPlayingLyrics;
   final VoidCallback? onOpenZones;
   final VoidCallback? onOpenLibrary;
   final UiScaleController? uiScaleController;
+  final RecommendationSettingsController? recommendationSettings;
   final ui.FragmentShader? glassShader;
   final ui.Image? backdropImage;
 
@@ -42,10 +50,14 @@ class FloatingCapsuleMiniPlayer extends StatefulWidget {
     required this.showLyrics,
     required this.onToggleLyrics,
     this.isNowPlayingExpanded = false,
+    this.isQueueDrawerOpen = false,
     this.onToggleNowPlaying,
+    this.onToggleNowPlayingQueue,
+    this.onToggleNowPlayingLyrics,
     this.onOpenZones,
     this.onOpenLibrary,
     this.uiScaleController,
+    this.recommendationSettings,
     this.glassShader,
     this.backdropImage,
   });
@@ -61,15 +73,122 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
   final LayerLink _queueLayerLink = LayerLink();
   final GlobalKey _outputAnchorKey = GlobalKey();
   final GlobalKey _queueAnchorKey = GlobalKey();
+  final AudioInfoPopoverController _qualityPopoverController =
+      AudioInfoPopoverController();
   OverlayEntry? _outputOverlay;
   OverlayEntry? _queueOverlay;
   bool _metricsUpdateScheduled = false;
+  bool _isShuffleEnabled = false;
+  LuminaRepeatMode _repeatMode = LuminaRepeatMode.off;
+  final math.Random _random = math.Random();
   late final bool Function() _escapeDismissHandler = _handleEscapeDismiss;
+  StreamSubscription<void>? _autoplayChangesSub;
+
+  AutoplayController? get _autoplayController =>
+      widget.audioService is CoordinatingAudioService
+          ? (widget.audioService as CoordinatingAudioService).autoplayController
+          : null;
+
+  void _onAutoplayChanged(void _) {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onRecommendationSettingsChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _subscribeAutoplay() {
+    _autoplayChangesSub?.cancel();
+    _autoplayChangesSub = _autoplayController?.changes.listen(_onAutoplayChanged);
+  }
+
+  void _toggleAutoplay(bool currentlyEnabled) {
+    final next = !currentlyEnabled;
+    _autoplayController?.setEnabled(next);
+    final rec = widget.recommendationSettings;
+    if (rec != null && rec.autoplayEnabled != next) {
+      unawaited(rec.setAutoplayEnabled(next));
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _subscribeAutoplay();
+    widget.recommendationSettings?.addListener(_onRecommendationSettingsChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant FloatingCapsuleMiniPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.audioService, widget.audioService)) {
+      _subscribeAutoplay();
+    }
+    if (!identical(
+      oldWidget.recommendationSettings,
+      widget.recommendationSettings,
+    )) {
+      oldWidget.recommendationSettings?.removeListener(
+        _onRecommendationSettingsChanged,
+      );
+      widget.recommendationSettings?.addListener(
+        _onRecommendationSettingsChanged,
+      );
+    }
+    if (!oldWidget.isNowPlayingExpanded &&
+        widget.isNowPlayingExpanded &&
+        _queueOverlay != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _closeAllOverlays();
+      });
+    }
+  }
+
+  void _toggleShuffle() {
+    setState(() => _isShuffleEnabled = !_isShuffleEnabled);
+  }
+
+  void _cycleRepeat() {
+    setState(() {
+      _repeatMode = switch (_repeatMode) {
+        LuminaRepeatMode.off => LuminaRepeatMode.all,
+        LuminaRepeatMode.all => LuminaRepeatMode.one,
+        LuminaRepeatMode.one => LuminaRepeatMode.off,
+      };
+    });
+  }
+
+  void _handlePrevious() {
+    unawaited(widget.audioService.previous());
+  }
+
+  Future<void> _handleNext() async {
+    if (_repeatMode == LuminaRepeatMode.one) {
+      await widget.audioService.seek(Duration.zero);
+      if (widget.audioService.currentState.status != PlaybackStatus.playing) {
+        await widget.audioService.play();
+      }
+      return;
+    }
+    final queue = widget.audioService.queue;
+    if (_isShuffleEnabled && queue.length > 1) {
+      final currentId = widget.audioService.currentState.track?.id;
+      final candidates = queue.where((t) => t.id != currentId).toList();
+      if (candidates.isNotEmpty) {
+        final chosen = candidates[_random.nextInt(candidates.length)];
+        unawaited(widget.audioService.skipToTrack(chosen, queueContext: queue));
+        return;
+      }
+    }
+    unawaited(widget.audioService.next());
   }
 
   @override
@@ -99,7 +218,13 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _autoplayChangesSub?.cancel();
+    _autoplayChangesSub = null;
+    widget.recommendationSettings?.removeListener(
+      _onRecommendationSettingsChanged,
+    );
     _closeAllOverlays(markState: false);
+    _qualityPopoverController.dispose();
     super.dispose();
   }
 
@@ -114,6 +239,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
 
   void _closeAllOverlays({bool markState = true}) {
     EscapeDismissRegistry.instance.unregister(_escapeDismissHandler);
+    _qualityPopoverController.close();
     var changed = false;
     if (_outputOverlay != null) {
       _outputOverlay!.remove();
@@ -239,6 +365,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
           maxHeight: clamp.maxHeight,
           onClose: () => _closeAllOverlays(),
           onOpenLibrary: widget.onOpenLibrary,
+          recommendationSettings: widget.recommendationSettings,
         ),
       ),
     );
@@ -255,13 +382,15 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
         alignment: Alignment.center,
         children: [
           AlbumArtworkView(
+            key: ValueKey('mini_art_${track?.responsiveArtworkKey ?? 'none'}'),
             track: track,
             size: size,
             fullResolution: false,
             coverTargetSize: 300,
             audioService: widget.audioService,
             libraryCache: widget.libraryCache,
-            borderRadius: BorderRadius.circular(LuminaTokens.space2xs),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: LuminaTokens.glassCoverRim, width: 1),
           ),
           Positioned(
             right: 2,
@@ -274,7 +403,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                 ),
                 child: const Icon(
                   Icons.keyboard_arrow_up_rounded,
-                  color: LuminaTokens.textPrimary,
+                  color: LuminaTokens.glassTextPrimary,
                   size: 13,
                 ),
               ),
@@ -303,31 +432,16 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
           key: const Key('btn_expand_now_playing'),
           onTap: triggerCallback,
           mouseCursor: SystemMouseCursors.click,
-          hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.72),
+          hoverColor: LuminaTokens.glassRowHoverBg,
           focusColor: LuminaTokens.focusRing.withValues(alpha: 0.22),
           borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Row(
               children: [
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 220),
-                  curve: LuminaTokens.motionCurve,
-                  child: widget.isNowPlayingExpanded
-                      ? const SizedBox.shrink()
-                      : Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _buildAlbumArt(track, artSize, iconSize),
-                            SizedBox(width: gap),
-                          ],
-                        ),
-                ),
-                Expanded(
-                  child: widget.isNowPlayingExpanded
-                      ? const SizedBox.shrink()
-                      : _buildTrackTitles(track),
-                ),
+                _buildAlbumArt(track, artSize, iconSize),
+                SizedBox(width: gap),
+                Expanded(child: _buildTrackTitles(track)),
               ],
             ),
           ),
@@ -370,7 +484,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
-            color: LuminaTokens.textPrimary,
+            color: LuminaTokens.glassTextPrimary,
             fontWeight: FontWeight.w600,
             fontSize: 13.5,
           ),
@@ -396,7 +510,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    color: LuminaTokens.textSecondary,
+                    color: LuminaTokens.glassTextSecondary,
                     fontSize: 11.5,
                   ),
                 ),
@@ -410,7 +524,7 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-              color: LuminaTokens.textSecondary,
+              color: LuminaTokens.glassTextSecondary,
               fontSize: 11.5,
             ),
           ),
@@ -419,39 +533,12 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
   }
 
   Widget _buildLyricsToggleButton() {
-    return Semantics(
-      button: true,
-      toggled: widget.showLyrics,
-      label: '切換歌詞顯示',
-      child: IconButton(
-        key: const Key('btn_toggle_lyrics'),
-        visualDensity: VisualDensity.compact,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-        style: IconButton.styleFrom(
-          foregroundColor: widget.showLyrics
-              ? LuminaTokens.accentBlue
-              : LuminaTokens.textSecondary,
-          backgroundColor: widget.showLyrics
-              ? LuminaTokens.accentBlue.withValues(alpha: 0.16)
-              : Colors.transparent,
-          hoverColor: LuminaTokens.cardHoverBg,
-          focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-          ),
-        ).copyWith(
-          mouseCursor: const WidgetStatePropertyAll(SystemMouseCursors.click),
-          side: WidgetStateProperty.resolveWith(
-            (states) => states.contains(WidgetState.focused)
-                ? const BorderSide(color: LuminaTokens.focusRing, width: 1.5)
-                : const BorderSide(color: Colors.transparent, width: 1.5),
-          ),
-        ),
-        icon: const Icon(Icons.lyrics_rounded, size: 18),
-        tooltip: '切換歌詞顯示',
-        onPressed: widget.onToggleLyrics,
-      ),
+    final onPressed = widget.isNowPlayingExpanded
+        ? (widget.onToggleNowPlayingLyrics ?? widget.onToggleLyrics)
+        : widget.onToggleLyrics;
+    return _LyricsPillButton(
+      isActive: widget.showLyrics,
+      onTap: onPressed,
     );
   }
 
@@ -485,37 +572,38 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
       builder: (context, stateSnap) {
         final state = stateSnap.data ?? widget.audioService.currentState;
         final track = state.track;
+        final trackDuration = track?.duration ?? const Duration(minutes: 4);
 
-        return StreamBuilder<SignalPath>(
-          stream: widget.audioService.signalPathStream,
-          initialData: widget.audioService.currentSignalPath,
-          builder: (context, signalSnap) {
-            final signalPath =
-                signalSnap.data ?? widget.audioService.currentSignalPath;
-            final trackDuration =
-                track?.duration ?? const Duration(minutes: 4);
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final maxWidth = constraints.maxWidth;
+            final isWide = maxWidth >= 740;
+            final isMedium = !isWide && maxWidth >= 480;
+            final isExpanded = widget.isNowPlayingExpanded;
 
-            return LayoutBuilder(
-              builder: (context, constraints) {
-                final maxWidth = constraints.maxWidth;
-                final isWide = maxWidth >= 740;
-                final isMedium = !isWide && maxWidth >= 480;
-
-                final showQualityBadge = !widget.isNowPlayingExpanded;
-                final badge = QualityBadge(
-                  quality: signalPath.overallQuality,
-                  onTap: () =>
-                      SignalPathModal.show(context, widget.audioService),
-                );
+            final badge = AudioQualityBadgeWithPopover(
+              audioService: widget.audioService,
+              track: track,
+              scaleController: widget.uiScaleController,
+              controller: _qualityPopoverController,
+              onBeforeOpen: _closeAllOverlays,
+              onOpenSignalPath: () =>
+                  SignalPathModal.show(context, widget.audioService),
+            );
 
                 final queueBtn = _buildFooterIconTrigger(
                   buttonKey: const Key('btn_quick_queue_popover'),
                   anchorKey: _queueAnchorKey,
                   link: _queueLayerLink,
-                  isOpen: _queueOverlay != null,
+                  isOpen: isExpanded
+                      ? widget.isQueueDrawerOpen
+                      : (_queueOverlay != null),
                   icon: Icons.queue_music_rounded,
                   tooltip: '播放佇列',
-                  onTap: _toggleQueuePopover,
+                  onTap: isExpanded
+                      ? (widget.onToggleNowPlayingQueue ??
+                            _toggleQueuePopover)
+                      : _toggleQueuePopover,
                 );
 
                 final outputBtn = _buildFooterIconTrigger(
@@ -527,6 +615,24 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   tooltip: '切換音訊輸出裝置（ASIO / WASAPI）',
                   onTap: _toggleOutputPopover,
                 );
+
+                final lyricsBtn = _buildLyricsToggleButton();
+
+                final autoplayController = _autoplayController;
+                final showAutoplayToggle = autoplayController != null ||
+                    widget.recommendationSettings != null;
+                final isAutoplayEnabled = autoplayController?.enabled ??
+                    widget.recommendationSettings?.autoplayEnabled ??
+                    true;
+                final autoplayBtn = showAutoplayToggle
+                    ? _FooterIconTrigger(
+                        buttonKey: const Key('btn_autoplay_toggle'),
+                        isOpen: isAutoplayEnabled,
+                        icon: Icons.all_inclusive_rounded,
+                        tooltip: '無限自動接播（開啟／關閉）',
+                        onTap: () => _toggleAutoplay(isAutoplayEnabled),
+                      )
+                    : null;
 
                 final isPodcast = PodcastPlaybackTracker.isPodcastTrack(track);
                 final VoidCallback? onSkipBack15s = isPodcast
@@ -545,102 +651,107 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                 final Widget content;
                 if (isWide) {
                   // Equal symmetric side widths guarantee the Expanded center column
-                  // (and Play/Pause + waveform progress bar inside it) sits
+                  // (and Play/Pause + linear progress bar inside it) sits
                   // dead-center horizontally across the entire bottom bar.
                   final sideWidth =
                       (maxWidth * 0.24).clamp(188.0, 260.0).floorToDouble();
                   final wideSliderWidth =
-                      (sideWidth - 118.0).clamp(56.0, 92.0).floorToDouble();
+                      (sideWidth - 140.0).clamp(48.0, 88.0).floorToDouble();
+                  final centerMaxWidth = isExpanded
+                      ? (maxWidth * 0.50).clamp(280.0, 680.0)
+                      : 680.0;
                   content = Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       SizedBox(
                         width: sideWidth,
-                        child: _buildNowPlayingTrigger(
-                          track: track,
-                          artSize: 44,
-                          iconSize: 24,
-                          gap: LuminaTokens.spaceSm,
-                        ),
+                        child: isExpanded
+                            ? const SizedBox.shrink()
+                            : _buildNowPlayingTrigger(
+                                track: track,
+                                artSize: 48,
+                                iconSize: 24,
+                                gap: LuminaTokens.spaceSm,
+                              ),
                       ),
                       const SizedBox(width: LuminaTokens.spaceSm),
                       Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Center(
-                              child: PlaybackControls(
-                                status: state.status,
-                                compact: maxWidth < 900,
-                                onPrevious: widget.audioService.previous,
-                                onPlayPause:
-                                    widget.audioService.togglePlayPause,
-                                onNext: widget.audioService.next,
-                                onSkipBackward15s: onSkipBack15s,
-                                onSkipForward30s: onSkipForward30s,
-                              ),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: centerMaxWidth,
                             ),
-                            const SizedBox(height: 2),
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 680),
-                              child: TrackProgressBar(
-                                position: state.position,
-                                duration: trackDuration,
-                                expand: true,
-                                showWaveform: true,
-                                onSeek: widget.audioService.seek,
-                              ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Center(
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: PlaybackControls(
+                                      status: state.status,
+                                      compact: maxWidth < 900,
+                                      isShuffleEnabled: _isShuffleEnabled,
+                                      onToggleShuffle: _toggleShuffle,
+                                      repeatMode: _repeatMode,
+                                      onCycleRepeat: _cycleRepeat,
+                                      onPrevious: _handlePrevious,
+                                      onPlayPause:
+                                          widget.audioService.togglePlayPause,
+                                      onNext: () => unawaited(_handleNext()),
+                                      onSkipBackward15s: onSkipBack15s,
+                                      onSkipForward30s: onSkipForward30s,
+                                      trailingBadge: badge,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                TrackProgressBar(
+                                  position: state.position,
+                                  duration: trackDuration,
+                                  expand: true,
+                                  onSeek: widget.audioService.seek,
+                                ),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
                       ),
                       const SizedBox(width: LuminaTokens.spaceSm),
                       SizedBox(
                         width: sideWidth,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: Alignment.centerRight,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (showQualityBadge) ...[
-                                    badge,
-                                    const SizedBox(width: 6),
-                                  ],
-                                  _buildLyricsToggleButton(),
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerRight,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                lyricsBtn,
+                                const SizedBox(width: 4),
+                                if (autoplayBtn != null) ...[
+                                  autoplayBtn,
+                                  const SizedBox(width: 2),
                                 ],
-                              ),
+                                queueBtn,
+                                const SizedBox(width: 2),
+                                outputBtn,
+                                const SizedBox(width: 4),
+                                VolumeControl(
+                                  volume: state.volume,
+                                  isMuted: state.isMuted,
+                                  lockedUnity:
+                                      widget.audioService.isStrictBitPerfect,
+                                  sliderWidth: wideSliderWidth,
+                                  onVolumeChanged:
+                                      widget.audioService.setVolume,
+                                  onToggleMute:
+                                      widget.audioService.toggleMute,
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 2),
-                            FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: Alignment.centerRight,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  queueBtn,
-                                  const SizedBox(width: LuminaTokens.space2xs),
-                                  outputBtn,
-                                  const SizedBox(width: LuminaTokens.space2xs),
-                                  VolumeControl(
-                                    volume: state.volume,
-                                    isMuted: state.isMuted,
-                                    lockedUnity:
-                                        widget.audioService.isStrictBitPerfect,
-                                    sliderWidth: wideSliderWidth,
-                                    onVolumeChanged:
-                                        widget.audioService.setVolume,
-                                    onToggleMute:
-                                        widget.audioService.toggleMute,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ],
@@ -655,20 +766,26 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
                           Expanded(
-                            child: _buildNowPlayingTrigger(
-                              track: track,
-                              artSize: 40,
-                              iconSize: 22,
-                              gap: 10,
-                            ),
+                            child: isExpanded
+                                ? const SizedBox.shrink()
+                                : _buildNowPlayingTrigger(
+                                    track: track,
+                                    artSize: 40,
+                                    iconSize: 22,
+                                    gap: 10,
+                                  ),
                           ),
                           const SizedBox(width: LuminaTokens.spaceXs),
                           PlaybackControls(
                             status: state.status,
                             compact: true,
-                            onPrevious: widget.audioService.previous,
+                            isShuffleEnabled: _isShuffleEnabled,
+                            onToggleShuffle: _toggleShuffle,
+                            repeatMode: _repeatMode,
+                            onCycleRepeat: _cycleRepeat,
+                            onPrevious: _handlePrevious,
                             onPlayPause: widget.audioService.togglePlayPause,
-                            onNext: widget.audioService.next,
+                            onNext: () => unawaited(_handleNext()),
                             onSkipBackward15s: onSkipBack15s,
                             onSkipForward30s: onSkipForward30s,
                           ),
@@ -676,13 +793,11 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                           Expanded(
                             child: Align(
                               alignment: Alignment.centerRight,
-                              child: showQualityBadge
-                                  ? FittedBox(
-                                      fit: BoxFit.scaleDown,
-                                      alignment: Alignment.centerRight,
-                                      child: badge,
-                                    )
-                                  : const SizedBox.shrink(),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerRight,
+                                child: badge,
+                              ),
                             ),
                           ),
                         ],
@@ -695,7 +810,6 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                               position: state.position,
                               duration: trackDuration,
                               expand: true,
-                              showWaveform: true,
                               onSeek: widget.audioService.seek,
                             ),
                           ),
@@ -710,6 +824,12 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
+                                  lyricsBtn,
+                                  const SizedBox(width: 2),
+                                  if (autoplayBtn != null) ...[
+                                    autoplayBtn,
+                                    const SizedBox(width: 2),
+                                  ],
                                   queueBtn,
                                   outputBtn,
                                   VolumeControl(
@@ -723,7 +843,6 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                                     onToggleMute:
                                         widget.audioService.toggleMute,
                                   ),
-                                  _buildLyricsToggleButton(),
                                 ],
                               ),
                             ),
@@ -739,6 +858,10 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   final narrowControls = Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (autoplayBtn != null) ...[
+                        autoplayBtn,
+                        const SizedBox(width: 2),
+                      ],
                       queueBtn,
                       outputBtn,
                       VolumeControl(
@@ -758,17 +881,19 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
                           Expanded(
-                            child: _buildNowPlayingTrigger(
-                              track: track,
-                              artSize: 36,
-                              iconSize: 20,
-                              gap: LuminaTokens.spaceXs,
-                            ),
+                            child: isExpanded
+                                ? const SizedBox.shrink()
+                                : _buildNowPlayingTrigger(
+                                    track: track,
+                                    artSize: 36,
+                                    iconSize: 20,
+                                    gap: LuminaTokens.spaceXs,
+                                  ),
                           ),
                           const SizedBox(width: 4),
                           ConstrainedBox(
                             constraints: BoxConstraints(
-                              maxWidth: innerW * 0.62,
+                              maxWidth: isExpanded ? innerW : innerW * 0.64,
                             ),
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
@@ -779,12 +904,17 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                                   PlaybackControls(
                                     status: state.status,
                                     compact: true,
-                                    onPrevious: widget.audioService.previous,
+                                    isShuffleEnabled: _isShuffleEnabled,
+                                    onToggleShuffle: _toggleShuffle,
+                                    repeatMode: _repeatMode,
+                                    onCycleRepeat: _cycleRepeat,
+                                    onPrevious: _handlePrevious,
                                     onPlayPause:
                                         widget.audioService.togglePlayPause,
-                                    onNext: widget.audioService.next,
+                                    onNext: () => unawaited(_handleNext()),
                                   ),
-                                  _buildLyricsToggleButton(),
+                                  const SizedBox(width: 2),
+                                  lyricsBtn,
                                 ],
                               ),
                             ),
@@ -796,7 +926,6 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                         position: state.position,
                         duration: trackDuration,
                         expand: true,
-                        showWaveform: true,
                         onSeek: widget.audioService.seek,
                       ),
                       const SizedBox(height: LuminaTokens.space2xs),
@@ -805,22 +934,17 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                           Expanded(
                             child: Align(
                               alignment: Alignment.centerLeft,
-                              child: showQualityBadge
-                                  ? FittedBox(
-                                      fit: BoxFit.scaleDown,
-                                      alignment: Alignment.centerLeft,
-                                      child: badge,
-                                    )
-                                  : const SizedBox.shrink(),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: badge,
+                              ),
                             ),
                           ),
                           const SizedBox(width: 6),
                           ConstrainedBox(
                             constraints: BoxConstraints(
-                              maxWidth: math.max(
-                                100.0,
-                                innerW - (showQualityBadge ? 72.0 : 0.0),
-                              ),
+                              maxWidth: math.max(100.0, innerW - 72.0),
                             ),
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
@@ -834,34 +958,128 @@ class _FloatingCapsuleMiniPlayerState extends State<FloatingCapsuleMiniPlayer>
                   );
                 }
 
-                final isExpanded = widget.isNowPlayingExpanded;
-                return Container(
+                final capsuleContainer = Container(
                   key: const Key('liquid_glass_capsule'),
                   width: double.infinity,
+                  constraints: isWide
+                      ? const BoxConstraints(minHeight: 84.0)
+                      : null,
                   padding: EdgeInsets.symmetric(
                     horizontal: isWide ? 20.0 : 14.0,
-                    vertical: LuminaTokens.spaceXs,
+                    vertical: isWide ? 8.0 : LuminaTokens.spaceXs,
                   ),
                   decoration: BoxDecoration(
                     color: isExpanded
                         ? Colors.transparent
-                        : LuminaTokens.cardElevatedBg,
+                        : LuminaTokens.glassPlayerBarBg,
                     border: isExpanded
                         ? null
                         : const Border(
                             top: BorderSide(
-                              color: LuminaTokens.borderSubtle,
+                              color: LuminaTokens.glassPlayerBarBorder,
                               width: 1,
                             ),
                           ),
                   ),
+                  alignment: isWide ? Alignment.center : null,
                   child: content,
+                );
+
+                if (isExpanded) {
+                  return capsuleContainer;
+                }
+
+                return FrostedGlassContainer(
+                  blurSigma: LuminaTokens.glassPlayerBarBlur,
+                  color: Colors.transparent,
+                  enableBackdropBlur: true,
+                  child: capsuleContainer,
                 );
               },
             );
-          },
-        );
       },
+    );
+  }
+}
+
+class _LyricsPillButton extends StatefulWidget {
+  final bool isActive;
+  final VoidCallback onTap;
+
+  const _LyricsPillButton({
+    required this.isActive,
+    required this.onTap,
+  });
+
+  @override
+  State<_LyricsPillButton> createState() => _LyricsPillButtonState();
+}
+
+class _LyricsPillButtonState extends State<_LyricsPillButton> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: '切換歌詞顯示',
+      child: Semantics(
+        button: true,
+        toggled: widget.isActive,
+        label: '切換歌詞顯示',
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: const Key('btn_toggle_lyrics'),
+            onTap: widget.onTap,
+            onHover: (v) {
+              if (_hovered != v) setState(() => _hovered = v);
+            },
+            onFocusChange: (v) {
+              if (_focused != v) setState(() => _focused = v);
+            },
+            mouseCursor: SystemMouseCursors.click,
+            hoverColor: Colors.transparent,
+            focusColor: Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            child: AnimatedContainer(
+              duration: LuminaTokens.focusDuration,
+              curve: LuminaTokens.motionCurve,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+              decoration: BoxDecoration(
+                color: widget.isActive
+                    ? LuminaTokens.glassNavActiveBg
+                    : (_hovered
+                          ? LuminaTokens.glassPillHoverBg
+                          : Colors.transparent),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: _focused
+                      ? LuminaTokens.focusRing
+                      : (widget.isActive
+                            ? LuminaTokens.glassPillBorder
+                            : Colors.transparent),
+                  width: 1.2,
+                ),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '詞',
+                style: TextStyle(
+                  color: widget.isActive || _hovered
+                      ? LuminaTokens.glassTextPrimary
+                      : LuminaTokens.glassTextSecondary,
+                  fontSize: 13,
+                  fontWeight:
+                      widget.isActive ? FontWeight.w700 : FontWeight.w600,
+                  height: 1.1,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -911,34 +1129,34 @@ class _FooterIconTriggerState extends State<_FooterIconTrigger> {
             mouseCursor: SystemMouseCursors.click,
             hoverColor: Colors.transparent,
             focusColor: Colors.transparent,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+            borderRadius: BorderRadius.circular(8),
             child: AnimatedContainer(
               duration: LuminaTokens.focusDuration,
               curve: LuminaTokens.motionCurve,
-              width: 34,
-              height: 34,
+              width: 32,
+              height: 32,
               decoration: BoxDecoration(
                 color: widget.isOpen
-                    ? LuminaTokens.accentBlueStrong.withValues(alpha: 0.16)
+                    ? LuminaTokens.glassNavActiveBg
                     : (_hovered
-                          ? LuminaTokens.cardHoverBg
+                          ? LuminaTokens.glassPillHoverBg
                           : Colors.transparent),
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
+                borderRadius: BorderRadius.circular(8),
                 border: Border.all(
                   color: _focused
                       ? LuminaTokens.focusRing
                       : (widget.isOpen
-                            ? LuminaTokens.accentBlueStrong
+                            ? LuminaTokens.glassPillBorder
                             : Colors.transparent),
-                  width: 1.5,
+                  width: 1.2,
                 ),
               ),
               child: Icon(
                 widget.icon,
                 size: 18,
-                color: widget.isOpen
-                    ? LuminaTokens.accentBlue
-                    : LuminaTokens.textSecondary,
+                color: widget.isOpen || _hovered
+                    ? LuminaTokens.glassTextPrimary
+                    : LuminaTokens.glassTextSecondary,
               ),
             ),
           ),

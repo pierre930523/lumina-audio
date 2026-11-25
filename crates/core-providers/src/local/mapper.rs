@@ -1,19 +1,35 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use core_db::normalize_match_key;
-use core_types::{AlbumVersion, CanonicalAlbum, ProviderKind, TrackSource};
+use core_types::{AlbumVersion, CanonicalAlbum, ProviderKind, TocSignature, TrackSource};
 use serde::{Deserialize, Serialize};
 
 use super::metadata::{
-    derive_album_and_artist_from_dir, derive_title_and_track_from_filename, ExtractedMetadata,
+    derive_album_and_artist_from_dir, derive_title_and_track_from_filename,
+    extract_disc_number_from_dir_name, ExtractedMetadata,
 };
 use super::scanner::{find_folder_cover, normalize_path};
 use crate::error::ProviderError;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VersionSyncMetadata {
+    pub toc_signature: Option<TocSignature>,
+    pub disc_count: u32,
+    pub track_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AlbumSyncMetadata {
     pub upc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toc_signature: Option<TocSignature>,
+    #[serde(default)]
+    pub disc_count: u32,
+    #[serde(default)]
+    pub track_count: u32,
+    #[serde(default)]
+    pub version_metadata: HashMap<String, VersionSyncMetadata>,
 }
 
 const EDITION_KEYWORDS: &[&str] = &[
@@ -178,6 +194,7 @@ impl AlbumMapper {
                 .album_artist
                 .as_ref()
                 .cloned()
+                .or_else(|| meta.artists.first().cloned())
                 .unwrap_or_else(|| meta.artist.clone());
             let norm_artist = normalize_match_key(&artist_key_raw);
             let norm_album = normalize_album_base_title(&meta.album);
@@ -250,7 +267,19 @@ impl AlbumMapper {
                 album = album.with_cover_url(cover_url);
             } else if let Some(first_path) = track_items.first().map(|(p, _)| p) {
                 if let Some(parent) = first_path.parent() {
-                    if let Some(cover_path) = find_folder_cover(parent) {
+                    let cover = find_folder_cover(parent).or_else(|| {
+                        let is_disc = parent
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .and_then(extract_disc_number_from_dir_name)
+                            .is_some();
+                        if is_disc {
+                            parent.parent().and_then(find_folder_cover)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(cover_path) = cover {
                         album = album.with_cover_url(normalize_path(&cover_path));
                     }
                 }
@@ -258,20 +287,42 @@ impl AlbumMapper {
 
             let album_upc = track_items.iter().find_map(|(_, m)| m.upc.clone());
 
-            // Group by directory + canonical album group key so distinct albums
+            // Group by album root directory + canonical album group key so multi-disc subfolders
+            // (CD1/CD2, Disc 1/Disc 2) collapse into ONE AlbumVersion while distinct albums
             // sharing a flat folder never collide on (provider_id, external_album_id).
             let mut version_groups: HashMap<String, Vec<(PathBuf, ExtractedMetadata)>> =
                 HashMap::new();
             for (path, meta) in track_items {
-                let dir_key = path
-                    .parent()
+                let effective_dir = path.parent().map(|parent| {
+                    let is_disc_dir = parent
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(extract_disc_number_from_dir_name)
+                        .is_some();
+                    if is_disc_dir {
+                        parent.parent().unwrap_or(parent)
+                    } else {
+                        parent
+                    }
+                });
+                let dir_key = effective_dir
                     .map(normalize_path)
                     .unwrap_or_else(|| "default".to_string());
                 let version_key = format!("{dir_key}::{group_artist_key}::{group_album_key}");
                 version_groups.entry(version_key).or_default().push((path, meta));
             }
 
-            for (external_album_id, tracks_in_version) in version_groups {
+            let mut album_version_meta: HashMap<String, VersionSyncMetadata> = HashMap::new();
+            let mut primary_toc: Option<TocSignature> = None;
+            let mut primary_disc_count: u32 = 1;
+            let mut primary_track_count: u32 = 0;
+
+            for (external_album_id, mut tracks_in_version) in version_groups {
+                tracks_in_version.sort_by(|(pa, ma), (pb, mb)| {
+                    (ma.disc_number, ma.track_number, normalize_path(pa))
+                        .cmp(&(mb.disc_number, mb.track_number, normalize_path(pb)))
+                });
+
                 let representative_format = tracks_in_version
                     .first()
                     .map(|(_, m)| m.format.clone())
@@ -306,6 +357,10 @@ impl AlbumMapper {
                 }
 
                 let mut version_has_tracks = false;
+                let mut version_durations_ms: Vec<u64> = Vec::with_capacity(tracks_in_version.len());
+                let mut distinct_discs: HashSet<u16> = HashSet::new();
+                let mut max_disc: u16 = 1;
+
                 for (path, meta) in tracks_in_version {
                     let external_track_id = normalize_path(&path);
                     let track_res = TrackSource::new(
@@ -360,19 +415,47 @@ impl AlbumMapper {
                         );
                     }
 
+                    distinct_discs.insert(track.disc_number);
+                    max_disc = max_disc.max(track.disc_number);
+                    version_durations_ms.push(track.duration_ms);
                     all_tracks.push(track);
                     version_has_tracks = true;
                 }
 
                 if version_has_tracks {
+                    let disc_count = u32::from(max_disc).max(distinct_discs.len() as u32).max(1);
+                    let track_count = version_durations_ms.len() as u32;
+                    let toc = TocSignature::from_durations(disc_count, version_durations_ms);
+
+                    if primary_toc.is_none() {
+                        primary_toc = Some(toc.clone());
+                        primary_disc_count = disc_count;
+                        primary_track_count = track_count;
+                    }
+
+                    album_version_meta.insert(
+                        version.id.clone(),
+                        VersionSyncMetadata {
+                            toc_signature: Some(toc),
+                            disc_count,
+                            track_count,
+                        },
+                    );
                     album.add_version(version);
                 }
             }
 
             if !album.versions.is_empty() {
-                if let Some(upc) = album_upc {
-                    sync_metadata.insert(album.id.clone(), AlbumSyncMetadata { upc: Some(upc) });
-                }
+                sync_metadata.insert(
+                    album.id.clone(),
+                    AlbumSyncMetadata {
+                        upc: album_upc,
+                        toc_signature: primary_toc,
+                        disc_count: primary_disc_count,
+                        track_count: primary_track_count,
+                        version_metadata: album_version_meta,
+                    },
+                );
                 canonical_albums.push(album);
             }
         }

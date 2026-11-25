@@ -117,7 +117,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
       children: [
         const Icon(
           Icons.manage_search_rounded,
-          color: LuminaTokens.accentBlue,
+          color: LuminaTokens.glassTextPrimary,
           size: 22,
         ),
         const SizedBox(width: LuminaTokens.spaceXs),
@@ -140,7 +140,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
             height: 14,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: LuminaTokens.accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
           ),
           const SizedBox(width: 6),
@@ -182,7 +182,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
             leading: const Icon(
               Icons.apps_rounded,
               size: 15,
-              color: LuminaTokens.accentBlue,
+              color: LuminaTokens.glassTextPrimary,
             ),
             label: '全部 (${ctrl.totalResultCount})',
             isLoading: ctrl.isAnyLoading,
@@ -253,13 +253,17 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
     return ChoiceChip(
       key: chipKey,
       selected: selected,
+      showCheckmark: false,
+      surfaceTintColor: Colors.transparent,
       onSelected: onTap != null ? (_) => onTap() : null,
-      backgroundColor: LuminaTokens.cardBg,
-      selectedColor: LuminaTokens.accentBlue.withValues(alpha: 0.18),
+      backgroundColor: LuminaTokens.glassPillBg,
+      selectedColor: LuminaTokens.glassSegmentSelectedBg,
       side: BorderSide(
         color: selected
-            ? LuminaTokens.accentBlue
-            : (hasError ? LuminaTokens.statusWarning : LuminaTokens.borderControl),
+            ? LuminaTokens.glassSegmentSelectedBorder
+            : (hasError
+                  ? LuminaTokens.statusWarning
+                  : LuminaTokens.glassPillBorder),
       ),
       avatar: leading,
       label: Row(
@@ -269,8 +273,8 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
             label,
             style: TextStyle(
               color: selected
-                  ? LuminaTokens.accentBlue
-                  : LuminaTokens.textSecondary,
+                  ? Colors.white
+                  : LuminaTokens.glassTextSecondary,
               fontSize: 12.5,
               fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
             ),
@@ -282,7 +286,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
               height: 11,
               child: CircularProgressIndicator(
                 strokeWidth: 1.8,
-                color: LuminaTokens.accentBlue,
+                color: LuminaTokens.glassTextPrimary,
               ),
             ),
           ] else if (hasError) ...[
@@ -308,7 +312,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
         vertical: LuminaTokens.spaceXs,
       ),
       decoration: BoxDecoration(
-        color: LuminaTokens.statusErrorBg.withValues(alpha: 0.75),
+        color: LuminaTokens.statusWarning.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         border: Border.all(
           color: LuminaTokens.statusWarning.withValues(alpha: 0.55),
@@ -359,7 +363,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircularProgressIndicator(color: LuminaTokens.accentBlue),
+              CircularProgressIndicator(color: LuminaTokens.glassTextPrimary),
               SizedBox(height: LuminaTokens.spaceSm),
               Text(
                 '正在查詢本機曲庫與串流服務...',
@@ -457,8 +461,9 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
             decoration: BoxDecoration(
-              color: LuminaTokens.cardElevatedBg,
+              color: LuminaTokens.glassPillBg,
               borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
+              border: Border.all(color: LuminaTokens.glassPillBorder),
             ),
             child: Text(
               '$count',
@@ -483,11 +488,12 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
       track: track,
       enabled: !match.isLocal,
       child: Material(
-        type: MaterialType.transparency,
+        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
+        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
         child: InkWell(
           key: Key('search_track_${match.sourceKind}_${track.id}'),
         borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.65),
+        hoverColor: LuminaTokens.glassRowHoverBg,
         onTap: () {
           if (match.isLocal) {
             widget.audioService.play(track: track);
@@ -522,8 +528,8 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isSelected
-                            ? LuminaTokens.accentBlue
-                            : LuminaTokens.textPrimary,
+                            ? Colors.white
+                            : LuminaTokens.glassTextPrimary,
                         fontSize: 13.5,
                         fontWeight: FontWeight.w600,
                       ),
@@ -555,11 +561,11 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
-                      color: LuminaTokens.cardElevatedBg,
+                      color: LuminaTokens.glassPillBg,
                       borderRadius: BorderRadius.circular(
                         LuminaTokens.radiusPill,
                       ),
-                      border: Border.all(color: LuminaTokens.borderSubtle),
+                      border: Border.all(color: LuminaTokens.glassPillBorder),
                     ),
                     child: Text(
                       track.format.label,
@@ -610,12 +616,12 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
     ];
 
     return Material(
-      color: LuminaTokens.cardBg,
-      borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+      color: LuminaTokens.glassCardBg,
+      borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
       child: InkWell(
         key: Key('search_album_${match.sourceKind}_${match.id}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        hoverColor: LuminaTokens.glassRowHoverBg,
         onTap: () {
           if (match.localAlbum != null) {
             widget.onOpenLocalAlbum(match.localAlbum!.id);
@@ -626,8 +632,8 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
         child: Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-            border: Border.all(color: LuminaTokens.borderSubtle),
+            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -714,19 +720,19 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
     final isLocalArtist = artist.sourceKinds.contains('local');
 
     return Material(
-      color: LuminaTokens.cardBg,
-      borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
+      color: LuminaTokens.glassCardBg,
+      borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
       child: InkWell(
         key: Key('search_artist_${artist.name}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-        hoverColor: LuminaTokens.cardHoverBg.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+        hoverColor: LuminaTokens.glassRowHoverBg,
         onTap: () => widget.onOpenArtist(artist.name),
         child: Container(
           constraints: const BoxConstraints(minWidth: 160, maxWidth: 260),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-            border: Border.all(color: LuminaTokens.borderSubtle),
+            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
+            border: Border.all(color: LuminaTokens.glassCardBorder),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -743,7 +749,7 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
                   width: 36,
                   height: 36,
                   decoration: const BoxDecoration(
-                    color: LuminaTokens.cardElevatedBg,
+                    color: LuminaTokens.glassPillBg,
                     shape: BoxShape.circle,
                   ),
                   child: const Icon(
@@ -844,9 +850,9 @@ class _SourceBadge extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         decoration: BoxDecoration(
-          color: LuminaTokens.cardElevatedBg,
+          color: LuminaTokens.glassPillBg,
           borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-          border: Border.all(color: LuminaTokens.borderControl),
+          border: Border.all(color: LuminaTokens.glassPillBorder),
         ),
         child: const Text(
           '本機',
@@ -867,9 +873,9 @@ class _SourceBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: LuminaTokens.cardElevatedBg,
+        color: LuminaTokens.glassPillBg,
         borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-        border: Border.all(color: LuminaTokens.borderControl),
+        border: Border.all(color: LuminaTokens.glassPillBorder),
       ),
       child: Text(
         sourceKind,
