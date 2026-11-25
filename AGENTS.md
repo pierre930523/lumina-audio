@@ -13,7 +13,7 @@
 - **核心相依**：
   - 非同步與網路：`tokio`（full）、`reqwest`（rustls + http2 + stream）、`futures-util`、`quick-xml`。
   - 資料與音訊：`sqlx`（SQLite WAL + FTS5）、`opus2`（bundled/static）、`serde`/`serde_json`、`image`、`blowfish`/`cbc`/`sha2`。
-- **Flutter App**（`app/pubspec.yaml` v0.2.4+6，Dart SDK `^3.14.0`）：
+- **Flutter App**（`app/pubspec.yaml` v0.2.5+7，Dart SDK `^3.14.0`）：
   - `material_ui`、`ffi: ^2.2.0`、`crypto`、`flutter_lints: ^6.0.0`。
   - Impeller 算繪引擎 + 自訂 GLSL Fragment Shaders（`liquid_glass.frag`、`mesh_fluid_bg.frag`）。
 - **執行與測試環境**：
