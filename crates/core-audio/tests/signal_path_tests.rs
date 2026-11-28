@@ -1,6 +1,6 @@
 use core_audio::dsp::DspPipeline;
 use core_audio::signal_path::SignalPathEngine;
-use core_audio::{build_signal_path, DspPipelineConfig, PeqBand};
+use core_audio::{DspPipelineConfig, PeqBand, build_signal_path};
 use core_types::{AudioCodec, AudioFormat, OutputBackendKind, SignalQuality};
 
 #[test]
@@ -71,7 +71,11 @@ fn test_signal_path_scenario_3_enhanced_with_src() {
     );
 
     assert_eq!(path.overall, SignalQuality::Enhanced);
-    let src_node = path.nodes.iter().find(|n| n.stage == "Sample Rate Conversion").unwrap();
+    let src_node = path
+        .nodes
+        .iter()
+        .find(|n| n.stage == "Sample Rate Conversion")
+        .unwrap();
     assert!(src_node.detail.contains("192000 Hz -> 96000 Hz"));
 }
 
@@ -186,14 +190,7 @@ fn test_signal_path_scenario_9_wasapi_shared_overrides_dsp_enhanced() {
 fn test_signal_path_empty_source_label() {
     let fmt = AudioFormat::pcm(AudioCodec::Wav, 44100, 16, 2).unwrap();
     let dsp = DspPipelineConfig::default();
-    let path = build_signal_path(
-        "",
-        &fmt,
-        &dsp,
-        None,
-        OutputBackendKind::WindowsAsio,
-        "DAC",
-    );
+    let path = build_signal_path("", &fmt, &dsp, None, OutputBackendKind::WindowsAsio, "DAC");
 
     assert_eq!(path.nodes[0].stage, "Source");
     assert!(!path.nodes[0].detail.is_empty());

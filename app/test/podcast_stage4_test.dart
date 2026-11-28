@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/nav_entry.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/podcast_models.dart';
@@ -15,6 +16,7 @@ import 'package:lumina_app/services/podcast_store.dart';
 import 'package:lumina_app/services/streaming/providers/youtube_music_provider.dart';
 import 'package:lumina_app/services/streaming/secure_credential_store.dart';
 import 'package:lumina_app/services/streaming/streaming_manager.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:lumina_app/ui/podcasts/podcast_detail_page.dart';
 import 'package:lumina_app/ui/podcasts/podcasts_view.dart';
@@ -1142,11 +1144,17 @@ void main() {
           );
           addTearDown(sm.dispose);
 
+          final scaleCtrl = UiScaleController(
+            initialHomeLayoutPreset: HomeLayoutPreset.classic,
+          );
+          addTearDown(scaleCtrl.dispose);
+
           await tester.pumpWidget(
             MaterialApp(
               theme: LuminaTokens.buildDarkTheme(),
               home: HomeScreen(
                 audioService: svc,
+                uiScaleController: scaleCtrl,
                 streamingManager: sm,
                 navHistoryController: nav,
                 windowController: win,
@@ -1309,11 +1317,17 @@ void main() {
           );
           addTearDown(sm.dispose);
 
+          final scaleCtrl = UiScaleController(
+            initialHomeLayoutPreset: HomeLayoutPreset.classic,
+          );
+          addTearDown(scaleCtrl.dispose);
+
           await tester.pumpWidget(
             MaterialApp(
               theme: LuminaTokens.buildDarkTheme(),
               home: HomeScreen(
                 audioService: svc,
+                uiScaleController: scaleCtrl,
                 streamingManager: sm,
                 windowController: win,
                 podcastStore: store,

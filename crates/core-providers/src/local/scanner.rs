@@ -240,7 +240,8 @@ impl DirectoryScanner {
                     let (file_size, file_mtime) = read_size_mtime(&path);
                     let detail = match reason {
                         SkipReason::UnsplitCueOrIso => {
-                            "Unsplit CUE sheet or disc ISO image is not directly playable".to_string()
+                            "Unsplit CUE sheet or disc ISO image is not directly playable"
+                                .to_string()
                         }
                         _ => format!(
                             "Unsupported audio container (.{})",

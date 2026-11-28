@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/nav_entry.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/services/desktop_window_controller.dart';
@@ -227,6 +228,7 @@ void main() {
 
       audioService = MockAudioService();
       scaleController = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
         prefsFileOverride: File(
           '${tempDir.path}${Platform.pathSeparator}ui_prefs.json',
         ),

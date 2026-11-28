@@ -1,6 +1,6 @@
 use core_audio::dsd::{
-    DopFramer, DsdChannelDecimator, DsdStereoDecimator, DsdiffParser, DsdiffReader, DsfParser,
-    DsfReader, DSD_SILENCE_BYTE,
+    DSD_SILENCE_BYTE, DopFramer, DsdChannelDecimator, DsdStereoDecimator, DsdiffParser,
+    DsdiffReader, DsfParser, DsfReader,
 };
 use core_audio::pcm::{AudioChunk, AudioDecoder};
 use std::io::Cursor;
@@ -372,7 +372,11 @@ fn test_dsf_reader_multiblock_seek_matrix() {
 
     // 2. Backward seek after 100% / >100% EOF resumes cleanly
     verify_seek(&mut reader, Duration::ZERO, "dsf-after-eof-zero");
-    verify_seek(&mut reader, dur + Duration::from_secs(5), "dsf-far-past-eof");
+    verify_seek(
+        &mut reader,
+        dur + Duration::from_secs(5),
+        "dsf-far-past-eof",
+    );
     verify_seek(&mut reader, Duration::from_millis(120), "dsf-after-eof-mid");
 
     // 3. Consecutive repeated seeks without intermediate next_chunk()
@@ -410,70 +414,72 @@ fn test_dsdiff_reader_odd_byte_seek_and_dop_aligned() {
     let dur = reader.duration().expect("DSDIFF duration missing");
     let dur_ns = dur.as_nanos();
 
-    let verify_dsdiff_seek = |r: &mut DsdiffReader<Cursor<Vec<u8>>>,
-                              t: Duration,
-                              force_dop: bool,
-                              label: &str| {
-        if force_dop {
-            r.seek_dop_aligned(t).unwrap();
-        } else {
-            r.seek(t).unwrap();
-        }
-
-        let target_frame = ((t.as_nanos().saturating_mul(sr as u128)) / 1_000_000_000) as u64;
-        let expected_byte_per_ch = if t >= dur || target_frame >= total_frames {
-            bytes_per_ch
-        } else {
-            let raw = (target_frame / 8) as usize;
-            if force_dop || r.seek_precision_frames() == 16 {
-                raw & !1
+    let verify_dsdiff_seek =
+        |r: &mut DsdiffReader<Cursor<Vec<u8>>>, t: Duration, force_dop: bool, label: &str| {
+            if force_dop {
+                r.seek_dop_aligned(t).unwrap();
             } else {
-                raw
+                r.seek(t).unwrap();
             }
-        };
 
-        if force_dop && expected_byte_per_ch < bytes_per_ch {
-            assert_eq!(
-                expected_byte_per_ch % 2,
-                0,
-                "{label}: DoP-aligned seek must land on even byte per channel"
-            );
-        }
-
-        let mut total_bytes = 0usize;
-        let mut pair_idx = expected_byte_per_ch;
-        while let Some(chunk) = r.next_chunk().expect("DSDIFF next_chunk failed") {
-            match chunk {
-                AudioChunk::DsdBitstream {
-                    bytes,
-                    channels,
-                    sample_rate,
-                    is_lsb_first,
-                } => {
-                    assert_eq!(channels, 2);
-                    assert_eq!(sample_rate, sr);
-                    assert!(!is_lsb_first);
-                    assert_eq!(bytes.len() % 2, 0);
-                    for lr in bytes.as_chunks::<2>().0 {
-                        assert_eq!(lr[0], (pair_idx & 0xFF) as u8, "{label}: L mismatch @ {pair_idx}");
-                        assert_eq!(
-                            lr[1],
-                            ((pair_idx >> 8) & 0xFF) as u8,
-                            "{label}: R mismatch @ {pair_idx}"
-                        );
-                        pair_idx += 1;
-                    }
-                    total_bytes += bytes.len();
+            let target_frame = ((t.as_nanos().saturating_mul(sr as u128)) / 1_000_000_000) as u64;
+            let expected_byte_per_ch = if t >= dur || target_frame >= total_frames {
+                bytes_per_ch
+            } else {
+                let raw = (target_frame / 8) as usize;
+                if force_dop || r.seek_precision_frames() == 16 {
+                    raw & !1
+                } else {
+                    raw
                 }
-                other => panic!("Expected DsdBitstream, got {other:?}"),
+            };
+
+            if force_dop && expected_byte_per_ch < bytes_per_ch {
+                assert_eq!(
+                    expected_byte_per_ch % 2,
+                    0,
+                    "{label}: DoP-aligned seek must land on even byte per channel"
+                );
             }
-        }
-        assert_eq!(
-            total_bytes,
-            (bytes_per_ch - expected_byte_per_ch) * 2,
-            "{label}: remaining byte count mismatch"
-        );
-    };
+
+            let mut total_bytes = 0usize;
+            let mut pair_idx = expected_byte_per_ch;
+            while let Some(chunk) = r.next_chunk().expect("DSDIFF next_chunk failed") {
+                match chunk {
+                    AudioChunk::DsdBitstream {
+                        bytes,
+                        channels,
+                        sample_rate,
+                        is_lsb_first,
+                    } => {
+                        assert_eq!(channels, 2);
+                        assert_eq!(sample_rate, sr);
+                        assert!(!is_lsb_first);
+                        assert_eq!(bytes.len() % 2, 0);
+                        for lr in bytes.as_chunks::<2>().0 {
+                            assert_eq!(
+                                lr[0],
+                                (pair_idx & 0xFF) as u8,
+                                "{label}: L mismatch @ {pair_idx}"
+                            );
+                            assert_eq!(
+                                lr[1],
+                                ((pair_idx >> 8) & 0xFF) as u8,
+                                "{label}: R mismatch @ {pair_idx}"
+                            );
+                            pair_idx += 1;
+                        }
+                        total_bytes += bytes.len();
+                    }
+                    other => panic!("Expected DsdBitstream, got {other:?}"),
+                }
+            }
+            assert_eq!(
+                total_bytes,
+                (bytes_per_ch - expected_byte_per_ch) * 2,
+                "{label}: remaining byte count mismatch"
+            );
+        };
 
     // 1. Explicitly hit an odd byte boundary (pair index 1001 = 8008 DSD frames)
     let odd_time_ns = (8008u128 * 1_000_000_000) / (sr as u128) + 1;
@@ -528,8 +534,8 @@ fn test_dsdiff_reader_odd_byte_seek_and_dop_aligned() {
 fn test_dop_framer_cross_chunk_buffering_and_reset() {
     // 1. Stereo DSDIFF (MSB-first) split across odd-byte chunk boundaries: 6 + 2 + 5 + 3 = 16 bytes (4 DoP frames)
     let source_msb: [u8; 16] = [
-        0x11, 0x21, 0x12, 0x22, 0x13, 0x23, 0x14, 0x24, 0x15, 0x25, 0x16, 0x26, 0x17, 0x27,
-        0x18, 0x28,
+        0x11, 0x21, 0x12, 0x22, 0x13, 0x23, 0x14, 0x24, 0x15, 0x25, 0x16, 0x26, 0x17, 0x27, 0x18,
+        0x28,
     ];
     let mut framer = DopFramer::new();
     let mut wire = Vec::new();

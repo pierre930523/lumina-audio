@@ -15,14 +15,15 @@ pub struct LookaheadLimiter {
 
 impl LookaheadLimiter {
     pub const DEFAULT_LOOKAHEAD_SECS: f64 = 0.003; // 3 ms
-    pub const DEFAULT_ATTACK_SECS: f64 = 0.001;    // 1 ms
-    pub const DEFAULT_RELEASE_SECS: f64 = 0.100;   // 100 ms
-    pub const DEFAULT_THRESHOLD: f64 = 0.9999;     // Just under 0 dBFS
+    pub const DEFAULT_ATTACK_SECS: f64 = 0.001; // 1 ms
+    pub const DEFAULT_RELEASE_SECS: f64 = 0.100; // 100 ms
+    pub const DEFAULT_THRESHOLD: f64 = 0.9999; // Just under 0 dBFS
     pub const SOFT_CLIP_THRESHOLD: f64 = 0.95;
 
     pub fn new(sample_rate_hz: f64, channels: usize) -> Self {
         let ch = channels.max(1);
-        let lookahead_frames = ((sample_rate_hz * Self::DEFAULT_LOOKAHEAD_SECS).round() as usize).max(8);
+        let lookahead_frames =
+            ((sample_rate_hz * Self::DEFAULT_LOOKAHEAD_SECS).round() as usize).max(8);
         let attack_coeff = (-1.0 / (Self::DEFAULT_ATTACK_SECS * sample_rate_hz)).exp();
         let release_coeff = (-1.0 / (Self::DEFAULT_RELEASE_SECS * sample_rate_hz)).exp();
 
@@ -104,9 +105,11 @@ impl LookaheadLimiter {
 
         // 2. Smooth envelope follower
         if frame_peak > self.envelope {
-            self.envelope = self.attack_coeff * self.envelope + (1.0 - self.attack_coeff) * frame_peak;
+            self.envelope =
+                self.attack_coeff * self.envelope + (1.0 - self.attack_coeff) * frame_peak;
         } else {
-            self.envelope = self.release_coeff * self.envelope + (1.0 - self.release_coeff) * frame_peak;
+            self.envelope =
+                self.release_coeff * self.envelope + (1.0 - self.release_coeff) * frame_peak;
         }
 
         // 3. Compute gain reduction factor

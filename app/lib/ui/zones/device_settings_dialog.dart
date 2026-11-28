@@ -7,6 +7,9 @@ import '../common/frosted_glass_container.dart';
 import '../settings/settings_widgets.dart';
 import '../theme/lumina_tokens.dart';
 
+part 'device_settings_sections.dart';
+part 'device_settings_widgets.dart';
+
 class DeviceSettingsDialog extends StatefulWidget {
   final AudioService audioService;
   final AudioDeviceCapabilitiesModel capability;
@@ -88,11 +91,9 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
           ? (caps.where((c) => c.isOsDefault && !c.isSharedMode).firstOrNull ??
                 caps.where((c) => c.isOsDefault).firstOrNull)
           : isSharedApi
-              ? (caps
-                        .where((c) => c.isOsDefault && c.isSharedMode)
-                        .firstOrNull ??
-                    caps.where((c) => c.isOsDefault).firstOrNull)
-              : null;
+          ? (caps.where((c) => c.isOsDefault && c.isSharedMode).firstOrNull ??
+                caps.where((c) => c.isOsDefault).firstOrNull)
+          : null;
       if (matched != null) {
         _cap = matched;
       }
@@ -225,6 +226,12 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
     await _refreshInfo();
   }
 
+  Future<void> _setDsdOutputMode(DsdOutputModeOption opt) async {
+    await widget.audioService.setDsdOutputMode(opt);
+    if (mounted) setState(() {});
+    await _refreshInfo();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isAsio = _cap.backend == 'windows_asio';
@@ -264,101 +271,15 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: LuminaTokens.glassPillBg,
-                      borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                      border: Border.all(color: LuminaTokens.glassCardBorder),
-                    ),
-                    child: Icon(
-                      widget.deviceIcon,
-                      color: LuminaTokens.textPrimary,
-                      size: 22,
-                    ),
-                  ),
-                  const SizedBox(width: LuminaTokens.spaceSm),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.isSystemOutput
-                              ? 'System Output (${_cap.name})'
-                              : _cap.name,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: LuminaTokens.textPrimary,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          widget.isSystemOutput
-                              ? '跟隨 Windows 預設 · ${_cap.interfaceLabel}'
-                              : _cap.interfaceLabel,
-                          style: const TextStyle(
-                            color: LuminaTokens.textMuted,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    key: const Key('btn_close_device_settings'),
-                    tooltip: '關閉',
-                    style: LuminaSettingsStyles.iconButtonStyle(),
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      color: LuminaTokens.textSecondary,
-                    ),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
+              _DeviceSettingsHeader(
+                capability: _cap,
+                isSystemOutput: widget.isSystemOutput,
+                deviceIcon: widget.deviceIcon,
+                onClose: () => Navigator.of(context).pop(),
               ),
               if (_error != null) ...[
                 const SizedBox(height: LuminaTokens.spaceSm),
-                Semantics(
-                  liveRegion: true,
-                  child: Container(
-                    padding: const EdgeInsets.all(LuminaTokens.spaceSm),
-                    decoration: BoxDecoration(
-                      color: LuminaTokens.statusError.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusSm,
-                      ),
-                      border: Border.all(
-                        color: LuminaTokens.statusError.withValues(alpha: 0.55),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.error_outline_rounded,
-                          color: LuminaTokens.statusError,
-                          size: 16,
-                        ),
-                        const SizedBox(width: LuminaTokens.spaceXs),
-                        Expanded(
-                          child: Text(
-                            _error!,
-                            style: const TextStyle(
-                              color: Color(0xFFFECACA),
-                              fontSize: 12,
-                              height: 1.4,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                _DeviceSettingsErrorBanner(error: _error!),
               ],
               const SizedBox(height: LuminaTokens.spaceMd),
               Flexible(
@@ -367,396 +288,38 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _SectionBox(
-                        title: '輸出模式與獨佔控制',
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _InfoRow(
-                              label: '目前介面',
-                              value: _cap.interfaceLabel,
-                            ),
-                            if (_cap.supportedOutputModes.isNotEmpty)
-                              _InfoRow(
-                                label: '硬體支援模式',
-                                value: _cap.supportedOutputModes
-                                    .map(_formatOutputModeLabel)
-                                    .join(' · '),
-                              ),
-                            const Divider(
-                              color: _borderColor,
-                              height: LuminaTokens.spaceMd,
-                            ),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        '獨佔模式 (Exclusive Mode)',
-                                        style: TextStyle(
-                                          color: LuminaTokens.textPrimary,
-                                          fontSize: 13.5,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      const SizedBox(
-                                        height: LuminaTokens.space2xs,
-                                      ),
-                                      Text(
-                                        isAsio
-                                            ? 'ASIO 原生獨佔直驅（繞過系統混音器）'
-                                            : widget.isSystemOutput
-                                                ? 'System Output 依播放政策自動路由；如需鎖定獨佔請直接啟用 WASAPI Exclusive 卡片'
-                                                : canToggleExclusive
-                                                    ? (isShared
-                                                        ? '目前為 WASAPI Shared；開啟後將切換至 WASAPI Exclusive'
-                                                        : '已啟用 WASAPI Exclusive 獨佔直出')
-                                                    : (_cap.probeNote ??
-                                                        '此硬體或藍牙連線不支援獨佔模式'),
-                                        style: const TextStyle(
-                                          color: LuminaTokens.textMuted,
-                                          fontSize: 12,
-                                          height: 1.35,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: LuminaTokens.spaceSm),
-                                Tooltip(
-                                  message: _busy || !canToggleExclusive
-                                      ? '此輸出裝置目前無法切換獨佔模式'
-                                      : (isShared
-                                            ? '開啟 WASAPI Exclusive 獨佔模式'
-                                            : '切換回 WASAPI Shared 模式'),
-                                  child: Switch(
-                                    key: const Key('switch_device_exclusive_mode'),
-                                    value: isAsio || !isShared,
-                                    mouseCursor: LuminaSettingsStyles
-                                        .switchMouseCursor(
-                                          enabled: !_busy && canToggleExclusive,
-                                        ),
-                                    onChanged: _busy || !canToggleExclusive
-                                        ? null
-                                        : _toggleExclusiveMode,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            if (_cap.supportsNativeDsd || _cap.supportsDop) ...[
-                              const Divider(
-                                color: _borderColor,
-                                height: LuminaTokens.spaceMd,
-                              ),
-                              const Text(
-                                'DSD 輸出模式（僅顯示硬體支援項目）',
-                                style: TextStyle(
-                                  color: LuminaTokens.textSecondary,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(height: LuminaTokens.spaceXs),
-                              Wrap(
-                                spacing: LuminaTokens.spaceXs,
-                                runSpacing: LuminaTokens.spaceXs,
-                                children: dsdOptions.map((opt) {
-                                  final selected =
-                                      widget.audioService.dsdOutputMode == opt;
-                                  return Tooltip(
-                                    message: '選擇 DSD 輸出模式：${opt.shortLabel}',
-                                    child: ChoiceChip(
-                                      label: Text(
-                                        opt.shortLabel,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: selected
-                                              ? Colors.white
-                                              : (_busy
-                                                    ? LuminaTokens.textDisabled
-                                                    : LuminaTokens
-                                                          .glassTextSecondary),
-                                        ),
-                                      ),
-                                      selected: selected,
-                                      showCheckmark: false,
-                                      selectedColor:
-                                          LuminaTokens.glassSegmentSelectedBg,
-                                      backgroundColor:
-                                          LuminaTokens.glassSegmentTrackBg,
-                                      disabledColor:
-                                          LuminaTokens.glassSegmentTrackBg,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(
-                                          LuminaTokens.radiusSm,
-                                        ),
-                                      ),
-                                      side: BorderSide(
-                                        color: selected
-                                            ? LuminaTokens
-                                                  .glassSegmentSelectedBorder
-                                            : (_busy
-                                                  ? LuminaTokens
-                                                        .glassCardDivider
-                                                  : LuminaTokens
-                                                        .glassSegmentTrackBorder),
-                                      ),
-                                      onSelected: _busy
-                                          ? null
-                                          : (_) async {
-                                              await widget.audioService
-                                                  .setDsdOutputMode(opt);
-                                              if (mounted) setState(() {});
-                                              await _refreshInfo();
-                                            },
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-                            ],
-                          ],
-                        ),
+                      _OutputModeSection(
+                        capability: _cap,
+                        isSystemOutput: widget.isSystemOutput,
+                        isAsio: isAsio,
+                        isShared: isShared,
+                        canToggleExclusive: canToggleExclusive,
+                        busy: _busy,
+                        dsdOptions: dsdOptions,
+                        currentDsdMode: widget.audioService.dsdOutputMode,
+                        formatOutputModeLabel: _formatOutputModeLabel,
+                        onToggleExclusive: _toggleExclusiveMode,
+                        onSelectDsdMode: _setDsdOutputMode,
                       ),
                       const SizedBox(height: LuminaTokens.spaceSm),
-                      _SectionBox(
-                        title: '真實硬體支援能力',
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              '支援取樣率',
-                              style: TextStyle(
-                                color: LuminaTokens.textMuted,
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(height: LuminaTokens.spaceXs),
-                            if (_cap.supportedSampleRates.isEmpty)
-                              const Text(
-                                '未回報（由裝置驅動程式決定）',
-                                style: TextStyle(
-                                  color: LuminaTokens.textMuted,
-                                  fontSize: 12.5,
-                                ),
-                              )
-                            else
-                              Wrap(
-                                spacing: LuminaTokens.spaceXs,
-                                runSpacing: LuminaTokens.spaceXs,
-                                children: _cap.supportedSampleRates
-                                    .map(
-                                      (r) => _SpecChip(label: _formatRateChip(r)),
-                                    )
-                                    .toList(),
-                              ),
-                            const SizedBox(height: LuminaTokens.spaceSm),
-                            _InfoRow(
-                              label: '支援位元深度',
-                              value: _cap.supportedBitDepths.isEmpty
-                                  ? '由系統／驅動決定'
-                                  : _cap.supportedBitDepths
-                                        .map((b) => '$b-bit')
-                                        .join(' · '),
-                            ),
-                            _InfoRow(
-                              label: '支援聲道數',
-                              value: _cap.supportedChannels.isEmpty
-                                  ? '由裝置決定'
-                                  : _cap.supportedChannels
-                                        .map(
-                                          (c) => c == 2 ? '2ch (Stereo)' : '${c}ch',
-                                        )
-                                        .join(' · '),
-                            ),
-                            if (_cap.bufferSizeSupported &&
-                                bufferChoices.isNotEmpty) ...[
-                              const Divider(
-                                color: _borderColor,
-                                height: LuminaTokens.spaceMd,
-                              ),
-                              Text(
-                                '緩衝區大小（支援範圍：${_cap.minBufferFrames}–${_cap.maxBufferFrames} frames）',
-                                style: const TextStyle(
-                                  color: LuminaTokens.textPrimary,
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(height: LuminaTokens.spaceXs),
-                              Wrap(
-                                spacing: LuminaTokens.spaceXs,
-                                runSpacing: LuminaTokens.spaceXs,
-                                children: bufferChoices.map((frames) {
-                                  final selected = currentBuffer == frames;
-                                  final disabled =
-                                      _busy || bufferChoices.length <= 1;
-                                  return Tooltip(
-                                    message: '設定緩衝區為 $frames frames',
-                                    child: ChoiceChip(
-                                      key: Key('btn_buffer_frames_$frames'),
-                                      label: Text(
-                                        '$frames',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: selected
-                                              ? Colors.white
-                                              : (disabled
-                                                    ? LuminaTokens.textDisabled
-                                                    : LuminaTokens
-                                                          .glassTextSecondary),
-                                        ),
-                                      ),
-                                      selected: selected,
-                                      showCheckmark: false,
-                                      selectedColor:
-                                          LuminaTokens.glassSegmentSelectedBg,
-                                      backgroundColor:
-                                          LuminaTokens.glassSegmentTrackBg,
-                                      disabledColor:
-                                          LuminaTokens.glassSegmentTrackBg,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(
-                                          LuminaTokens.radiusSm,
-                                        ),
-                                      ),
-                                      side: BorderSide(
-                                        color: selected
-                                            ? LuminaTokens
-                                                  .glassSegmentSelectedBorder
-                                            : (disabled
-                                                  ? LuminaTokens
-                                                        .glassCardDivider
-                                                  : LuminaTokens
-                                                        .glassSegmentTrackBorder),
-                                      ),
-                                      onSelected: disabled
-                                          ? null
-                                          : (_) => _setBufferFrames(frames),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-                            ] else
-                              _InfoRow(
-                                label: '緩衝區大小',
-                                value: isShared
-                                    ? '由 Windows 系統混音器管理'
-                                    : '由硬體驅動程式管理',
-                              ),
-                          ],
-                        ),
+                      _HardwareCapabilitiesSection(
+                        capability: _cap,
+                        isShared: isShared,
+                        busy: _busy,
+                        bufferChoices: bufferChoices,
+                        currentBuffer: currentBuffer,
+                        formatRateChip: _formatRateChip,
+                        onSelectBufferFrames: _setBufferFrames,
                       ),
                       const SizedBox(height: LuminaTokens.spaceSm),
-                      _SectionBox(
-                        title: '音量規則與 Bit-Perfect 策略',
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (isShared)
-                              Container(
-                                key: const Key('shared_not_bit_perfect_notice'),
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(
-                                  LuminaTokens.spaceSm,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: LuminaTokens.statusWarning.withValues(
-                                    alpha: 0.14,
-                                  ),
-                                  borderRadius: BorderRadius.circular(
-                                    LuminaTokens.radiusSm,
-                                  ),
-                                  border: Border.all(
-                                    color: LuminaTokens.statusWarning
-                                        .withValues(alpha: 0.6),
-                                  ),
-                                ),
-                                child: const Text(
-                                  'WASAPI Shared 經過 Windows 系統混音器，無法進行 BIT-PERFECT 位元完美輸出；軟體音量可正常調整。',
-                                  style: TextStyle(
-                                    color: LuminaTokens.statusWarning,
-                                    fontSize: 12,
-                                    height: 1.4,
-                                  ),
-                                ),
-                              ),
-                            if (!isShared) ...[
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        const Text(
-                                          'Strict Bit-Perfect Mode（嚴格位元完美）',
-                                          style: TextStyle(
-                                            color: LuminaTokens.textPrimary,
-                                            fontSize: 13.5,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(
-                                          height: LuminaTokens.space2xs,
-                                        ),
-                                        Text(
-                                          strictOn
-                                              ? '已鎖定 Unity 1.0x (100%) 軟體音量與 DSP 硬旁通，請使用硬體／DAC 旋鈕調整音量'
-                                              : '啟用後將鎖定 100% 軟體音量並旁通所有 DSP 處理',
-                                          key: strictOn
-                                              ? const Key(
-                                                  'volume_rule_unity_locked',
-                                                )
-                                              : null,
-                                          style: const TextStyle(
-                                            color: LuminaTokens.textMuted,
-                                            fontSize: 12,
-                                            height: 1.35,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: LuminaTokens.spaceSm),
-                                  Tooltip(
-                                    message: strictOn
-                                        ? '關閉嚴格位元完美模式（恢復軟體音量與 DSP）'
-                                        : '開啟嚴格位元完美模式（鎖定 100% 音量並旁通 DSP）',
-                                    child: Switch(
-                                      key: const Key(
-                                        'switch_device_strict_bit_perfect',
-                                      ),
-                                      value: strictOn,
-                                      mouseCursor: LuminaSettingsStyles
-                                          .switchMouseCursor(enabled: !_busy),
-                                      onChanged: _busy ? null : _setStrictMode,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: LuminaTokens.spaceXs),
-                            ] else
-                              const SizedBox(height: LuminaTokens.spaceXs),
-                            _InfoRow(
-                              label: '軟體音量狀態',
-                              value: strictOn
-                                  ? '已鎖定 100% (Unity 1.0x)'
-                                  : '$volPct%（軟體音量可用）',
-                            ),
-                            _InfoRow(
-                              label: '驗證狀態',
-                              value: safeVerificationStatus,
-                            ),
-                            if (_outputInfo.output.sampleRateHz > 0)
-                              _InfoRow(
-                                label: '目前輸出串流',
-                                value:
-                                    '${AudioFormat.formatSampleRateKhz(_outputInfo.output.sampleRateHz)} · ${_outputInfo.output.validBits}/${_outputInfo.output.containerBits}-bit · ${_outputInfo.output.channels}ch',
-                              ),
-                          ],
-                        ),
+                      _VolumeStrategySection(
+                        isShared: isShared,
+                        strictOn: strictOn,
+                        busy: _busy,
+                        volPct: volPct,
+                        safeVerificationStatus: safeVerificationStatus,
+                        outputInfo: _outputInfo,
+                        onSetStrictMode: _setStrictMode,
                       ),
                     ],
                   ),
@@ -764,108 +327,6 @@ class _DeviceSettingsDialogState extends State<DeviceSettingsDialog> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SectionBox extends StatelessWidget {
-  final String title;
-  final Widget child;
-
-  const _SectionBox({required this.title, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(LuminaTokens.spaceMd),
-      decoration: BoxDecoration(
-        color: LuminaTokens.glassCardBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-        border: Border.all(color: LuminaTokens.glassCardBorder),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              color: LuminaTokens.glassTextSecondary,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.3,
-            ),
-          ),
-          const SizedBox(height: LuminaTokens.spaceSm),
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final String label;
-  final String value;
-
-  const _InfoRow({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: LuminaTokens.space2xs),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 112,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: LuminaTokens.textMuted,
-                fontSize: 12,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(
-                color: LuminaTokens.textPrimary,
-                fontSize: 12.5,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SpecChip extends StatelessWidget {
-  final String label;
-
-  const _SpecChip({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: LuminaTokens.spaceXs + 2,
-        vertical: LuminaTokens.space2xs,
-      ),
-      decoration: BoxDecoration(
-        color: LuminaTokens.glassPillBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        border: Border.all(color: LuminaTokens.glassPillBorder),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: LuminaTokens.textPrimary,
-          fontSize: 11.5,
-          fontWeight: FontWeight.w500,
         ),
       ),
     );

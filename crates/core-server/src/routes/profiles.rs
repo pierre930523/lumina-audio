@@ -1,8 +1,10 @@
 use crate::error::ServerError;
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
 use axum::Json;
-use core_db::{DbError, LibraryRepository, PlayHistoryEntry, ProfileError, ProfileFavorite, ProfileRepository};
+use axum::extract::{Path, Query, State};
+use core_db::{
+    DbError, LibraryRepository, PlayHistoryEntry, ProfileError, ProfileFavorite, ProfileRepository,
+};
 use core_types::Profile;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -99,7 +101,9 @@ pub async fn create_profile(
     Json(req): Json<CreateProfileRequest>,
 ) -> Result<Json<Profile>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
 
     let color = req.avatar_color.unwrap_or_else(|| "#007AFF".to_string());
@@ -122,7 +126,9 @@ pub async fn update_profile(
     Json(req): Json<UpdateProfileRequest>,
 ) -> Result<Json<Profile>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
 
     let existing = ProfileRepository::get_profile(pool, &id)
@@ -152,7 +158,9 @@ pub async fn delete_profile(
     Path(id): Path<String>,
 ) -> Result<Json<ProfileActionResponse>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
 
     ProfileRepository::delete_profile(pool, &id)
@@ -178,7 +186,9 @@ pub async fn activate_profile(
     Path(id): Path<String>,
 ) -> Result<Json<ProfileActionResponse>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
 
     let existing = ProfileRepository::get_profile(pool, &id)
@@ -213,7 +223,9 @@ pub async fn add_favorite(
     Json(req): Json<FavoriteRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
     LibraryRepository::add_favorite(pool, &id, &req.item_type, &req.item_id)
         .await
@@ -227,7 +239,9 @@ pub async fn remove_favorite(
     Query(query): Query<FavoritesQuery>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
     let item_type = query.item_type.unwrap_or_else(|| "track".to_string());
     let removed = LibraryRepository::remove_favorite(pool, &id, &item_type, &target_id)
@@ -256,10 +270,13 @@ pub async fn record_history(
     Json(req): Json<RecordHistoryRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     let Some(ref pool) = state.db_pool else {
-        return Err(ServerError::Database("Database not initialized".to_string()));
+        return Err(ServerError::Database(
+            "Database not initialized".to_string(),
+        ));
     };
-    let row_id = LibraryRepository::record_play(pool, &id, &req.track_source_id, req.duration_listened_ms)
-        .await
-        .map_err(map_db_err)?;
+    let row_id =
+        LibraryRepository::record_play(pool, &id, &req.track_source_id, req.duration_listened_ms)
+            .await
+            .map_err(map_db_err)?;
     Ok(Json(serde_json::json!({ "id": row_id })))
 }

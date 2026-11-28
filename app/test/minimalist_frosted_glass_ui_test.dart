@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/signal_path.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/desktop_window_controller.dart';
@@ -87,8 +88,10 @@ class _FiveAlbumMockAudioService extends MockAudioService {
   ];
 
   @override
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100}) async =>
-      _albumsList.take(limit).toList();
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  }) async => _albumsList.take(limit).toList();
 
   @override
   Future<Map<String, dynamic>?> getArtwork(
@@ -222,6 +225,10 @@ void main() {
         addTearDown(service.dispose);
         final cache = LibraryIndexCache();
         addTearDown(cache.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(scaleCtrl.dispose);
         for (final t in service.queue) {
           cache.setArtworkPathSync(t.id, coverFilePath);
         }
@@ -232,6 +239,7 @@ void main() {
             home: HomeScreen(
               audioService: service,
               libraryCache: cache,
+              uiScaleController: scaleCtrl,
             ),
           ),
         );
@@ -292,9 +300,13 @@ void main() {
         final service = _FiveAlbumMockAudioService(coverFilePath);
         final winCtrl = DesktopWindowController(isSupportedOverride: true);
         final cache = LibraryIndexCache();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(() {
           service.dispose();
           cache.dispose();
+          scaleCtrl.dispose();
         });
         final albums = await service.getAlbums();
         for (final alb in albums) {
@@ -309,6 +321,7 @@ void main() {
               audioService: service,
               libraryCache: cache,
               windowController: winCtrl,
+              uiScaleController: scaleCtrl,
             ),
           ),
         );
@@ -482,9 +495,13 @@ void main() {
         final service = _FiveAlbumMockAudioService(coverFilePath);
         final winCtrl = DesktopWindowController(isSupportedOverride: true);
         final npCtrl = NowPlayingViewController();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(() {
           service.dispose();
           npCtrl.dispose();
+          scaleCtrl.dispose();
         });
 
         await tester.pumpWidget(
@@ -494,6 +511,7 @@ void main() {
               audioService: service,
               windowController: winCtrl,
               nowPlayingController: npCtrl,
+              uiScaleController: scaleCtrl,
             ),
           ),
         );
@@ -592,7 +610,9 @@ void main() {
         addTearDown(tester.view.reset);
 
         final service = _FiveAlbumMockAudioService(coverFilePath);
-        final scaleCtrl = UiScaleController();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(() {
           service.dispose();
           scaleCtrl.dispose();

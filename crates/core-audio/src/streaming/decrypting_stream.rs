@@ -88,9 +88,9 @@ impl DecryptingByteStream {
                 "Invalid Blowfish-CBC stride 0: must be >= 1".to_string(),
             ));
         }
-        let stripe_size = block_size.checked_mul(stride).ok_or_else(|| {
-            StreamError::Unsupported("Blowfish stripe_size overflow".to_string())
-        })?;
+        let stripe_size = block_size
+            .checked_mul(stride)
+            .ok_or_else(|| StreamError::Unsupported("Blowfish stripe_size overflow".to_string()))?;
 
         Ok(Self {
             inner,
@@ -361,7 +361,10 @@ mod tests {
         // 2. Unaligned read across last full encrypted block + trailing <2048 byte tail.
         let tail_start = 6144 * 3 + 1000;
         let mut tail_buf = vec![0u8; 4096];
-        let n_tail = stream.read_at(tail_start as u64, &mut tail_buf).await.unwrap();
+        let n_tail = stream
+            .read_at(tail_start as u64, &mut tail_buf)
+            .await
+            .unwrap();
         assert_eq!(n_tail, total_len - tail_start);
         assert_eq!(&tail_buf[..n_tail], &plaintext[tail_start..]);
 
@@ -380,7 +383,13 @@ mod tests {
         assert_eq!(full, plaintext);
 
         // 4. Read at EOF returns 0.
-        assert_eq!(stream.read_at(total_len as u64, &mut tail_buf).await.unwrap(), 0);
+        assert_eq!(
+            stream
+                .read_at(total_len as u64, &mut tail_buf)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

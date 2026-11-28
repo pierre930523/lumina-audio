@@ -1,4 +1,4 @@
-use crate::error::{catch_unwind_ffi, set_last_error, LUMINA_ERR_GENERAL, LUMINA_OK};
+use crate::error::{LUMINA_ERR_GENERAL, LUMINA_OK, catch_unwind_ffi, set_last_error};
 use std::os::raw::c_int;
 
 #[cfg(target_os = "windows")]
@@ -7,13 +7,11 @@ mod win_job {
     use std::sync::OnceLock;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
     };
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
     pub(super) struct JobObjectGuard(HANDLE);
 

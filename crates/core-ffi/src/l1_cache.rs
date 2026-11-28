@@ -1,7 +1,7 @@
-use crate::engine::{get_engine, EngineState};
+use crate::engine::{EngineState, get_engine};
 use crate::error::{
-    catch_unwind_ffi, set_last_error, string_to_c_char, LUMINA_ERR_DATABASE, LUMINA_ERR_GENERAL,
-    LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    LUMINA_ERR_DATABASE, LUMINA_ERR_GENERAL, LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER,
+    LUMINA_OK, catch_unwind_ffi, set_last_error, string_to_c_char,
 };
 use core_db::{L1StreamCacheRepository, L1StreamUrlRecord, SqlitePool};
 use std::ffi::CStr;
@@ -259,36 +259,40 @@ pub extern "C" fn lumina_l1_cache_delete(
 /// Enqueues a non-blocking FIFO delete of all `l1_stream_urls` entries belonging to `provider_id`.
 #[unsafe(no_mangle)]
 pub extern "C" fn lumina_l1_cache_clear_provider(provider_id: *const c_char) -> c_int {
-    catch_unwind_ffi(LUMINA_ERR_DATABASE, "lumina_l1_cache_clear_provider", || {
-        if provider_id.is_null() {
-            set_last_error("provider_id is null");
-            return Ok(LUMINA_ERR_NULL_POINTER);
-        }
-        let pid = unsafe { CStr::from_ptr(provider_id) }
-            .to_str()
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in provider_id: {e}"))?
-            .trim()
-            .to_string();
-        if pid.is_empty() {
-            set_last_error("provider_id must be non-empty");
-            return Ok(LUMINA_ERR_GENERAL);
-        }
+    catch_unwind_ffi(
+        LUMINA_ERR_DATABASE,
+        "lumina_l1_cache_clear_provider",
+        || {
+            if provider_id.is_null() {
+                set_last_error("provider_id is null");
+                return Ok(LUMINA_ERR_NULL_POINTER);
+            }
+            let pid = unsafe { CStr::from_ptr(provider_id) }
+                .to_str()
+                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in provider_id: {e}"))?
+                .trim()
+                .to_string();
+            if pid.is_empty() {
+                set_last_error("provider_id must be non-empty");
+                return Ok(LUMINA_ERR_GENERAL);
+            }
 
-        let engine = get_engine();
-        let maybe_pool = engine.db_pool.read().ok().and_then(|g| g.clone());
-        let Some(pool) = maybe_pool else {
-            return Ok(LUMINA_OK);
-        };
+            let engine = get_engine();
+            let maybe_pool = engine.db_pool.read().ok().and_then(|g| g.clone());
+            let Some(pool) = maybe_pool else {
+                return Ok(LUMINA_OK);
+            };
 
-        let tx = l1_write_sender(&engine);
-        tx.send(L1WriteOp::ClearProvider {
-            pool,
-            provider_id: pid,
-        })
-        .map_err(|_| anyhow::anyhow!("L1 write queue closed"))?;
+            let tx = l1_write_sender(&engine);
+            tx.send(L1WriteOp::ClearProvider {
+                pool,
+                provider_id: pid,
+            })
+            .map_err(|_| anyhow::anyhow!("L1 write queue closed"))?;
 
-        Ok(LUMINA_OK)
-    })
+            Ok(LUMINA_OK)
+        },
+    )
 }
 
 /// Enqueues a low-priority background SQLite prune deleting rows with `network_epoch < current_epoch`

@@ -3,9 +3,28 @@ import 'dart:math' as math;
 import 'package:flutter/rendering.dart';
 import 'package:material_ui/material_ui.dart';
 import '../../models/playback_state.dart';
+import '../../models/protocol/protocol_models.dart' as protocol;
+import '../theme/lumina_glass_theme.dart';
 import '../theme/lumina_tokens.dart';
 
-enum LuminaRepeatMode { off, all, one }
+enum LuminaRepeatMode {
+  off,
+  all,
+  one;
+
+  protocol.RepeatMode toRepeatMode() => switch (this) {
+        LuminaRepeatMode.off => protocol.RepeatMode.off,
+        LuminaRepeatMode.all => protocol.RepeatMode.all,
+        LuminaRepeatMode.one => protocol.RepeatMode.one,
+      };
+
+  static LuminaRepeatMode fromRepeatMode(protocol.RepeatMode mode) =>
+      switch (mode) {
+        protocol.RepeatMode.off => LuminaRepeatMode.off,
+        protocol.RepeatMode.all => LuminaRepeatMode.all,
+        protocol.RepeatMode.one => LuminaRepeatMode.one,
+      };
+}
 
 class PlaybackControls extends StatelessWidget {
   final PlaybackStatus status;
@@ -39,6 +58,8 @@ class PlaybackControls extends StatelessWidget {
 
   ButtonStyle _transportStyle({
     required Color foregroundColor,
+    required Color hoverColor,
+    required Color focusColor,
     Color? disabledForegroundColor,
   }) {
     return IconButton.styleFrom(
@@ -46,8 +67,8 @@ class PlaybackControls extends StatelessWidget {
       disabledForegroundColor:
           disabledForegroundColor ?? foregroundColor.withValues(alpha: 0.72),
       backgroundColor: Colors.transparent,
-      hoverColor: LuminaTokens.glassPillBg,
-      focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
+      hoverColor: hoverColor,
+      focusColor: focusColor.withValues(alpha: 0.25),
       shape: const CircleBorder(),
     ).copyWith(
       mouseCursor: WidgetStateProperty.resolveWith(
@@ -57,7 +78,7 @@ class PlaybackControls extends StatelessWidget {
       ),
       side: WidgetStateProperty.resolveWith(
         (states) => states.contains(WidgetState.focused)
-            ? const BorderSide(color: LuminaTokens.focusRing, width: 1.5)
+            ? BorderSide(color: focusColor, width: 1.5)
             : BorderSide.none,
       ),
     );
@@ -67,6 +88,7 @@ class PlaybackControls extends StatelessWidget {
     required IconData icon,
     required double size,
     required bool active,
+    required Color indicatorColor,
   }) {
     return Stack(
       alignment: Alignment.center,
@@ -79,8 +101,8 @@ class PlaybackControls extends StatelessWidget {
             child: Container(
               width: 3.5,
               height: 3.5,
-              decoration: const BoxDecoration(
-                color: LuminaTokens.glassTextPrimary,
+              decoration: BoxDecoration(
+                color: indicatorColor,
                 shape: BoxShape.circle,
               ),
             ),
@@ -91,6 +113,17 @@ class PlaybackControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final glass = LuminaGlassTheme.of(context);
+    final isDark = glass.isDark;
+    final primaryFg =
+        isDark ? LuminaTokens.glassTextPrimary : glass.textPrimary;
+    final secondaryFg =
+        isDark ? LuminaTokens.glassTextSecondary : glass.textSecondary;
+    final tertiaryFg =
+        isDark ? LuminaTokens.glassTextTertiary : glass.textTertiary;
+    final hoverColor = isDark ? LuminaTokens.glassPillBg : glass.pillBg;
+    final focusColor = isDark ? LuminaTokens.focusRing : glass.accent;
+
     final isPlaying = status == PlaybackStatus.playing;
     final isLoading =
         status == PlaybackStatus.loading || status == PlaybackStatus.buffering;
@@ -118,14 +151,15 @@ class PlaybackControls extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: btnConstraints,
           style: _transportStyle(
-            foregroundColor: isShuffleEnabled
-                ? LuminaTokens.glassTextPrimary
-                : LuminaTokens.glassTextTertiary,
+            foregroundColor: isShuffleEnabled ? primaryFg : tertiaryFg,
+            hoverColor: hoverColor,
+            focusColor: focusColor,
           ),
           icon: _buildModeIndicatorIcon(
             icon: Icons.shuffle_rounded,
             size: compact ? 16 : 18,
             active: isShuffleEnabled,
+            indicatorColor: primaryFg,
           ),
           tooltip: '隨機播放',
           onPressed: onToggleShuffle,
@@ -137,7 +171,9 @@ class PlaybackControls extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: btnConstraints,
             style: _transportStyle(
-              foregroundColor: LuminaTokens.glassTextSecondary,
+              foregroundColor: secondaryFg,
+              hoverColor: hoverColor,
+              focusColor: focusColor,
             ),
             icon: Icon(
               Icons.replay_10_rounded,
@@ -152,7 +188,9 @@ class PlaybackControls extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: btnConstraints,
           style: _transportStyle(
-            foregroundColor: LuminaTokens.glassTextPrimary,
+            foregroundColor: primaryFg,
+            hoverColor: hoverColor,
+            focusColor: focusColor,
           ),
           icon: Icon(
             Icons.skip_previous_rounded,
@@ -167,16 +205,18 @@ class PlaybackControls extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: playConstraints,
           style: _transportStyle(
-            foregroundColor: LuminaTokens.glassTextPrimary,
+            foregroundColor: primaryFg,
+            hoverColor: hoverColor,
+            focusColor: focusColor,
           ),
           icon: isLoading
               ? SizedBox(
                   width: spinnerSize,
                   height: spinnerSize,
-                  child: const CircularProgressIndicator(
-                    key: Key('btn_play_pause_loading'),
+                  child: CircularProgressIndicator(
+                    key: const Key('btn_play_pause_loading'),
                     strokeWidth: 2.2,
-                    color: LuminaTokens.glassTextPrimary,
+                    color: primaryFg,
                   ),
                 )
               : Icon(
@@ -192,7 +232,9 @@ class PlaybackControls extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: btnConstraints,
           style: _transportStyle(
-            foregroundColor: LuminaTokens.glassTextPrimary,
+            foregroundColor: primaryFg,
+            hoverColor: hoverColor,
+            focusColor: focusColor,
           ),
           icon: Icon(
             Icons.skip_next_rounded,
@@ -208,7 +250,9 @@ class PlaybackControls extends StatelessWidget {
             padding: EdgeInsets.zero,
             constraints: btnConstraints,
             style: _transportStyle(
-              foregroundColor: LuminaTokens.glassTextSecondary,
+              foregroundColor: secondaryFg,
+              hoverColor: hoverColor,
+              focusColor: focusColor,
             ),
             icon: Icon(
               Icons.forward_30_rounded,
@@ -223,9 +267,10 @@ class PlaybackControls extends StatelessWidget {
           padding: EdgeInsets.zero,
           constraints: btnConstraints,
           style: _transportStyle(
-            foregroundColor: repeatMode != LuminaRepeatMode.off
-                ? LuminaTokens.glassTextPrimary
-                : LuminaTokens.glassTextTertiary,
+            foregroundColor:
+                repeatMode != LuminaRepeatMode.off ? primaryFg : tertiaryFg,
+            hoverColor: hoverColor,
+            focusColor: focusColor,
           ),
           icon: _buildModeIndicatorIcon(
             icon: repeatMode == LuminaRepeatMode.one
@@ -233,6 +278,7 @@ class PlaybackControls extends StatelessWidget {
                 : Icons.repeat_rounded,
             size: compact ? 16 : 18,
             active: repeatMode != LuminaRepeatMode.off,
+            indicatorColor: primaryFg,
           ),
           tooltip: repeatTooltip,
           onPressed: onCycleRepeat,

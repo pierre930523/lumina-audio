@@ -8,6 +8,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 core-types = { path = "../core-types" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 thiserror = { workspace = true }
@@ -29,4 +30,4 @@ keyring = { version = "3", optional = true, features = ["apple-native"] }
 keyring = { version = "3", optional = true, features = ["linux-native-sync-persistent", "sync-secret-service"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

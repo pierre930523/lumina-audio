@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../models/audio_quality_tier.dart';
 import '../../models/playback_state.dart';
+import '../theme/lumina_glass_theme.dart';
 import '../theme/lumina_tokens.dart';
 
 /// Immutable visual styling specification for a single [AudioQualityTier].
@@ -72,11 +73,47 @@ class AudioQualityBadgeStyle {
     backgroundColor: LuminaTokens.badgeStandardBg,
   );
 
-  static AudioQualityBadgeStyle forTier(AudioQualityTier tier) => switch (tier) {
-    AudioQualityTier.hiRes => hiRes,
-    AudioQualityTier.lossless => lossless,
-    AudioQualityTier.hqLossy => hqLossy,
-    AudioQualityTier.standard => standard,
+  static const AudioQualityBadgeStyle hiResLight = AudioQualityBadgeStyle(
+    label: 'Hi-Res',
+    borderColor: Color(0xA69A6B00),
+    textColor: Color(0xFF8A5E00),
+    backgroundColor: Color(0x18B47D00),
+    glowColor: Color(0x24B47D00),
+    glowBlur: 6.0,
+    boxShadow: [
+      BoxShadow(color: Color(0x24B47D00), blurRadius: 6.0),
+    ],
+  );
+
+  static const AudioQualityBadgeStyle losslessLight = AudioQualityBadgeStyle(
+    label: 'LOSSLESS',
+    borderColor: Color(0x520F172A),
+    textColor: Color(0xFF0F172A),
+    backgroundColor: Color(0x0E0F172A),
+  );
+
+  static const AudioQualityBadgeStyle hqLossyLight = AudioQualityBadgeStyle(
+    label: 'HQ',
+    borderColor: Color(0x380F172A),
+    textColor: Color(0xFF334155),
+    backgroundColor: Color(0x0A0F172A),
+  );
+
+  static const AudioQualityBadgeStyle standardLight = AudioQualityBadgeStyle(
+    label: 'SD',
+    borderColor: Color(0x280F172A),
+    textColor: Color(0xFF475569),
+    backgroundColor: Colors.transparent,
+  );
+
+  static AudioQualityBadgeStyle forTier(
+    AudioQualityTier tier, {
+    bool isDark = true,
+  }) => switch (tier) {
+    AudioQualityTier.hiRes => isDark ? hiRes : hiResLight,
+    AudioQualityTier.lossless => isDark ? lossless : losslessLight,
+    AudioQualityTier.hqLossy => isDark ? hqLossy : hqLossyLight,
+    AudioQualityTier.standard => isDark ? standard : standardLight,
   };
 }
 
@@ -136,16 +173,22 @@ class _AudioQualityBadgeState extends State<AudioQualityBadge> {
     return style.backgroundColor;
   }
 
-  Color _resolveBorder(AudioQualityBadgeStyle style) {
-    if (_focused) return LuminaTokens.focusRing;
+  Color _resolveBorder(AudioQualityBadgeStyle style, LuminaGlassTheme glass) {
+    if (_focused) {
+      return glass.isDark ? LuminaTokens.focusRing : glass.accent;
+    }
     if (widget.isActive) return style.textColor;
     return style.borderColor;
   }
 
   @override
   Widget build(BuildContext context) {
+    final glass = LuminaGlassTheme.of(context);
     final resolvedTier = widget.effectiveTier;
-    final style = AudioQualityBadgeStyle.forTier(resolvedTier);
+    final style = AudioQualityBadgeStyle.forTier(
+      resolvedTier,
+      isDark: glass.isDark,
+    );
     final interactive = widget.onTap != null;
     final radius = BorderRadius.circular(LuminaTokens.qualityBadgeRadius);
 
@@ -183,7 +226,7 @@ class _AudioQualityBadgeState extends State<AudioQualityBadge> {
               color: _resolveBackground(style, interactive),
               borderRadius: radius,
               border: Border.all(
-                color: _resolveBorder(style),
+                color: _resolveBorder(style, glass),
                 width: 1,
               ),
               boxShadow: style.boxShadow,

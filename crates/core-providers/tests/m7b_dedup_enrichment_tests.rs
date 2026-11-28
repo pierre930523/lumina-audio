@@ -1,20 +1,22 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use core_db::credential::MemoryCredentialStore;
-use core_db::{open_test_database, search_library, LibraryRepository};
-use core_types::{AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, ProviderKind, TrackSource};
+use core_db::{CatalogQueryRepository, LibraryRepository, open_test_database, search_library};
+use core_types::{
+    AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, ProviderKind, TrackSource,
+};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use core_providers::{
-    clean_discogs_artist_name, extract_edition_label, parse_remote_share_uri, AlbumSyncMetadata,
-    CreditEnrichmentService, DiscogsClient, DiscogsConfig, EnrichmentConfig, LibrarySyncService,
-    LocalProviderConfig, MockSmbTransport, MusicBrainzClient, MusicBrainzConfig, ProviderManager,
-    SmbConfig, SmbEntry, SyncResult,
+    AlbumSyncMetadata, CreditEnrichmentService, DiscogsClient, DiscogsConfig, EnrichmentConfig,
+    LibrarySyncService, LocalProviderConfig, MockSmbTransport, MusicBrainzClient,
+    MusicBrainzConfig, ProviderManager, SmbConfig, SmbEntry, SyncResult, clean_discogs_artist_name,
+    extract_edition_label, parse_remote_share_uri,
 };
 
 struct CapturedEnrichReq {
@@ -55,7 +57,11 @@ where
                     let header_str = String::from_utf8_lossy(&buf[..header_end]).to_string();
                     let mut lines = header_str.split("\r\n");
                     let req_line = lines.next().unwrap_or("");
-                    let target = req_line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let target = req_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
                     let mut headers = HashMap::new();
                     let mut content_length = 0usize;
                     for line in lines {
@@ -117,7 +123,10 @@ fn test_edition_label_extraction_preserves_regular_titles() {
     );
     assert_eq!(
         extract_edition_label("Kind of Blue (Deluxe Edition)"),
-        ("Kind of Blue".to_string(), Some("Deluxe Edition".to_string()))
+        (
+            "Kind of Blue".to_string(),
+            Some("Deluxe Edition".to_string())
+        )
     );
     assert_eq!(
         extract_edition_label("Dark Side of the Moon (2011 Remaster) [24-Bit/96kHz]"),
@@ -145,8 +154,13 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
         .unwrap()
         .with_release_year(1973)
         .unwrap();
-    let ver_local = AlbumVersion::new(&alb_local.id, ProviderKind::Local, "/music/dsotm", fmt_local.clone())
-        .unwrap();
+    let ver_local = AlbumVersion::new(
+        &alb_local.id,
+        ProviderKind::Local,
+        "/music/dsotm",
+        fmt_local.clone(),
+    )
+    .unwrap();
     let trk_local = TrackSource::new(
         &ver_local.id,
         ProviderKind::Local,
@@ -183,7 +197,8 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
 
     // 2. SMB: punctuation/casing variation
     let mut alb_smb = CanonicalAlbum::new("the dark side of the moon!", "Pink Floyd").unwrap();
-    let ver_smb = AlbumVersion::new(&alb_smb.id, ProviderKind::Smb, "nas/dsotm", fmt_dsd.clone()).unwrap();
+    let ver_smb =
+        AlbumVersion::new(&alb_smb.id, ProviderKind::Smb, "nas/dsotm", fmt_dsd.clone()).unwrap();
     let trk_smb = TrackSource::new(
         &ver_smb.id,
         ProviderKind::Smb,
@@ -210,10 +225,14 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
     // 3. WebDAV: Edition suffix "(2011 Remaster)"
     let mut alb_dav =
         CanonicalAlbum::new("The Dark Side of the Moon (2011 Remaster)", "Pink Floyd").unwrap();
-    let ver_dav =
-        AlbumVersion::new(&alb_dav.id, ProviderKind::WebDav, "dav/dsotm", fmt_hires.clone())
-            .unwrap()
-            .with_edition_label("2011 Remaster");
+    let ver_dav = AlbumVersion::new(
+        &alb_dav.id,
+        ProviderKind::WebDav,
+        "dav/dsotm",
+        fmt_hires.clone(),
+    )
+    .unwrap()
+    .with_edition_label("2011 Remaster");
     let trk_dav = TrackSource::new(
         &ver_dav.id,
         ProviderKind::WebDav,
@@ -239,7 +258,13 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
 
     // 4. Qobuz: matches by UPC even with variant title
     let mut alb_qb = CanonicalAlbum::new("Dark Side (Immersion)", "Pink Floyd").unwrap();
-    let ver_qb = AlbumVersion::new(&alb_qb.id, ProviderKind::Qobuz, "qb-dsotm", fmt_hires.clone()).unwrap();
+    let ver_qb = AlbumVersion::new(
+        &alb_qb.id,
+        ProviderKind::Qobuz,
+        "qb-dsotm",
+        fmt_hires.clone(),
+    )
+    .unwrap();
     let trk_qb = TrackSource::new(
         &ver_qb.id,
         ProviderKind::Qobuz,
@@ -274,7 +299,13 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
 
     // 5. Tidal: matches by overlapping track ISRC
     let mut alb_tid = CanonicalAlbum::new("DSOTM Live/Alt", "Pink Floyd").unwrap();
-    let ver_tid = AlbumVersion::new(&alb_tid.id, ProviderKind::Tidal, "tid-dsotm", fmt_hires.clone()).unwrap();
+    let ver_tid = AlbumVersion::new(
+        &alb_tid.id,
+        ProviderKind::Tidal,
+        "tid-dsotm",
+        fmt_hires.clone(),
+    )
+    .unwrap();
     let trk_tid = TrackSource::new(
         &ver_tid.id,
         ProviderKind::Tidal,
@@ -304,7 +335,13 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
     let mut alb_dz = CanonicalAlbum::new("DSOTM DZ", "Pink Floyd")
         .unwrap()
         .with_musicbrainz_id("f5093c06-23e3-404f-aeaa-40f72885ee3a");
-    let ver_dz = AlbumVersion::new(&alb_dz.id, ProviderKind::Deezer, "dz-dsotm", fmt_local.clone()).unwrap();
+    let ver_dz = AlbumVersion::new(
+        &alb_dz.id,
+        ProviderKind::Deezer,
+        "dz-dsotm",
+        fmt_local.clone(),
+    )
+    .unwrap();
     let trk_dz = TrackSource::new(
         &ver_dz.id,
         ProviderKind::Deezer,
@@ -360,8 +397,13 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
     assert!(enriched_artist.biography.is_some());
 
     let mut alb_rescan = CanonicalAlbum::new("The Dark Side of the Moon", "Pink Floyd").unwrap();
-    let ver_rescan = AlbumVersion::new(&alb_rescan.id, ProviderKind::Local, "/music/dsotm", fmt_local.clone())
-        .unwrap();
+    let ver_rescan = AlbumVersion::new(
+        &alb_rescan.id,
+        ProviderKind::Local,
+        "/music/dsotm",
+        fmt_local.clone(),
+    )
+    .unwrap();
     let trk_rescan = TrackSource::new(
         &ver_rescan.id,
         ProviderKind::Local,
@@ -394,13 +436,35 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
 
     // "Unknown Album" / "Unknown Artist" safety guard: two distinct untagged albums must NOT merge!
     let mut unk1 = CanonicalAlbum::new("Unknown Album", "Unknown Artist").unwrap();
-    let v_u1 = AlbumVersion::new(&unk1.id, ProviderKind::Local, "/tmp/u1", fmt_local.clone()).unwrap();
-    let t_u1 = TrackSource::new(&v_u1.id, ProviderKind::Local, "/tmp/u1/01.flac", "Track A", 1, 1, 1000, fmt_local.clone()).unwrap();
+    let v_u1 =
+        AlbumVersion::new(&unk1.id, ProviderKind::Local, "/tmp/u1", fmt_local.clone()).unwrap();
+    let t_u1 = TrackSource::new(
+        &v_u1.id,
+        ProviderKind::Local,
+        "/tmp/u1/01.flac",
+        "Track A",
+        1,
+        1,
+        1000,
+        fmt_local.clone(),
+    )
+    .unwrap();
     unk1.add_version(v_u1);
 
     let mut unk2 = CanonicalAlbum::new("Unknown Album", "Unknown Artist").unwrap();
-    let v_u2 = AlbumVersion::new(&unk2.id, ProviderKind::Local, "/tmp/u2", fmt_local.clone()).unwrap();
-    let t_u2 = TrackSource::new(&v_u2.id, ProviderKind::Local, "/tmp/u2/01.flac", "Track B", 1, 1, 1000, fmt_local).unwrap();
+    let v_u2 =
+        AlbumVersion::new(&unk2.id, ProviderKind::Local, "/tmp/u2", fmt_local.clone()).unwrap();
+    let t_u2 = TrackSource::new(
+        &v_u2.id,
+        ProviderKind::Local,
+        "/tmp/u2/01.flac",
+        "Track B",
+        1,
+        1,
+        1000,
+        fmt_local,
+    )
+    .unwrap();
     unk2.add_version(v_u2);
 
     LibrarySyncService::persist_sync_result(
@@ -414,7 +478,9 @@ async fn test_f37_cross_source_dedup_across_all_providers_and_unknown_guard() {
     .await
     .unwrap();
 
-    let merged_extra = LibrarySyncService::deduplicate_library(&pool).await.unwrap();
+    let merged_extra = LibrarySyncService::deduplicate_library(&pool)
+        .await
+        .unwrap();
     assert_eq!(merged_extra, 0);
     let all_after = LibrarySyncService::list_canonical_albums(&pool, 50, 0)
         .await
@@ -441,17 +507,25 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
         }
 
         if req.target.starts_with("/release-group?") {
+            let decoded_target = core_providers::percent_decode(&req.target).replace('+', " ");
+            if decoded_target.contains("DSOTM Alternate Press") {
+                return (
+                    200,
+                    vec![],
+                    r#"{"release-groups":[{"id":"rg-dsotm-1","score":100,"title":"DSOTM Alternate Press","artist-credit":[{"name":"Pink Floyd Variant","artist":{"id":"art-pf","name":"Pink Floyd"}}]}]}"#.into(),
+                );
+            }
             return (
                 200,
                 vec![],
-                r#"{"release-groups":[{"id":"rg-dsotm-1","title":"The Dark Side of the Moon"}]}"#.into(),
+                r#"{"release-groups":[{"id":"rg-dsotm-1","score":100,"title":"The Dark Side of the Moon","artist-credit":[{"name":"Pink Floyd","artist":{"id":"art-pf","name":"Pink Floyd"}}]}]}"#.into(),
             );
         }
         if req.target.starts_with("/release-group/rg-dsotm-1") {
             return (
                 200,
                 vec![],
-                r#"{"id":"rg-dsotm-1","title":"The Dark Side of the Moon","releases":[{"id":"rel-1","title":"DSOTM"}]}"#.into(),
+                r#"{"id":"rg-dsotm-1","title":"The Dark Side of the Moon","releases":[{"id":"rel-1","title":"The Dark Side of the Moon","track-count":1}]}"#.into(),
             );
         }
         if req.target.starts_with("/release/rel-1") {
@@ -462,15 +536,18 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
                     "id":"rel-1",
                     "title":"The Dark Side of the Moon",
                     "barcode":"5099902987620",
+                    "track-count":1,
                     "release-group":{"id":"rg-dsotm-1","title":"The Dark Side of the Moon"},
                     "artist-credit":[{"artist":{"id":"art-pf","name":"Pink Floyd"}}],
                     "relations":[
                         {"type":"engineer","target-type":"artist","attributes":[],"artist":{"id":"art-ap","name":"Alan Parsons"}}
                     ],
                     "media":[{
+                        "track-count":1,
                         "tracks":[{
                             "id":"trk-1",
                             "title":"Time",
+                            "length":300000,
                             "recording":{
                                 "id":"rec-1",
                                 "title":"Time",
@@ -515,7 +592,7 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
             return (
                 200,
                 vec![],
-                r#"{"results":[{"id":10562,"title":"The Dark Side of the Moon","master_id":10362}]}"#.into(),
+                r#"{"results":[{"id":10562,"title":"Pink Floyd - The Dark Side of the Moon","master_id":10362}]}"#.into(),
             );
         }
         if req.target.starts_with("/releases/10562") {
@@ -526,6 +603,8 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
                     "id":10562,
                     "title":"The Dark Side of the Moon",
                     "master_id":10362,
+                    "artists":[{"id":1,"name":"Pink Floyd"}],
+                    "tracklist":[{"position":"1","title":"Time","duration":"5:00"}],
                     "notes":"Landmark 1973 progressive rock album recorded at Abbey Road.",
                     "images":[{"uri":"https://img.discogs.com/dsotm.jpg","type":"primary"}],
                     "extraartists":[
@@ -551,17 +630,39 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
     // Insert 2 separate albums that will resolve to the same MusicBrainz release group ID
     let mut alb1 = CanonicalAlbum::new("The Dark Side of the Moon", "Pink Floyd").unwrap();
     let v1 = AlbumVersion::new(&alb1.id, ProviderKind::Local, "/a1", fmt.clone()).unwrap();
+    let t1 = TrackSource::new(
+        &v1.id,
+        ProviderKind::Local,
+        "/a1/01.flac",
+        "Time",
+        1,
+        1,
+        300_000,
+        fmt.clone(),
+    )
+    .unwrap();
     alb1.add_version(v1);
 
     let mut alb2 = CanonicalAlbum::new("DSOTM Alternate Press", "Pink Floyd Variant").unwrap();
-    let v2 = AlbumVersion::new(&alb2.id, ProviderKind::Qobuz, "qb-alt", fmt).unwrap();
+    let v2 = AlbumVersion::new(&alb2.id, ProviderKind::Qobuz, "qb-alt", fmt.clone()).unwrap();
+    let t2 = TrackSource::new(
+        &v2.id,
+        ProviderKind::Qobuz,
+        "qb-alt-1",
+        "Time",
+        1,
+        1,
+        300_000,
+        fmt,
+    )
+    .unwrap();
     alb2.add_version(v2);
 
     LibrarySyncService::persist_sync_result(
         &pool,
         &SyncResult {
             albums: vec![alb1.clone(), alb2.clone()],
-            tracks: vec![],
+            tracks: vec![t1, t2],
             ..Default::default()
         },
     )
@@ -590,7 +691,10 @@ async fn test_f38_musicbrainz_discogs_enrichment_rate_limit_and_collision_merge(
     let svc = CreditEnrichmentService::new(
         Some(mb_client),
         Some(dg_client),
-        EnrichmentConfig::default(),
+        EnrichmentConfig {
+            merge_on_mbid_match: true,
+            ..Default::default()
+        },
     );
 
     let t0 = Instant::now();
@@ -699,9 +803,7 @@ async fn test_provider_manager_sync_and_persist_plus_initialize_credentials() {
 
 #[test]
 fn test_edition_keyword_word_boundary_and_discogs_bracketed_roles() {
-    use core_providers::{
-        extract_discogs_credits, DiscogsExtraArtist, DiscogsRelease,
-    };
+    use core_providers::{DiscogsExtraArtist, DiscogsRelease, extract_discogs_credits};
 
     // Word-boundary check: "Olive" must NOT match "live"; "Monolith" must NOT match "mono"
     assert_eq!(
@@ -714,10 +816,7 @@ fn test_edition_keyword_word_boundary_and_discogs_bracketed_roles() {
     );
     assert_eq!(
         extract_edition_label("Concert (Live at Wembley)"),
-        (
-            "Concert".to_string(),
-            Some("Live at Wembley".to_string())
-        )
+        ("Concert".to_string(), Some("Live at Wembley".to_string()))
     );
 
     // Bracket-aware Discogs role splitting: "Vocals [Lead, Backing]" stays 1 role
@@ -747,10 +846,7 @@ fn test_edition_keyword_word_boundary_and_discogs_bracketed_roles() {
     assert!(roles.contains(&("Clare Torry".into(), "Vocals [Lead, Backing]".into())));
     assert!(roles.contains(&("Alan Parsons".into(), "Producer".into())));
     assert!(roles.contains(&("Alan Parsons".into(), "Mixed By".into())));
-    assert!(roles.contains(&(
-        "Alan Parsons".into(),
-        "Guitar (Acoustic, 12-String)".into()
-    )));
+    assert!(roles.contains(&("Alan Parsons".into(), "Guitar (Acoustic, 12-String)".into())));
     assert_eq!(roles.len(), 4);
 }
 
@@ -761,29 +857,57 @@ async fn test_f37_intra_batch_isrc_dedup_upc_deduplicate_library_and_local_upc()
 
     // 1. Intra-batch ISRC dedup: 3 albums in a single persist_sync_result call sharing only ISRC
     let mut a1 = CanonicalAlbum::new("Blue Train", "John Coltrane").unwrap();
-    let v1 = AlbumVersion::new(&a1.id, ProviderKind::Local, "/music/bluetrain", fmt.clone()).unwrap();
-    let t1 = TrackSource::new(&v1.id, ProviderKind::Local, "/music/bt/01.flac", "Blue Train", 1, 1, 600_000, fmt.clone())
-        .unwrap()
-        .with_isrc("USBN25700001")
-        .unwrap();
+    let v1 =
+        AlbumVersion::new(&a1.id, ProviderKind::Local, "/music/bluetrain", fmt.clone()).unwrap();
+    let t1 = TrackSource::new(
+        &v1.id,
+        ProviderKind::Local,
+        "/music/bt/01.flac",
+        "Blue Train",
+        1,
+        1,
+        600_000,
+        fmt.clone(),
+    )
+    .unwrap()
+    .with_isrc("USBN25700001")
+    .unwrap();
     a1.add_version(v1);
 
     let mut a2 = CanonicalAlbum::new("Blue Train Tidal", "John Coltrane").unwrap();
     let v2 = AlbumVersion::new(&a2.id, ProviderKind::Tidal, "tid-bt-1", fmt.clone()).unwrap();
-    let t2 = TrackSource::new(&v2.id, ProviderKind::Tidal, "tid-trk-bt-1", "Blue Train", 1, 1, 600_000, fmt.clone())
-        .unwrap()
-        .with_isrc("USBN25700001")
-        .unwrap();
+    let t2 = TrackSource::new(
+        &v2.id,
+        ProviderKind::Tidal,
+        "tid-trk-bt-1",
+        "Blue Train",
+        1,
+        1,
+        600_000,
+        fmt.clone(),
+    )
+    .unwrap()
+    .with_isrc("USBN25700001")
+    .unwrap();
     a2.add_version(v2);
 
     let mut a3 = CanonicalAlbum::new("Blue Train Deezer", "John Coltrane")
         .unwrap()
         .with_musicbrainz_id("rg-bluetrain-1");
     let v3 = AlbumVersion::new(&a3.id, ProviderKind::Deezer, "dz-bt-1", fmt.clone()).unwrap();
-    let t3 = TrackSource::new(&v3.id, ProviderKind::Deezer, "dz-trk-bt-1", "Blue Train", 1, 1, 600_000, fmt.clone())
-        .unwrap()
-        .with_isrc("USBN25700001")
-        .unwrap();
+    let t3 = TrackSource::new(
+        &v3.id,
+        ProviderKind::Deezer,
+        "dz-trk-bt-1",
+        "Blue Train",
+        1,
+        1,
+        600_000,
+        fmt.clone(),
+    )
+    .unwrap()
+    .with_isrc("USBN25700001")
+    .unwrap();
     a3.add_version(v3);
 
     let rep = LibrarySyncService::persist_sync_result(
@@ -808,28 +932,73 @@ async fn test_f37_intra_batch_isrc_dedup_upc_deduplicate_library_and_local_upc()
     // 2. deduplicate_library UPC matching across differing titles without MBID or ISRC
     let mut u1 = CanonicalAlbum::new("Album Alpha", "Artist One").unwrap();
     let uv1 = AlbumVersion::new(&u1.id, ProviderKind::Local, "/u1", fmt.clone()).unwrap();
+    let ut1 = TrackSource::new(
+        &uv1.id,
+        ProviderKind::Local,
+        "/u1/01.flac",
+        "Alpha Track",
+        1,
+        1,
+        180_000,
+        fmt.clone(),
+    )
+    .unwrap();
     u1.add_version(uv1);
     let mut u2 = CanonicalAlbum::new("Alpha Deluxe Different Title", "Artist One").unwrap();
-    let uv2 = AlbumVersion::new(&u2.id, ProviderKind::Qobuz, "qb-u2", fmt).unwrap();
+    let uv2 = AlbumVersion::new(&u2.id, ProviderKind::Qobuz, "qb-u2", fmt.clone()).unwrap();
+    let ut2 = TrackSource::new(
+        &uv2.id,
+        ProviderKind::Qobuz,
+        "qb-u2-trk-1",
+        "Alpha Track",
+        1,
+        1,
+        180_000,
+        fmt,
+    )
+    .unwrap();
     u2.add_version(uv2);
 
-    let artist = LibraryRepository::upsert_artist_by_mbid_or_name(&pool, "Artist One", None, None, None)
-        .await
-        .unwrap();
+    let artist =
+        LibraryRepository::upsert_artist_by_mbid_or_name(&pool, "Artist One", None, None, None)
+            .await
+            .unwrap();
     LibraryRepository::insert_canonical_album(&pool, &u1, Some(&artist.id))
         .await
         .unwrap();
-    LibraryRepository::update_canonical_album_metadata(&pool, &u1.id, Some("098765432109"), None, None, None)
+    LibraryRepository::insert_track_source(&pool, &ut1)
         .await
         .unwrap();
+    LibraryRepository::update_canonical_album_metadata(
+        &pool,
+        &u1.id,
+        Some("098765432109"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     LibraryRepository::insert_canonical_album(&pool, &u2, Some(&artist.id))
         .await
         .unwrap();
-    LibraryRepository::update_canonical_album_metadata(&pool, &u2.id, Some("098765432109"), None, None, None)
+    LibraryRepository::insert_track_source(&pool, &ut2)
         .await
         .unwrap();
+    LibraryRepository::update_canonical_album_metadata(
+        &pool,
+        &u2.id,
+        Some("098765432109"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
-    let merged_upc = LibrarySyncService::deduplicate_library(&pool).await.unwrap();
+    let merged_upc = LibrarySyncService::deduplicate_library(&pool)
+        .await
+        .unwrap();
     assert_eq!(merged_upc, 1);
 
     let upc_found = LibraryRepository::find_canonical_album_by_upc(&pool, "098765432109")
@@ -873,13 +1042,6 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
     let (mb_base, mb_server) = spawn_enrichment_server(move |req| {
         if req.target.starts_with("/release-group?") {
             let decoded_target = core_providers::percent_decode(&req.target).replace('+', " ");
-            if decoded_target.contains("Album 001") || decoded_target.contains("Album 051") {
-                return (
-                    200,
-                    vec![],
-                    r#"{"release-groups":[{"id":"rg-collide","title":"Album 000"}]}"#.into(),
-                );
-            }
             let digits: String = decoded_target
                 .split("Album ")
                 .nth(1)
@@ -887,6 +1049,15 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
                 .chars()
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
+            if decoded_target.contains("Album 001") || decoded_target.contains("Album 051") {
+                return (
+                    200,
+                    vec![],
+                    format!(
+                        r#"{{"release-groups":[{{"id":"rg-collide","score":100,"title":"Album {digits}","artist-credit":[{{"name":"Artist {digits}"}}]}}]}}"#
+                    ),
+                );
+            }
             let rg_id = if digits.is_empty() {
                 "rg-other".to_string()
             } else {
@@ -895,7 +1066,9 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
             return (
                 200,
                 vec![],
-                format!(r#"{{"release-groups":[{{"id":"{rg_id}","title":"Album {digits}"}}]}}"#),
+                format!(
+                    r#"{{"release-groups":[{{"id":"{rg_id}","score":100,"title":"Album {digits}","artist-credit":[{{"name":"Artist {digits}"}}]}}]}}"#
+                ),
             );
         }
         if req.target.starts_with("/release-group/") {
@@ -908,7 +1081,7 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
             return (
                 200,
                 vec![],
-                format!(r#"{{"id":"{rg}","title":"T","releases":[{{"id":"rel-{rg}","title":"T"}}]}}"#),
+                format!(r#"{{"id":"{rg}","title":"T","releases":[{{"id":"rel-{rg}","title":"T","track-count":1}}]}}"#),
             );
         }
         if req.target.starts_with("/release/") {
@@ -922,7 +1095,7 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
                 200,
                 vec![],
                 format!(
-                    r#"{{"id":"{rel}","title":"T","relations":[{{"type":"producer","target-type":"artist","attributes":[],"artist":{{"id":"art-1","name":"Producer One"}}}}]}}"#
+                    r#"{{"id":"{rel}","title":"T","track-count":1,"relations":[{{"type":"producer","target-type":"artist","attributes":[],"artist":{{"id":"art-1","name":"Producer One"}}}}]}}"#
                 ),
             );
         }
@@ -933,21 +1106,40 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
     let pool = open_test_database().await.unwrap();
     let fmt = AudioFormat::cd_quality();
     let mut seed_albums = Vec::new();
+    let mut seed_tracks = Vec::new();
     for i in 0..52 {
-        let mut alb = CanonicalAlbum::new(format!("Album {i:03}"), format!("Artist {i:03}")).unwrap();
+        let mut alb =
+            CanonicalAlbum::new(format!("Album {i:03}"), format!("Artist {i:03}")).unwrap();
         if i == 0 {
             alb = alb.with_musicbrainz_id("rg-collide");
         }
-        let ver = AlbumVersion::new(&alb.id, ProviderKind::Local, format!("/a/{i:03}"), fmt.clone())
-            .unwrap();
+        let ver = AlbumVersion::new(
+            &alb.id,
+            ProviderKind::Local,
+            format!("/a/{i:03}"),
+            fmt.clone(),
+        )
+        .unwrap();
+        let trk = TrackSource::new(
+            &ver.id,
+            ProviderKind::Local,
+            format!("/a/{i:03}/01.flac"),
+            format!("Track {i:03}"),
+            1,
+            1,
+            200_000,
+            fmt.clone(),
+        )
+        .unwrap();
         alb.add_version(ver);
         seed_albums.push(alb);
+        seed_tracks.push(trk);
     }
     LibrarySyncService::persist_sync_result(
         &pool,
         &SyncResult {
             albums: seed_albums,
-            tracks: vec![],
+            tracks: seed_tracks,
             ..Default::default()
         },
     )
@@ -969,6 +1161,7 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
         EnrichmentConfig {
             fetch_artist_bios: false,
             max_albums_per_run: 100,
+            merge_on_mbid_match: true,
             ..Default::default()
         },
     );
@@ -977,11 +1170,9 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
     assert_eq!(report.albums_merged, 2); // Album 001 + Album 051 merged into Album 000
     assert!(report.errors.is_empty());
 
-    let unenriched: Vec<(String,)> =
-        sqlx::query_as("SELECT title FROM canonical_albums WHERE enriched_at IS NULL")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let unenriched = CatalogQueryRepository::list_unenriched_album_titles(&pool)
+        .await
+        .unwrap();
     assert!(
         unenriched.is_empty(),
         "Expected 0 unenriched albums, got {unenriched:?}"
@@ -990,30 +1181,28 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
     mb_server.abort();
 
     // Part B: force_refresh credits_added == 0 AND total HTTP 500 failure must NOT mark enriched_at
-    let (err_base, err_server) = spawn_enrichment_server(move |_req| {
-        (500, vec![], "Internal Server Error".into())
-    })
-    .await;
+    let (err_base, err_server) =
+        spawn_enrichment_server(move |_req| (500, vec![], "Internal Server Error".into())).await;
     let (ok_base, ok_server) = spawn_enrichment_server(move |req| {
         if req.target.starts_with("/release-group?") {
             return (
                 200,
                 vec![],
-                r#"{"release-groups":[{"id":"rg-ok","title":"OK"}]}"#.into(),
+                r#"{"release-groups":[{"id":"rg-ok","score":100,"title":"OK Album","artist-credit":[{"name":"OK Artist"}]}]}"#.into(),
             );
         }
         if req.target.starts_with("/release-group/rg-ok") {
             return (
                 200,
                 vec![],
-                r#"{"id":"rg-ok","title":"OK","releases":[{"id":"rel-ok","title":"OK"}]}"#.into(),
+                r#"{"id":"rg-ok","title":"OK Album","releases":[{"id":"rel-ok","title":"OK Album","track-count":1}]}"#.into(),
             );
         }
         if req.target.starts_with("/release/rel-ok") {
             return (
                 200,
                 vec![],
-                r#"{"id":"rel-ok","title":"OK","relations":[{"type":"engineer","target-type":"artist","attributes":[],"artist":{"id":"art-e","name":"Bob Ludwig"}}]}"#.into(),
+                r#"{"id":"rel-ok","title":"OK Album","track-count":1,"relations":[{"type":"engineer","target-type":"artist","attributes":[],"artist":{"id":"art-e","name":"Bob Ludwig"}}]}"#.into(),
             );
         }
         (404, vec![], "{}".into())
@@ -1022,14 +1211,25 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
 
     let pool2 = open_test_database().await.unwrap();
     let mut alb = CanonicalAlbum::new("OK Album", "OK Artist").unwrap();
-    let v = AlbumVersion::new(&alb.id, ProviderKind::Local, "/ok", fmt).unwrap();
+    let v = AlbumVersion::new(&alb.id, ProviderKind::Local, "/ok", fmt.clone()).unwrap();
+    let trk_ok = TrackSource::new(
+        &v.id,
+        ProviderKind::Local,
+        "/ok/01.flac",
+        "OK Track",
+        1,
+        1,
+        180_000,
+        fmt,
+    )
+    .unwrap();
     alb.add_version(v);
     let alb_id = alb.id.clone();
     LibrarySyncService::persist_sync_result(
         &pool2,
         &SyncResult {
             albums: vec![alb],
-            tracks: vec![],
+            tracks: vec![trk_ok],
             ..Default::default()
         },
     )
@@ -1066,13 +1266,10 @@ async fn test_f38_enrich_library_pagination_on_merge_upstream_errors_and_force_r
     let fail_report = failing_svc.enrich_library(&pool2).await.unwrap();
     assert_eq!(fail_report.albums_enriched, 0);
     assert_eq!(fail_report.errors.len(), 1);
-    let enriched_at: (Option<String>,) =
-        sqlx::query_as("SELECT enriched_at FROM canonical_albums WHERE id = ?")
-            .bind(&alb_id)
-            .fetch_one(&pool2)
-            .await
-            .unwrap();
-    assert!(enriched_at.0.is_none());
+    let enriched_at = CatalogQueryRepository::get_album_enriched_at(&pool2, &alb_id)
+        .await
+        .unwrap();
+    assert!(enriched_at.is_none());
 
     // Succeeding enrichment adds 1 credit, and force_refresh reports 0 newly added credits
     let ok_svc = CreditEnrichmentService::new(

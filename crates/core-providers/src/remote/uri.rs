@@ -44,7 +44,9 @@ pub fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+            if let Ok(val) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 result.push(val);
                 i += 3;
                 continue;
@@ -60,9 +62,9 @@ pub fn parse_remote_share_uri(uri_str: &str) -> Result<RemoteShareUri, ProviderE
     let trimmed = uri_str.trim();
 
     // Check scheme
-    let scheme_end = trimmed
-        .find("://")
-        .ok_or_else(|| ProviderError::InvalidConfig(format!("Missing scheme in URI '{trimmed}'")))?;
+    let scheme_end = trimmed.find("://").ok_or_else(|| {
+        ProviderError::InvalidConfig(format!("Missing scheme in URI '{trimmed}'"))
+    })?;
     let raw_scheme = &trimmed[..scheme_end].to_ascii_lowercase();
     let after_scheme = &trimmed[scheme_end + 3..];
 

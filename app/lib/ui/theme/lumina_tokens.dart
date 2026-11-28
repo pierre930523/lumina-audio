@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:material_ui/material_ui.dart';
 
+import 'lumina_glass_theme.dart';
+
 /// Design tokens for Lumina Audio dark-mode desktop UI.
 ///
 /// Matches `design-system/lumina-audio/MASTER.md` and enforces WCAG 2.1 AA
@@ -228,9 +230,14 @@ abstract final class LuminaTokens {
   }
 
   /// Computes WCAG 2.1 contrast ratio between [fg] and [bg] (in `[1.0, 21.0]`).
-  /// Semi-transparent [fg] colors are composited over [bg] first.
-  static double contrastRatio(Color fg, Color bg) {
-    final resolvedBg = bg.a < 1.0 ? compositeOver(bg, canvasBg) : bg;
+  /// Semi-transparent [fg] colors are composited over [bg] first; if [bg] is
+  /// semi-transparent, it is composited over [fallbackBg].
+  static double contrastRatio(
+    Color fg,
+    Color bg, {
+    Color fallbackBg = canvasBg,
+  }) {
+    final resolvedBg = bg.a < 1.0 ? compositeOver(bg, fallbackBg) : bg;
     final resolvedFg = fg.a < 1.0 ? compositeOver(fg, resolvedBg) : fg;
     final lum1 = relativeLuminance(resolvedFg);
     final lum2 = relativeLuminance(resolvedBg);
@@ -239,10 +246,82 @@ abstract final class LuminaTokens {
     return (lighter + 0.05) / (darker + 0.05);
   }
 
+  static ScrollbarThemeData _buildScrollbarTheme({
+    required Color idleThumb,
+    required Color activeThumb,
+  }) {
+    return ScrollbarThemeData(
+      thickness: WidgetStateProperty.resolveWith<double?>((states) {
+        if (states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.dragged)) {
+          return 6.5;
+        }
+        return 5.0;
+      }),
+      radius: const Radius.circular(999),
+      thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
+        if (states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.dragged)) {
+          return activeThumb;
+        }
+        return idleThumb;
+      }),
+      trackColor: const WidgetStatePropertyAll<Color?>(Colors.transparent),
+      trackBorderColor: const WidgetStatePropertyAll<Color?>(
+        Colors.transparent,
+      ),
+    );
+  }
+
+  static SwitchThemeData _buildSwitchTheme({
+    required Color disabledTrack,
+    required Color selectedTrack,
+    required Color unselectedTrack,
+    required Color disabledThumb,
+    required Color selectedThumb,
+    required Color unselectedThumb,
+    required Color disabledBorder,
+    required Color focusBorder,
+    required Color unselectedBorder,
+    required Color hoverOverlay,
+  }) {
+    return SwitchThemeData(
+      trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
+        if (states.contains(WidgetState.disabled)) return disabledTrack;
+        if (states.contains(WidgetState.selected)) return selectedTrack;
+        return unselectedTrack;
+      }),
+      thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
+        if (states.contains(WidgetState.disabled)) return disabledThumb;
+        if (states.contains(WidgetState.selected)) return selectedThumb;
+        return unselectedThumb;
+      }),
+      trackOutlineColor: WidgetStateProperty.resolveWith<Color?>((states) {
+        if (states.contains(WidgetState.disabled)) return disabledBorder;
+        if (states.contains(WidgetState.focused)) return focusBorder;
+        if (states.contains(WidgetState.selected)) return Colors.transparent;
+        return unselectedBorder;
+      }),
+      trackOutlineWidth: WidgetStateProperty.resolveWith<double?>((states) {
+        if (states.contains(WidgetState.focused)) return 1.5;
+        if (states.contains(WidgetState.selected)) return 0.0;
+        return 1.0;
+      }),
+      overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
+        if (states.contains(WidgetState.focused)) {
+          return focusBorder.withValues(alpha: 0.22);
+        }
+        if (states.contains(WidgetState.hovered)) return hoverOverlay;
+        return null;
+      }),
+    );
+  }
+
   /// Shared dark [ThemeData] configured with Lumina Audio tokens.
   static ThemeData buildDarkTheme() {
     final base = ThemeData.dark(useMaterial3: true);
     return base.copyWith(
+      extensions: const [LuminaGlassTheme.dark],
       scaffoldBackgroundColor: canvasBg,
       canvasColor: canvasBg,
       cardColor: cardBg,
@@ -285,80 +364,98 @@ abstract final class LuminaTokens {
         ),
         behavior: SnackBarBehavior.floating,
       ),
-      scrollbarTheme: ScrollbarThemeData(
-        thickness: WidgetStateProperty.resolveWith<double?>((states) {
-          if (states.contains(WidgetState.hovered) ||
-              states.contains(WidgetState.dragged)) {
-            return 6.5;
-          }
-          return 5.0;
-        }),
-        radius: const Radius.circular(999),
-        thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.hovered) ||
-              states.contains(WidgetState.dragged)) {
-            return const Color(0x5CFFFFFF);
-          }
-          return const Color(0x2EFFFFFF);
-        }),
-        trackColor: const WidgetStatePropertyAll<Color?>(Colors.transparent),
-        trackBorderColor: const WidgetStatePropertyAll<Color?>(
-          Colors.transparent,
-        ),
+      scrollbarTheme: _buildScrollbarTheme(
+        idleThumb: const Color(0x2EFFFFFF),
+        activeThumb: const Color(0x5CFFFFFF),
       ),
       textTheme: base.textTheme.apply(
         bodyColor: textPrimary,
         displayColor: textPrimary,
       ),
-      switchTheme: SwitchThemeData(
-        trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.disabled)) {
-            return glassPillBg;
-          }
-          if (states.contains(WidgetState.selected)) {
-            return glassSwitchOnTrack;
-          }
-          return glassSwitchOffTrack;
-        }),
-        thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.disabled)) {
-            return textDisabled;
-          }
-          if (states.contains(WidgetState.selected)) {
-            return glassSwitchOnThumb;
-          }
-          return glassSwitchOffThumb;
-        }),
-        trackOutlineColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.disabled)) {
-            return glassSidebarBorder;
-          }
-          if (states.contains(WidgetState.focused)) {
-            return focusRing;
-          }
-          if (states.contains(WidgetState.selected)) {
-            return Colors.transparent;
-          }
-          return glassSwitchOffBorder;
-        }),
-        trackOutlineWidth: WidgetStateProperty.resolveWith<double?>((states) {
-          if (states.contains(WidgetState.focused)) {
-            return 1.5;
-          }
-          if (states.contains(WidgetState.selected)) {
-            return 0.0;
-          }
-          return 1.0;
-        }),
-        overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.focused)) {
-            return focusRing.withValues(alpha: 0.22);
-          }
-          if (states.contains(WidgetState.hovered)) {
-            return glassRowHoverBg;
-          }
-          return null;
-        }),
+      switchTheme: _buildSwitchTheme(
+        disabledTrack: glassPillBg,
+        selectedTrack: glassSwitchOnTrack,
+        unselectedTrack: glassSwitchOffTrack,
+        disabledThumb: textDisabled,
+        selectedThumb: glassSwitchOnThumb,
+        unselectedThumb: glassSwitchOffThumb,
+        disabledBorder: glassSidebarBorder,
+        focusBorder: focusRing,
+        unselectedBorder: glassSwitchOffBorder,
+        hoverOverlay: glassRowHoverBg,
+      ),
+    );
+  }
+
+  /// Shared light [ThemeData] configured with Bright Frosted Glass tokens.
+  static ThemeData buildLightTheme() {
+    final base = ThemeData.light(useMaterial3: true);
+    const light = LuminaGlassTheme.light;
+    const cardSurface = Color(0xFFFFFFFF);
+    return base.copyWith(
+      extensions: const [LuminaGlassTheme.light],
+      scaffoldBackgroundColor: light.canvasBg,
+      canvasColor: light.canvasBg,
+      cardColor: cardSurface,
+      dividerColor: light.glassBorder,
+      focusColor: light.accent.withValues(alpha: 0.20),
+      hoverColor: light.pillHoverBg,
+      colorScheme: base.colorScheme.copyWith(
+        brightness: Brightness.light,
+        primary: light.accent,
+        onPrimary: Colors.white,
+        secondary: const Color(0xFF7C3AED),
+        onSecondary: Colors.white,
+        surface: cardSurface,
+        onSurface: light.textPrimary,
+        onSurfaceVariant: light.textSecondary,
+        outline: const Color(0xFF64748B),
+        outlineVariant: const Color(0xFFCBD5E1),
+        error: const Color(0xFFDC2626),
+        onError: Colors.white,
+      ),
+      tooltipTheme: TooltipThemeData(
+        waitDuration: const Duration(milliseconds: 350),
+        decoration: BoxDecoration(
+          color: light.menuBg,
+          borderRadius: BorderRadius.circular(radiusSm),
+          border: Border.all(color: light.glassBorderStrong),
+          boxShadow: light.glassShadow,
+        ),
+        textStyle: TextStyle(
+          color: light.textPrimary,
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: light.menuBg,
+        contentTextStyle: TextStyle(color: light.textPrimary, fontSize: 13),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(radiusSm),
+          side: BorderSide(color: light.glassBorderStrong),
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+      scrollbarTheme: _buildScrollbarTheme(
+        idleThumb: const Color(0x280F172A),
+        activeThumb: const Color(0x520F172A),
+      ),
+      textTheme: base.textTheme.apply(
+        bodyColor: light.textPrimary,
+        displayColor: light.textPrimary,
+      ),
+      switchTheme: _buildSwitchTheme(
+        disabledTrack: light.pillBg,
+        selectedTrack: light.accent,
+        unselectedTrack: const Color(0x240F172A),
+        disabledThumb: light.textDisabled,
+        selectedThumb: Colors.white,
+        unselectedThumb: light.textSecondary,
+        disabledBorder: light.sidebarBorder,
+        focusBorder: light.accent,
+        unselectedBorder: const Color(0x470F172A),
+        hoverOverlay: light.pillBg,
       ),
     );
   }

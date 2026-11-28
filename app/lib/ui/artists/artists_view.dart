@@ -4,8 +4,12 @@ import '../../models/playback_state.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../common/preference_toggle_button.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
 import 'artist_detail_page.dart';
+
+part 'artist_tile.dart';
 
 // ─── Artists View ─────────────────────────────────────────────────────────────
 
@@ -30,6 +34,7 @@ class ArtistsView extends StatefulWidget {
 }
 
 class _ArtistsViewState extends State<ArtistsView> {
+  final GlideScrollController _scrollController = GlideScrollController();
   List<ArtistIndexEntry> _artists = const [];
   bool _loading = true;
   String _search = '';
@@ -58,6 +63,7 @@ class _ArtistsViewState extends State<ArtistsView> {
   @override
   void dispose() {
     widget.libraryCache?.removeListener(_onLibraryCacheChanged);
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -84,7 +90,6 @@ class _ArtistsViewState extends State<ArtistsView> {
       return;
     }
 
-    // Immediate frame-0 fallback from queue tracks if available.
     final queueTracks = widget.audioService.queue;
     if (queueTracks.isNotEmpty) {
       _artists = _aggregateEntries(tracks: queueTracks, albums: const []);
@@ -164,10 +169,15 @@ class _ArtistsViewState extends State<ArtistsView> {
       final artistTracks = List<TrackInfo>.unmodifiable(
         tracksByArtist[key] ?? const [],
       );
+      final resolvedId = artistTracks
+          .map((t) => t.artistId)
+          .whereType<String>()
+          .firstWhere((id) => id.isNotEmpty, orElse: () => '');
       entries.add(
         ArtistIndexEntry(
           key: key,
           displayName: displayNames[key] ?? key,
+          artistId: resolvedId.isNotEmpty ? resolvedId : null,
           albums: List<CanonicalAlbumSummary>.unmodifiable(artistAlbums),
           tracks: artistTracks,
           representativeAlbum: artistAlbums.firstOrNull,
@@ -204,8 +214,6 @@ class _ArtistsViewState extends State<ArtistsView> {
 
   @override
   Widget build(BuildContext context) {
-    // Local fallback to standalone ArtistDetailPage when onOpenArtist is not wired
-    // (e.g. standalone widget tests instantiating ArtistsView directly).
     if (_selectedArtistName != null && widget.onOpenArtist == null) {
       return ArtistDetailPage(
         key: ValueKey('artist_detail_$_selectedArtistName'),
@@ -288,183 +296,40 @@ class _ArtistsViewState extends State<ArtistsView> {
                     ),
                   ),
                 )
-              : CustomScrollView(
-                  key: const Key('artists_list_view'),
-                  slivers: [
-                    SliverPadding(
-                      padding: const EdgeInsets.only(
-                        bottom: LuminaTokens.bottomScrollClearance,
+              : SmoothScrollWrapper(
+                  controller: _scrollController,
+                  child: CustomScrollView(
+                    key: const Key('artists_list_view'),
+                    controller: _scrollController,
+                    slivers: [
+                      SliverPadding(
+                        padding: const EdgeInsets.only(
+                          bottom: LuminaTokens.bottomScrollClearance,
+                        ),
+                        sliver: SliverList.builder(
+                          itemCount: filtered.length,
+                          itemBuilder: (context, index) {
+                            final artist = filtered[index];
+                            final isSelected =
+                                _selectedArtistName == artist.displayName;
+                            return RepaintBoundary(
+                              child: _ArtistTile(
+                                key: Key('artist_tile_${artist.displayName}'),
+                                artist: artist,
+                                audioService: widget.audioService,
+                                libraryCache: widget.libraryCache,
+                                isSelected: isSelected,
+                                onTap: () => _handleSelectArtist(artist),
+                              ),
+                            );
+                          },
+                        ),
                       ),
-                      sliver: SliverList.builder(
-                        itemCount: filtered.length,
-                        itemBuilder: (context, index) {
-                          final artist = filtered[index];
-                          final isSelected =
-                              _selectedArtistName == artist.displayName;
-                          return RepaintBoundary(
-                            child: _ArtistTile(
-                              key: Key('artist_tile_${artist.displayName}'),
-                              artist: artist,
-                              isSelected: isSelected,
-                              onTap: () => _handleSelectArtist(artist),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
         ),
       ],
     );
-  }
-}
-
-// ─── Hover-Isolated Artist List Tile ──────────────────────────────────────────
-
-class _ArtistTile extends StatefulWidget {
-  final ArtistIndexEntry artist;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _ArtistTile({
-    super.key,
-    required this.artist,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  State<_ArtistTile> createState() => _ArtistTileState();
-}
-
-class _ArtistTileState extends State<_ArtistTile> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final artist = widget.artist;
-    final isSelected = widget.isSelected;
-    final bgColor = isSelected
-        ? LuminaTokens.glassNavActiveBg
-        : (_hovered ? LuminaTokens.glassRowHoverBg : Colors.transparent);
-
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) {
-        if (!_hovered) setState(() => _hovered = true);
-      },
-      onExit: (_) {
-        if (_hovered) setState(() => _hovered = false);
-      },
-      child: Semantics(
-        button: true,
-        selected: isSelected,
-        label: artist.displayName,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: LuminaTokens.focusDuration,
-            curve: LuminaTokens.motionCurve,
-            margin: const EdgeInsets.symmetric(vertical: 2),
-            padding: const EdgeInsets.symmetric(
-              horizontal: LuminaTokens.spaceSm,
-              vertical: LuminaTokens.spaceSm,
-            ),
-            decoration: BoxDecoration(
-              color: bgColor,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: isSelected
-                    ? LuminaTokens.glassCoverRim
-                    : (_hovered
-                          ? LuminaTokens.glassPillBorder
-                          : Colors.transparent),
-              ),
-            ),
-          child: Row(
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isSelected || _hovered
-                      ? LuminaTokens.glassNavActiveBg
-                      : LuminaTokens.glassPillBg,
-                  border: Border.all(
-                    color: isSelected || _hovered
-                        ? LuminaTokens.glassCoverRim
-                        : LuminaTokens.glassPillBorder,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    artist.displayName.isNotEmpty
-                        ? artist.displayName[0].toUpperCase()
-                        : '?',
-                    style: TextStyle(
-                      color: isSelected || _hovered
-                          ? Colors.white
-                          : LuminaTokens.glassTextSecondary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      artist.displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: isSelected || _hovered
-                            ? Colors.white
-                            : LuminaTokens.glassTextPrimary,
-                        fontSize: 13.5,
-                        fontWeight: isSelected || _hovered
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      _subtitle(artist),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: LuminaTokens.textMuted,
-                        fontSize: 11.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 18,
-                color: isSelected || _hovered
-                    ? Colors.white
-                    : LuminaTokens.textMuted,
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-  }
-
-  String _subtitle(ArtistIndexEntry a) {
-    final parts = <String>[];
-    if (a.albumCount > 0) parts.add('${a.albumCount} 張專輯');
-    if (a.trackCount > 0) parts.add('${a.trackCount} 首曲目');
-    return parts.isEmpty ? '暫無資料' : parts.join(' · ');
   }
 }

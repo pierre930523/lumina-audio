@@ -1,9 +1,9 @@
-﻿; NSIS Modern UI 2 Installer Script for Lumina Audio v0.2.5
+﻿; NSIS Modern UI 2 Installer Script for Lumina Audio v0.2.6
 Unicode True
 SetCompressor /SOLID lzma
 
 !define APP_NAME "Lumina Audio"
-!define APP_VERSION "0.2.5"
+!define APP_VERSION "0.2.6"
 !define APP_PUBLISHER "Lumina Audio Team"
 !define APP_URL "https://github.com/pierre930523/lumina-audio"
 !define APP_EXE "lumina_app.exe"
@@ -35,7 +35,7 @@ BrandingText "${APP_NAME} v${APP_VERSION} — Audiophile Lossless Music Player"
 !insertmacro MUI_LANGUAGE "TradChinese"
 !insertmacro MUI_LANGUAGE "English"
 
-VIProductVersion "0.2.5.0"
+VIProductVersion "0.2.6.0"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_TRADCHINESE} "FileDescription" "${APP_NAME} Setup (NSIS)"

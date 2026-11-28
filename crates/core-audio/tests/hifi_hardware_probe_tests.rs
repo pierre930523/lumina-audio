@@ -110,11 +110,30 @@ fn test_format_negotiation_matrix_no_silent_resampling() {
     unsupported_384.sample_rate = 384_000;
     let err = AudioFormatManager::negotiate(&unsupported_384, &usb_dac, &strict_policy)
         .expect_err("Strict mode without fallback must reject unsupported sample rate");
-    assert!(err.contains("384000") || err.contains("Strict"), "Unexpected err: {err}");
+    assert!(
+        err.contains("384000") || err.contains("Strict"),
+        "Unexpected err: {err}"
+    );
 
-    // With shared fallback allowed, degradation_reason must be explicit
-    let fallback_policy = PlaybackEnginePolicy {
+    // Even if allow_shared_fallback is true, strict_bit_perfect=true MUST still reject fallback.
+    let strict_with_fallback_flag = PlaybackEnginePolicy {
         strict_bit_perfect: true,
+        allow_shared_fallback: true,
+        ..strict_policy
+    };
+    let strict_err =
+        AudioFormatManager::negotiate(&unsupported_384, &usb_dac, &strict_with_fallback_flag)
+            .expect_err(
+                "Strict Bit-Perfect must unconditionally reject shared/resampling fallback",
+            );
+    assert!(
+        strict_err.contains("384000") || strict_err.contains("Strict"),
+        "Unexpected strict err: {strict_err}"
+    );
+
+    // In non-strict mode with shared fallback allowed, degradation_reason must be explicit
+    let fallback_policy = PlaybackEnginePolicy {
+        strict_bit_perfect: false,
         allow_shared_fallback: true,
         ..strict_policy
     };

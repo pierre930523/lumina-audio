@@ -1,8 +1,8 @@
 use crate::error::ServerError;
-use crate::pairing::pin::{generate_six_digit_pin, validate_pin_format, ActivePin};
+use crate::pairing::pin::{ActivePin, generate_six_digit_pin, validate_pin_format};
 use crate::pairing::rate_limiter::PinRateLimiter;
+use core_db::{DbError, PairedClient, PairingRepository, SqlitePool};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -120,18 +120,19 @@ impl PinPairingManager {
         // 8. Persist to SQLite if DB pool is configured
         if let Some(pool) = &self.db_pool {
             let now_str = chrono::Utc::now().to_rfc3339();
-            let _ = sqlx::query(
-                "INSERT INTO paired_clients (id, device_name, platform, token_hash, created_at, last_seen_at) \
-                 VALUES (?, ?, ?, ?, ?, ?)"
-            )
-            .bind(client_id)
-            .bind(if device_name.is_empty() { &active_pin.device_name } else { device_name })
-            .bind(platform)
-            .bind(&token_hash)
-            .bind(&now_str)
-            .bind(&now_str)
-            .execute(pool)
-            .await;
+            let client = PairedClient {
+                id: client_id.to_string(),
+                device_name: if device_name.is_empty() {
+                    active_pin.device_name.clone()
+                } else {
+                    device_name.to_string()
+                },
+                platform: platform.to_string(),
+                token_hash,
+                created_at: now_str.clone(),
+                last_seen_at: now_str,
+            };
+            let _ = PairingRepository::insert_paired_client(pool, &client).await;
         }
 
         Ok(token)
@@ -163,14 +164,12 @@ impl PinPairingManager {
     }
 
     /// Loads persisted token hashes from the SQLite database.
-    pub async fn load_tokens_from_db(&self) -> Result<usize, sqlx::Error> {
+    pub async fn load_tokens_from_db(&self) -> Result<usize, DbError> {
         if let Some(pool) = &self.db_pool {
-            let rows: Vec<(String,)> = sqlx::query_as("SELECT token_hash FROM paired_clients")
-                .fetch_all(pool)
-                .await?;
+            let rows = PairingRepository::list_paired_token_hashes(pool).await?;
             let count = rows.len();
             let mut hashes = self.token_hashes.write().await;
-            for (h,) in rows {
+            for h in rows {
                 hashes.insert(h);
             }
             Ok(count)

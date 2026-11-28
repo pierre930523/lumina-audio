@@ -1,10 +1,10 @@
 use crate::error::ServerError;
 use crate::state::AppState;
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use core_providers::{
-    parse_remote_share_uri, DeezerConfig, LocalProviderConfig, ProviderRegistry, QobuzConfig,
-    SmbConfig, TidalConfig, WebDavConfig,
+    DeezerConfig, LocalProviderConfig, ProviderRegistry, QobuzConfig, SmbConfig, TidalConfig,
+    WebDavConfig, parse_remote_share_uri,
 };
 use core_types::{ProviderKind, QobuzAuthMode};
 use serde::{Deserialize, Serialize};
@@ -221,7 +221,8 @@ pub async fn configure_webdav(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ConfigureRemoteShareRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let uri = parse_remote_share_uri(&req.uri).map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let uri =
+        parse_remote_share_uri(&req.uri).map_err(|e| ServerError::BadRequest(e.to_string()))?;
     state
         .provider_manager
         .configure_webdav(WebDavConfig { uri })
@@ -236,10 +237,17 @@ pub async fn configure_smb(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ConfigureRemoteShareRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let uri = parse_remote_share_uri(&req.uri).map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let uri =
+        parse_remote_share_uri(&req.uri).map_err(|e| ServerError::BadRequest(e.to_string()))?;
     state
         .provider_manager
-        .configure_smb(SmbConfig { uri, domain: req.domain }, None)
+        .configure_smb(
+            SmbConfig {
+                uri,
+                domain: req.domain,
+            },
+            None,
+        )
         .await;
     Ok(Json(serde_json::json!({
         "status": "configured",
@@ -266,8 +274,8 @@ pub async fn sync_provider(
     State(state): State<Arc<AppState>>,
     Path(kind_str): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let kind = ProviderKind::from_str(&kind_str)
-        .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let kind =
+        ProviderKind::from_str(&kind_str).map_err(|e| ServerError::BadRequest(e.to_string()))?;
     let sync = state
         .provider_manager
         .sync_provider(kind)

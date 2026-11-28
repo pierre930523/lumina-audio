@@ -4,9 +4,23 @@ import '../models/audio_output_info.dart';
 import '../models/ingestion_models.dart';
 import '../models/lyric.dart';
 import '../models/playback_state.dart';
+import '../models/protocol/lumina_error.dart';
+import '../models/protocol/protocol_models.dart';
 import '../models/signal_path.dart';
 import '../models/stream_source_spec.dart';
 import '../models/studio_models.dart';
+import 'playback/playback_backend.dart';
+import 'playback/playback_controller.dart';
+import 'platform_asset_opener.dart';
+import 'streaming/autoplay_controller.dart';
+import 'streaming/l1_stream_cache.dart';
+import 'streaming/pot_sidecar_manager.dart';
+import 'streaming/streaming_manager.dart';
+
+part 'audio_service_extensions.dart';
+part 'audio_service_focus_tags_folders.dart';
+part 'audio_service_step4.dart';
+part 'audio_service_step5.dart';
 
 typedef StreamingTrackHandler = Future<void> Function(
   TrackInfo track, {
@@ -14,7 +28,11 @@ typedef StreamingTrackHandler = Future<void> Function(
   bool debounce,
 });
 
-abstract class AudioService {
+abstract class AudioService
+    with
+        AudioServiceFocusTagsFoldersMixin,
+        AudioServiceStep4Mixin,
+        AudioServiceStep5Mixin {
   static const String systemOutputId = '__system_output__';
 
   static bool isStreamingTrackId(String id) {
@@ -35,14 +53,54 @@ abstract class AudioService {
   Stream<PlaybackState> get stateStream;
   Stream<SignalPath> get signalPathStream;
   Stream<Duration> get positionStream;
+  Stream<QueueState> get queueStateStream => const Stream<QueueState>.empty();
+  Stream<ConnectionStatus> get connectionStatusStream =>
+      const Stream<ConnectionStatus>.empty();
+  Stream<LuminaError> get errorStream => const Stream<LuminaError>.empty();
+  Stream<TrackInfo> get trackChangedStream => const Stream<TrackInfo>.empty();
+  Stream<List<TrackInfo>> get queueUpdatedStream =>
+      const Stream<List<TrackInfo>>.empty();
 
   bool get isNativeBound;
   ConnectionMode get connectionMode;
   String? get activeServerUrl;
   PlaybackState get currentState;
+  QueueState get currentQueueState => QueueState.empty;
+  ConnectionStatus get currentConnectionStatus => ConnectionStatus(
+        phase: ConnectionPhase.connected,
+        mode: connectionMode,
+        endpointUrl: activeServerUrl,
+      );
   SignalPath get currentSignalPath;
   List<LyricLine> get currentLyrics;
   List<TrackInfo> get queue;
+  RepeatMode get repeatMode => currentState.repeatMode;
+  bool get shuffle => currentState.shuffle;
+  Future<void> setRepeatMode(RepeatMode mode) async {}
+  Future<void> setShuffle(bool enabled) async {}
+
+  /// Typed cross-mode playback controller / backend accessors.
+  PlaybackBackend? get playbackBackend => null;
+  PlaybackController? get playbackController => null;
+
+  /// Optional coordinator/autoplay/prefetch accessors (eliminating UI downcasts).
+  AutoplayController? get autoplayController => null;
+  void Function(TrackInfo track)? get hoverPrefetchCallback => null;
+
+  /// Capability hooks for native/streaming bootstrap wiring (eliminating UI downcasts).
+  Future<void> get dbReadyFuture => Future<void>.value();
+  L1StreamCachePersistence? createL1CachePersistence() => null;
+  SidecarLifecycleBinder? createSidecarLifecycleBinder() => null;
+  VoidCallback? get streamingHttp2WarmupCallback => null;
+  void attachStreamingHooks(StreamingManager manager) {}
+  void detachStreamingHooks() {}
+
+  /// Typed visualizer controls (replaces `(this as dynamic)` reflection).
+  ValueListenable<Float32List> get visualizerBandsNotifier =>
+      AudioServiceVisualizerExt.defaultVisualizerNotifier;
+  void setVisualizerSettingEnabled(bool enabled) {}
+  void setNowPlayingVisible(bool visible) {}
+  void setWindowMinimized(bool minimized) {}
 
   /// R4: 各輸出設備與音區獨立播放狀態（deviceId/zoneId -> 狀態）。
   Map<String, PlaybackState> get devicePlaybackStates => const {};
@@ -194,8 +252,11 @@ abstract class AudioService {
     String? path,
   });
 
-  // Albums, Canonical Versions & Credits Graph (R1 / M8)
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100});
+  // Albums, Canonical Versions & Credits Graph (R1 / M8 / Step 2 Grouping)
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  });
   Future<CanonicalAlbumDetail?> getAlbumDetail(String albumId);
   Future<ArtistDetailInfo?> getArtistDetail(String artistId);
   Future<int> deduplicateLibrary();
@@ -203,6 +264,45 @@ abstract class AudioService {
     String? musicBrainzBaseUrl,
     String? discogsBaseUrl,
   });
+
+  // Library Foundation Step 2: Album Groups, Versions, Merge/Split & Primary Locking
+  Future<AlbumVersionOpResult> setPrimaryVersion(
+    String groupId,
+    String versionId,
+  ) async => const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> resetPrimaryVersion(String groupId) async =>
+      const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> mergeAlbumVersions({
+    required String targetVersionId,
+    required List<String> sourceVersionIds,
+    String? newEditionLabel,
+    List<DiscMappingEntry> discMapping = const <DiscMappingEntry>[],
+  }) async => const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> splitAlbumVersion({
+    required String versionId,
+    required List<SplitTrackGroup> trackGroups,
+    SplitTargetMode targetMode = SplitTargetMode.sameGroup,
+  }) async => const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> groupAsAlternateVersions({
+    required List<String> versionIds,
+    String? targetGroupId,
+    String? primaryVersionId,
+  }) async => const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> ungroupVersion(String versionId) async =>
+      const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> setVersionHidden(
+    String versionId, {
+    required bool isHidden,
+  }) async => const AlbumVersionOpResult();
+
+  Future<AlbumVersionOpResult> resetAlbumGrouping(String versionId) async =>
+      const AlbumVersionOpResult();
 
   // DSP Control Panel (R1 / M8)
   Future<DspPipelineConfigModel> getDspConfig();
@@ -269,6 +369,18 @@ abstract class AudioService {
     return null;
   }
 
+  Future<String> startTagRescan({String? directory, bool force = false}) async {
+    await rescanTags(directory: directory, force: force);
+    return '';
+  }
+
+  Future<Map<String, dynamic>> forceRebuildLibrary({String? directory}) async {
+    final scanId = await startTagRescan(directory: directory, force: true);
+    return <String, dynamic>{
+      if (scanId.isNotEmpty) 'scan_id': scanId,
+    };
+  }
+
   Future<List<WatchedRootRecord>> listWatchedRoots() async => const [];
 
   Future<WatchedRootRecord?> addWatchedRoot(
@@ -313,6 +425,39 @@ abstract class AudioService {
     ExternalCatalogIngestBatch batch,
   ) async => const <String, int>{'albums_ingested': 0, 'tracks_ingested': 0};
 
+  // Library Foundation Step 1: 3-Layer Metadata Policy, Batch Skipped Rescan & Cleanup
+  Future<MetadataPolicy> getDefaultMetadataPolicy() async =>
+      MetadataPolicy.file;
+
+  Future<bool> setDefaultMetadataPolicy(MetadataPolicy policy) async => false;
+
+  Future<bool> setEntityMetaPolicy(
+    String entityType,
+    String entityId,
+    MetadataPolicy policy,
+  ) async => false;
+
+  Future<bool> setEntityUserEdits(
+    String entityType,
+    String entityId,
+    Map<String, dynamic> edits,
+  ) async => false;
+
+  Future<bool> revertEntityToFileMeta(
+    String entityType,
+    String entityId,
+  ) async => false;
+
+  Future<BatchRescanSkippedResult> rescanAllSkippedFiles() async =>
+      const BatchRescanSkippedResult();
+
+  Future<LibraryCleanupPreview> previewLibraryCleanup() async =>
+      const LibraryCleanupPreview();
+
+  Future<LibraryCleanupResult> executeLibraryCleanup(
+    LibraryCleanupOptions options,
+  ) async => const LibraryCleanupResult();
+
   // Pairing & Phase 3 Mobile / Remote Dual-Mode (R2 / M9)
   Future<PairingInitiateInfo?> initiateHostPairing();
   Future<List<DiscoveredServerInfo>> discoverLanServers({
@@ -335,89 +480,5 @@ abstract class AudioService {
   Future<void> switchToLocalMode();
 
   void dispose();
-}
-
-/// Real-time 64-band audio spectrum extension for [AudioService].
-/// Provides seamless access across all audio service implementations
-/// without breaking mock or server service contracts.
-extension AudioServiceVisualizerExt on AudioService {
-  static final Float32List zeroBands64 = Float32List(64);
-  static final ValueNotifier<Float32List> defaultVisualizerNotifier =
-      ValueNotifier<Float32List>(zeroBands64);
-
-  ValueListenable<Float32List> get visualizerBandsNotifier {
-    try {
-      final dynamic self = this;
-      final notifier = self.visualizerBandsNotifier;
-      if (notifier is ValueListenable<Float32List>) {
-        return notifier;
-      }
-    } catch (_) {}
-    return defaultVisualizerNotifier;
-  }
-
-  void setVisualizerSettingEnabled(bool enabled) {
-    try {
-      (this as dynamic).setVisualizerSettingEnabled(enabled);
-    } catch (_) {}
-  }
-
-  void setNowPlayingVisible(bool visible) {
-    try {
-      (this as dynamic).setNowPlayingVisible(visible);
-    } catch (_) {}
-  }
-
-  void setWindowMinimized(bool minimized) {
-    try {
-      (this as dynamic).setWindowMinimized(minimized);
-    } catch (_) {}
-  }
-}
-
-/// Optional Dual-Deck pre-decode and zero-latency skip capability for
-/// [AudioService] implementations supporting standby track preparation.
-abstract interface class DualDeckAudioService {
-  Future<void> prepareStandbySpecAsync(
-    TrackInfo track,
-    StreamSourceSpec spec, {
-    int? epoch,
-  });
-
-  Future<bool> skipToStandby({int? epoch});
-
-  bool get isStandbyDeckReady;
-}
-
-/// Safe dual-deck extension forwarding standby operations to
-/// [DualDeckAudioService] implementations without breaking remote/server contracts.
-extension AudioServiceDualDeckExt on AudioService {
-  Future<void> prepareStandbySpecAsync(
-    TrackInfo track,
-    StreamSourceSpec spec, {
-    int? epoch,
-  }) async {
-    if (this is DualDeckAudioService) {
-      await (this as DualDeckAudioService).prepareStandbySpecAsync(
-        track,
-        spec,
-        epoch: epoch,
-      );
-    }
-  }
-
-  Future<bool> skipToStandby({int? epoch}) async {
-    if (this is DualDeckAudioService) {
-      return (this as DualDeckAudioService).skipToStandby(epoch: epoch);
-    }
-    return false;
-  }
-
-  bool get isStandbyDeckReady {
-    if (this is DualDeckAudioService) {
-      return (this as DualDeckAudioService).isStandbyDeckReady;
-    }
-    return false;
-  }
 }
 

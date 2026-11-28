@@ -1,8 +1,11 @@
-use std::time::Duration;
 use core_types::{AudioFormat, OutputBackendKind};
+use std::sync::Arc;
+use std::time::Duration;
 
+use super::device_fsm::DEFAULT_POST_RELEASE_GUARD_DELAY;
 use super::{AudioDeviceDescription, AudioOutputBackend, BackendConfig, BackendState};
 use crate::error::BackendError;
+use crate::pipeline::rt_telemetry::RtTelemetry;
 
 /// WASAPI Exclusive mode backend for Windows.
 /// Bypasses the Windows system audio mixer (audiodg.exe) and directly addresses
@@ -14,6 +17,8 @@ pub struct WasapiBackend {
     config: Option<BackendConfig>,
     frames_written: u64,
     underflows: u64,
+    telemetry: Arc<RtTelemetry>,
+    post_release_guard_delay: Duration,
 }
 
 impl Default for WasapiBackend {
@@ -30,7 +35,9 @@ impl WasapiBackend {
             backend: OutputBackendKind::WindowsWasapiExclusive,
             is_default: true,
             is_exclusive: true,
-            supported_sample_rates: vec![44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000],
+            supported_sample_rates: vec![
+                44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000,
+            ],
             supported_bit_depths: vec![16, 24, 32],
             supports_native_dsd: false, // WASAPI supports DoP (DSD over PCM)
         };
@@ -42,7 +49,21 @@ impl WasapiBackend {
             config: None,
             frames_written: 0,
             underflows: 0,
+            telemetry: Arc::new(RtTelemetry::new()),
+            post_release_guard_delay: DEFAULT_POST_RELEASE_GUARD_DELAY,
         }
+    }
+
+    pub fn telemetry(&self) -> Arc<RtTelemetry> {
+        Arc::clone(&self.telemetry)
+    }
+
+    pub fn post_release_guard_delay(&self) -> Duration {
+        self.post_release_guard_delay
+    }
+
+    pub fn set_post_release_guard_delay(&mut self, delay: Duration) {
+        self.post_release_guard_delay = delay;
     }
 }
 
@@ -160,7 +181,12 @@ impl AudioOutputBackend for WasapiBackend {
         if self.state != BackendState::Playing {
             return Err(BackendError::InvalidState(format!("{:?}", self.state)));
         }
-        let ch = self.config.as_ref().map(|c| c.format.channels as usize).unwrap_or(2).max(1);
+        let ch = self
+            .config
+            .as_ref()
+            .map(|c| c.format.channels as usize)
+            .unwrap_or(2)
+            .max(1);
         let frame_count = frames.len() / ch;
         self.frames_written += frame_count as u64;
         Ok(frame_count)
@@ -170,14 +196,21 @@ impl AudioOutputBackend for WasapiBackend {
         if self.state != BackendState::Playing {
             return Err(BackendError::InvalidState(format!("{:?}", self.state)));
         }
-        let ch = self.config.as_ref().map(|c| c.format.channels as usize).unwrap_or(2).max(1);
+        let ch = self
+            .config
+            .as_ref()
+            .map(|c| c.format.channels as usize)
+            .unwrap_or(2)
+            .max(1);
         let frame_count = frames.len() / ch;
         self.frames_written += frame_count as u64;
         Ok(frame_count)
     }
 
     fn write_native_dsd(&mut self, _bytes: &[u8]) -> Result<usize, BackendError> {
-        Err(BackendError::DriverError("WASAPI Exclusive does not support raw Native DSD; use DoP or ASIO".into()))
+        Err(BackendError::DriverError(
+            "WASAPI Exclusive does not support raw Native DSD; use DoP or ASIO".into(),
+        ))
     }
 
     fn latency_frames(&self) -> u32 {
@@ -186,7 +219,11 @@ impl AudioOutputBackend for WasapiBackend {
 
     fn latency_duration(&self) -> Duration {
         let frames = self.latency_frames();
-        let rate = self.config.as_ref().map(|c| c.format.sample_rate_hz).unwrap_or(48000);
+        let rate = self
+            .config
+            .as_ref()
+            .map(|c| c.format.sample_rate_hz)
+            .unwrap_or(48000);
         if rate > 0 {
             Duration::from_secs_f64(frames as f64 / rate as f64)
         } else {

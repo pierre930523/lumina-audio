@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/services/desktop_window_controller.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
 import 'package:lumina_app/services/ui_scale_controller.dart';
@@ -45,7 +46,9 @@ void main() {
         addTearDown(tester.view.reset);
 
         final service = MockAudioService();
-        final scaleCtrl = UiScaleController();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(() {
           service.dispose();
           scaleCtrl.dispose();
@@ -129,12 +132,21 @@ void main() {
         addTearDown(tester.view.reset);
 
         final service = MockAudioService();
-        addTearDown(service.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(() {
+          service.dispose();
+          scaleCtrl.dispose();
+        });
 
         await tester.pumpWidget(
           MaterialApp(
             theme: LuminaTokens.buildDarkTheme(),
-            home: HomeScreen(audioService: service),
+            home: HomeScreen(
+              audioService: service,
+              uiScaleController: scaleCtrl,
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -212,12 +224,21 @@ void main() {
         addTearDown(tester.view.reset);
 
         final service = MockAudioService();
-        addTearDown(service.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(() {
+          service.dispose();
+          scaleCtrl.dispose();
+        });
 
         await tester.pumpWidget(
           MaterialApp(
             theme: LuminaTokens.buildDarkTheme(),
-            home: HomeScreen(audioService: service),
+            home: HomeScreen(
+              audioService: service,
+              uiScaleController: scaleCtrl,
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -246,11 +267,8 @@ void main() {
 
           if (expectSettingsRail) {
             expect(
-              find.ancestor(
-                of: find.byKey(const Key('settings_secondary_rail')),
-                matching: find.byType(ShaderMask),
-              ),
-              findsNothing,
+              find.byKey(const Key('settings_secondary_rail')),
+              findsOneWidget,
             );
           }
         }
@@ -271,19 +289,28 @@ void main() {
     );
 
     testWidgets(
-      'Settings secondary rail uses frosted glass from y=0 to player bar top with translucent rounded pill selection (zero left blue bar)',
+      'Settings workspace centers symmetrically <=1060px with sticky frosted rail, single outer right scrollbar, and clears floating capsule at bottom',
       (tester) async {
         tester.view.physicalSize = const Size(1440, 900);
         tester.view.devicePixelRatio = 1.0;
         addTearDown(tester.view.reset);
 
         final service = MockAudioService();
-        addTearDown(service.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.auraQuickResume,
+        );
+        addTearDown(() {
+          service.dispose();
+          scaleCtrl.dispose();
+        });
 
         await tester.pumpWidget(
           MaterialApp(
             theme: LuminaTokens.buildDarkTheme(),
-            home: HomeScreen(audioService: service),
+            home: HomeScreen(
+              audioService: service,
+              uiScaleController: scaleCtrl,
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -291,32 +318,36 @@ void main() {
         await tester.tap(find.byKey(const Key('btn_open_settings_hub')));
         await tester.pumpAndSettle();
 
+        final containerFinder = find.byKey(
+          const Key('settings_centered_container'),
+        );
         final railFinder = find.byKey(const Key('settings_secondary_rail'));
+        final outerScrollFinder = find.byKey(const Key('settings_outer_scroll'));
+        expect(containerFinder, findsOneWidget);
         expect(railFinder, findsOneWidget);
+        expect(outerScrollFinder, findsOneWidget);
 
+        // Symmetrically centered within <= 1060px on 1440px viewport.
+        final containerRect = tester.getRect(containerFinder);
+        expect(containerRect.width, lessThanOrEqualTo(1060.5));
+        expect(
+          (containerRect.left - (1440.0 - containerRect.right)).abs(),
+          lessThan(2.0),
+        );
+
+        // Sticky frosted card rail (210-230px wide) with rounded corners & zero inner ScrollView.
         final railGlass = tester.widget<FrostedGlassContainer>(railFinder);
         expect(railGlass.color, LuminaTokens.glassSettingsRailBg);
         expect(railGlass.blurSigma, LuminaTokens.glassSettingsRailBlur);
-        expect(
-          railGlass.border,
-          const Border(
-            right: BorderSide(
-              color: LuminaTokens.glassSettingsRailBorder,
-              width: 1,
-            ),
-          ),
-        );
-
+        expect(railGlass.borderRadius, BorderRadius.circular(LuminaTokens.radiusLg));
         final railRect = tester.getRect(railFinder);
-        final capsuleRect = tester.getRect(
-          find.byKey(const Key('liquid_glass_capsule')),
-        );
-        expect(railRect.top, closeTo(0.0, 0.5));
+        expect(railRect.width, inInclusiveRange(210.0, 230.0));
         expect(
-          (railRect.bottom - capsuleRect.top).abs(),
-          lessThan(0.5),
-          reason:
-              'Settings rail bottom (${railRect.bottom}) must touch capsule top (${capsuleRect.top})',
+          find.descendant(
+            of: find.byKey(const Key('general_settings_panel')),
+            matching: find.byType(SingleChildScrollView),
+          ),
+          findsNothing,
         );
 
         // Selected Settings item uses rounded translucent pill (glassNavActiveBg) and zero blue left bar.
@@ -333,7 +364,6 @@ void main() {
           BorderRadius.circular(LuminaTokens.radiusSm),
         );
 
-        // Confirm zero left accentBlue border inside the Settings secondary rail.
         for (final container in tester.widgetList<Container>(
           find.descendant(of: railFinder, matching: find.byType(Container)),
         )) {
@@ -344,17 +374,35 @@ void main() {
           }
         }
 
-        // Switch active Settings tab -> translucent pill follows selection.
-        final appearanceItem = find.byKey(const Key('nav_tab_appearance'));
-        await tester.tap(appearanceItem);
+        // Navigate to Network/Streaming tab -> rail remains sticky on scroll & bottom item clears mini capsule.
+        await tester.tap(find.byKey(const Key('nav_tab_settings')));
+        await tester.pumpAndSettle();
+        final scrollable = tester.state<ScrollableState>(
+          find.descendant(
+            of: outerScrollFinder,
+            matching: find.byType(Scrollable),
+          ),
+        );
+        scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
         await tester.pumpAndSettle();
 
-        final appearanceMaterial = tester.widget<Material>(
-          find
-              .ancestor(of: appearanceItem, matching: find.byType(Material))
-              .first,
+        final stickyRailRect = tester.getRect(railFinder);
+        expect(stickyRailRect.top, greaterThanOrEqualTo(0.0));
+        final capsuleRect = tester.getRect(
+          find.byKey(const Key('liquid_glass_capsule')),
         );
-        expect(appearanceMaterial.color, LuminaTokens.glassNavActiveBg);
+        final webdavRow = find.byKey(const Key('provider_row_web_dav'));
+        expect(webdavRow, findsOneWidget);
+        expect(
+          tester.getRect(webdavRow).bottom,
+          lessThanOrEqualTo(capsuleRect.top + 0.5),
+        );
+
+        // Narrow window & 150% scale have zero overflow exceptions.
+        scaleCtrl.setScale(1.5);
+        tester.view.physicalSize = const Size(900, 720);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
       },
     );
 

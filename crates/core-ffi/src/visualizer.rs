@@ -1,5 +1,5 @@
-use crate::error::{catch_unwind_ffi, LUMINA_ERR_GENERAL, LUMINA_OK};
-use core_audio::visualizer::{global_tap, NUM_BANDS};
+use crate::error::{LUMINA_ERR_GENERAL, LUMINA_OK, catch_unwind_ffi};
+use core_audio::visualizer::{NUM_BANDS, global_tap};
 use std::os::raw::c_int;
 
 /// Enables or disables the real-time audio visualizer sidechain tap and analysis thread.

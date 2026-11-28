@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../services/streaming/yt_dlp_service.dart';
 import '../common/frosted_glass_container.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
 import 'settings_widgets.dart';
 
 /// Shared scrollable dialog displaying bundled `THIRD_PARTY_LICENSES.txt`
@@ -35,7 +36,7 @@ class ThirdPartyLicensesDialog extends StatefulWidget {
 }
 
 class _ThirdPartyLicensesDialogState extends State<ThirdPartyLicensesDialog> {
-  final ScrollController _scrollController = ScrollController();
+  final GlideScrollController _scrollController = GlideScrollController();
   late final Future<List<String>> _chunksFuture;
 
   @override
@@ -183,26 +184,29 @@ class _ThirdPartyLicensesDialogState extends State<ThirdPartyLicensesDialog> {
 
                         final chunks =
                             snapshot.data ?? const <String>['無法讀取開源授權內容。'];
-                        return Scrollbar(
+                        return SmoothScrollWrapper(
                           controller: _scrollController,
-                          thumbVisibility: true,
-                          child: SelectionArea(
-                            child: ListView.builder(
-                              key: const Key('third_party_licenses_list'),
-                              controller: _scrollController,
-                              padding: const EdgeInsets.all(LuminaTokens.spaceMd),
-                              itemCount: chunks.length,
-                              itemBuilder: (context, index) => Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: index + 1 < chunks.length ? 2 : 0,
-                                ),
-                                child: Text(
-                                  chunks[index],
-                                  style: const TextStyle(
-                                    color: LuminaTokens.textSecondary,
-                                    fontFamily: 'Consolas',
-                                    fontSize: 12,
-                                    height: 1.45,
+                          child: Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            child: SelectionArea(
+                              child: ListView.builder(
+                                key: const Key('third_party_licenses_list'),
+                                controller: _scrollController,
+                                padding: const EdgeInsets.all(LuminaTokens.spaceMd),
+                                itemCount: chunks.length,
+                                itemBuilder: (context, index) => Padding(
+                                  padding: EdgeInsets.only(
+                                    bottom: index + 1 < chunks.length ? 2 : 0,
+                                  ),
+                                  child: Text(
+                                    chunks[index],
+                                    style: const TextStyle(
+                                      color: LuminaTokens.textSecondary,
+                                      fontFamily: 'Consolas',
+                                      fontSize: 12,
+                                      height: 1.45,
+                                    ),
                                   ),
                                 ),
                               ),

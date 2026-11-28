@@ -3,6 +3,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
 import 'package:lumina_app/models/audio_format.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/streaming_provider_meta.dart';
 import 'package:lumina_app/services/media_sources_controller.dart';
@@ -255,7 +256,9 @@ void main() {
 
         final svc = MockAudioService();
         addTearDown(svc.dispose);
-        final scaleCtrl = UiScaleController();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(scaleCtrl.dispose);
 
         await tester.pumpWidget(
@@ -395,7 +398,9 @@ void main() {
 
         final svc = MockAudioService();
         addTearDown(svc.dispose);
-        final scaleCtrl = UiScaleController();
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
         addTearDown(scaleCtrl.dispose);
 
         await tester.pumpWidget(

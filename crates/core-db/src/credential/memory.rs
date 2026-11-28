@@ -1,6 +1,6 @@
 //! Thread-safe in-memory credential store.
 
-use super::{validate_service_and_key, CredentialError, CredentialStore};
+use super::{CredentialError, CredentialStore, validate_service_and_key};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,14 +26,23 @@ impl MemoryCredentialStore {
 
 #[async_trait]
 impl CredentialStore for MemoryCredentialStore {
-    async fn set_secret(&self, service: &str, key: &str, secret: &str) -> Result<(), CredentialError> {
+    async fn set_secret(
+        &self,
+        service: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
         validate_service_and_key(service, key)?;
         let mut vault = self.vault.write().await;
         vault.insert(Self::composite_key(service, key), secret.to_string());
         Ok(())
     }
 
-    async fn get_secret(&self, service: &str, key: &str) -> Result<Option<String>, CredentialError> {
+    async fn get_secret(
+        &self,
+        service: &str,
+        key: &str,
+    ) -> Result<Option<String>, CredentialError> {
         validate_service_and_key(service, key)?;
         let vault = self.vault.read().await;
         Ok(vault.get(&Self::composite_key(service, key)).cloned())

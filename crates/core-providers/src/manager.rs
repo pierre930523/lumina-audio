@@ -1,28 +1,28 @@
 use std::sync::Arc;
 
-use core_db::credential::{CredentialStore, DEFAULT_SERVICE_NAME};
 use core_db::SqlitePool;
+use core_db::credential::{CredentialStore, DEFAULT_SERVICE_NAME};
 use core_types::{CanonicalAlbum, ProviderKind, TrackSource};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
 use crate::deezer::{
-    validate_arl_cookie, DeezerConfig, DeezerProvider, DeezerUser, DEEZER_CREDENTIAL_SERVICE,
-    DEEZER_KEY_ARL,
+    DEEZER_CREDENTIAL_SERVICE, DEEZER_KEY_ARL, DeezerConfig, DeezerProvider, DeezerUser,
+    validate_arl_cookie,
 };
 use crate::error::ProviderError;
 use crate::library::{LibrarySyncService, SyncPersistReport};
 use crate::local::{LocalProvider, LocalProviderConfig};
 use crate::qobuz::{
-    QobuzConfig, QobuzProvider, QobuzUserSession, QOBUZ_CREDENTIAL_SERVICE,
-    QOBUZ_FALLBACK_TOKEN_KEY, QOBUZ_KEYRING_TOKEN_KEY,
+    QOBUZ_CREDENTIAL_SERVICE, QOBUZ_FALLBACK_TOKEN_KEY, QOBUZ_KEYRING_TOKEN_KEY, QobuzConfig,
+    QobuzProvider, QobuzUserSession,
 };
 use crate::registry::{ProviderRegistry, ProviderSummary};
 use crate::remote::{SmbConfig, SmbProvider, SmbTransport, WebDavConfig, WebDavProvider};
 use crate::tidal::{
-    is_token_expired, TidalConfig, TidalPkceSession, TidalProvider, TidalTokenResponse,
-    TIDAL_CREDENTIAL_SERVICE, TIDAL_KEY_OAUTH,
+    TIDAL_CREDENTIAL_SERVICE, TIDAL_KEY_OAUTH, TidalConfig, TidalPkceSession, TidalProvider,
+    TidalTokenResponse, is_token_expired,
 };
 use crate::traits::{MusicProvider, ResolvedStream, SyncResult};
 
@@ -65,10 +65,7 @@ impl ProviderManager {
         self.registry.register(provider).await;
     }
 
-    pub async fn unregister_provider(
-        &self,
-        kind: ProviderKind,
-    ) -> Option<Arc<dyn MusicProvider>> {
+    pub async fn unregister_provider(&self, kind: ProviderKind) -> Option<Arc<dyn MusicProvider>> {
         self.registry.unregister(kind).await
     }
 
@@ -115,12 +112,8 @@ impl ProviderManager {
         code: &str,
         code_verifier: &str,
     ) -> Result<TidalTokenResponse, ProviderError> {
-        let provider = self
-            .pending_tidal
-            .read()
-            .await
-            .clone()
-            .unwrap_or_else(|| {
+        let provider =
+            self.pending_tidal.read().await.clone().unwrap_or_else(|| {
                 Arc::new(TidalProvider::new(Some(self.credential_store.clone())))
             });
         let tokens = provider.exchange_pkce_code(code, code_verifier).await?;
@@ -173,11 +166,7 @@ impl ProviderManager {
         self.registry.register(provider).await;
     }
 
-    pub async fn configure_smb(
-        &self,
-        config: SmbConfig,
-        transport: Option<Arc<dyn SmbTransport>>,
-    ) {
+    pub async fn configure_smb(&self, config: SmbConfig, transport: Option<Arc<dyn SmbTransport>>) {
         let provider = match transport {
             Some(t) => Arc::new(SmbProvider::with_transport(
                 config,
@@ -329,8 +318,13 @@ impl ProviderManager {
     pub async fn sync_and_persist(
         &self,
         pool: &SqlitePool,
-    ) -> Result<(Vec<(ProviderKind, Result<SyncResult, ProviderError>)>, SyncPersistReport), ProviderError>
-    {
+    ) -> Result<
+        (
+            Vec<(ProviderKind, Result<SyncResult, ProviderError>)>,
+            SyncPersistReport,
+        ),
+        ProviderError,
+    > {
         let sync_results = self.sync_all().await;
         let mut total_report = SyncPersistReport::default();
 

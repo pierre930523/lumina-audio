@@ -1,6 +1,6 @@
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 
 use symphonia::core::io::MediaSource;
 use tokio::sync::mpsc;
@@ -65,8 +65,7 @@ async fn run_bridge_worker(
                         buf
                     }),
                 };
-                let aborted =
-                    matches!(res, Err(StreamError::Cancelled)) && cancel.is_cancelled();
+                let aborted = matches!(res, Err(StreamError::Cancelled)) && cancel.is_cancelled();
                 let _ = reply.try_send(res);
                 aborted
             }
@@ -76,8 +75,7 @@ async fn run_bridge_worker(
                     _ = cancel.cancelled() => Err(StreamError::Cancelled),
                     r = source.seek_to_time_ms(target_ms) => r,
                 };
-                let aborted =
-                    matches!(res, Err(StreamError::Cancelled)) && cancel.is_cancelled();
+                let aborted = matches!(res, Err(StreamError::Cancelled)) && cancel.is_cancelled();
                 let _ = reply.try_send(res);
                 aborted
             }
@@ -419,8 +417,8 @@ mod tests {
             force_timeout: false,
             cancel: CancellationToken::new(),
         });
-        let mut bridge = BlockingStreamBridge::new(Arc::clone(&src) as Arc<dyn ByteStreamSource>)
-            .unwrap();
+        let mut bridge =
+            BlockingStreamBridge::new(Arc::clone(&src) as Arc<dyn ByteStreamSource>).unwrap();
 
         let cancel_handle = src.cancellation_token();
         let starter = std::thread::spawn(move || {

@@ -1,11 +1,15 @@
+pub mod analysis;
 pub mod backend;
 pub mod buffer;
+pub mod decoder;
 pub mod device_manager;
 pub mod dsd;
 pub mod dsp;
+pub mod engine;
 pub mod error;
 pub mod network_monitor;
 pub mod pcm;
+pub mod pipeline;
 pub mod player;
 pub mod signal_path;
 pub mod stream;
@@ -14,50 +18,67 @@ pub mod test_utils;
 pub mod verification;
 pub mod visualizer;
 
-pub use device_manager::{AudioDeviceManager, AudioFormatManager, NegotiatedFormat};
-pub use verification::{
-    AudioVerificationEngine, VerificationConfig, VerificationTapProducer, WireSampleFormat,
-};
-pub use visualizer::{global_tap, VisualizerRingBuffer, VisualizerTap};
-
+pub use analysis::analyze_local_track;
 pub use backend::{
-    asio::AsioBackend, mock::MockBackend, wasapi::WasapiBackend, AudioDeviceDescription,
-    AudioOutputBackend, BackendConfig, BackendState,
+    AudioDeviceDescription, AudioOutputBackend, BackendConfig, BackendState, PullAudioBackend,
+    PullStreamConfig,
+    asio::AsioBackend,
+    coreaudio::{CoreAudioBackend, enumerate_coreaudio_devices},
+    cpal_shared::{
+        CPAL_RT_CHUNK_SAMPLES, enumerate_cpal_devices, rank_sample_format,
+        render_cpal_output_chunked, select_best_config_index,
+    },
+    device_fsm::{DEFAULT_POST_RELEASE_GUARD_DELAY, OutputDeviceFsm, OutputDeviceState},
+    device_manager::{AudioDeviceManager, AudioFormatManager, DeviceExtraMeta, NegotiatedFormat},
+    mock::{MockAudioBackend, MockBackend},
+    wasapi::WasapiBackend,
 };
-pub use buffer::{CachePadded, Consumer, Producer, SpscRingBuffer};
-pub use dsd::{
-    decimation::{DsdChannelDecimator, DsdStereoDecimator, DSD_SILENCE_BYTE},
-    dop::DopFramer,
-    dsdiff::{DsdiffHeader, DsdiffParser, DsdiffReader},
-    dsf::{DsfHeader, DsfParser, DsfReader},
+pub use decoder::{
+    dsd::{
+        decimation::{DSD_SILENCE_BYTE, DsdChannelDecimator, DsdStereoDecimator},
+        dop::DopFramer,
+        dsdiff::{DsdiffHeader, DsdiffParser, DsdiffReader},
+        dsf::{DsfHeader, DsfParser, DsfReader},
+    },
+    pcm::{AudioChunk, AudioDecoder, OpusSymphoniaDecoder, SymphoniaDecoder, SynthAudioDecoder},
+    source_opener::{
+        OpenedStreamDecoder, infer_extension_from_magic, open_decoder_for_path,
+        open_decoder_for_source_spec, open_decoder_for_source_spec_async,
+        open_decoder_for_source_spec_async_with_refresh, open_decoder_for_source_spec_with_refresh,
+        open_decoder_for_stream, open_decoder_for_stream_cancellable,
+    },
 };
 pub use dsp::{
-    autoeq::{parse_autoeq_profile_dto, parse_autoeq_txt, AutoEqParser, AutoEqProfile},
+    autoeq::{AutoEqParser, AutoEqProfile, parse_autoeq_profile_dto, parse_autoeq_txt},
     biquad::{BiquadCoefficients, BiquadFilter, BiquadState, FilterType},
     bypass::DspPipeline,
     crossfeed::CrossfeedFilter,
     gain::{ReplayGain, ReplayGainConfig, ReplayGainMode},
     limiter::LookaheadLimiter,
     peq::{ParametricBand, ParametricEq},
+    resampler::{StreamingSincResampler, adapt_channels_f64, adapt_channels_f64_into},
 };
+pub use engine::{ActiveTrackMeta, AudioPlayer, PlaybackLifecycleState};
 pub use error::{BackendError, CoreAudioError, DecoderError, DsdError, DspError};
-pub use pcm::{
-    AudioChunk, AudioDecoder, OpusSymphoniaDecoder, SymphoniaDecoder, SynthAudioDecoder,
-};
-pub use player::{
-    enumerate_cpal_devices, infer_extension_from_magic, open_decoder_for_path,
-    open_decoder_for_stream, open_decoder_for_stream_cancellable, rank_sample_format,
-    select_best_config_index, ActiveTrackMeta, AudioPlayer, OpenedStreamDecoder,
-    PlaybackLifecycleState, StreamingSincResampler,
+pub use pipeline::{
+    ring_buffer::{CachePadded, Consumer, Producer, SpscRingBuffer, UnderrunGuard},
+    rt_telemetry::{RtErrorCode, RtTelemetry},
 };
 pub use signal_path::{SignalPathContext, SignalPathEngine};
 pub use stream::{
-    is_playlist_extension, parse_m3u_entries, parse_pls_entries, resolve_playlist_url,
-    resolve_playlist_url_with_cancel, HttpRangeMediaSource, StreamOrigin, StreamSource,
+    HttpRangeMediaSource, StreamOrigin, StreamSource, is_playlist_extension, parse_m3u_entries,
+    parse_pls_entries, resolve_playlist_url, resolve_playlist_url_with_cancel,
+};
+pub use verification::{
+    AudioVerificationEngine, VerificationConfig, VerificationTapProducer, WirePacker,
+    WireSampleFormat,
+};
+pub use visualizer::{
+    VisualizerRingBuffer, VisualizerTap, global_tap, init_global_tap, try_global_tap,
 };
 
-use core_types::{AudioFormat, OutputBackendKind, SignalPath};
 pub use core_types::DeckTrackMetadata;
+use core_types::{AudioFormat, OutputBackendKind, SignalPath};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

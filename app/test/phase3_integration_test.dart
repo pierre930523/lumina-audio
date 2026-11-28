@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/models/audio_format.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/stream_source_spec.dart';
 import 'package:lumina_app/models/streaming_models.dart';
@@ -446,12 +447,17 @@ void main() {
 
         final audioService = MockAudioService();
         addTearDown(audioService.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(scaleCtrl.dispose);
 
         await tester.pumpWidget(
           MaterialApp(
             theme: LuminaTokens.buildDarkTheme(),
             home: HomeScreen(
               audioService: audioService,
+              uiScaleController: scaleCtrl,
               streamingManager: manager,
               windowController: DesktopWindowController(
                 isSupportedOverride: false,

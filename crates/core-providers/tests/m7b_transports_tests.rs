@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use core_db::credential::MemoryCredentialStore;
 use core_types::{AudioCodec, AudioFormat, ProviderKind, TrackSource};
 use tempfile::tempdir;
@@ -13,10 +13,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use core_providers::{
-    parse_remote_share_uri, DeezerConfig, DeezerProvider, FilesystemSmbTransport, HttpRequest,
-    HttpTransport, LocalProviderConfig, MockSmbTransport, MusicProvider, ProviderError,
-    ProviderManager, QobuzConfig, QobuzProvider, ReqwestHttpTransport, SmbConfig, SmbEntry,
-    SmbProvider, TidalConfig, TidalProvider, WebDavConfig, WebDavProvider,
+    DeezerConfig, DeezerProvider, FilesystemSmbTransport, HttpRequest, HttpTransport,
+    LocalProviderConfig, MockSmbTransport, MusicProvider, ProviderError, ProviderManager,
+    QobuzConfig, QobuzProvider, ReqwestHttpTransport, SmbConfig, SmbEntry, SmbProvider,
+    TidalConfig, TidalProvider, WebDavConfig, WebDavProvider, parse_remote_share_uri,
 };
 
 struct MockCapturedRequest {
@@ -216,18 +216,33 @@ async fn test_reqwest_transport_and_qobuz_live_http_flow() {
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].title, "Kind of Blue");
     assert_eq!(albums[0].release_year, Some(1959));
-    assert_eq!(albums[0].versions[0].edition_label.as_deref(), Some("Legacy Edition"));
+    assert_eq!(
+        albums[0].versions[0].edition_label.as_deref(),
+        Some("Legacy Edition")
+    );
 
     let fetched_album = qobuz.get_album("qb-alb-1").await.unwrap();
-    assert_eq!(fetched_album.cover_url.as_deref(), Some("https://img.example/kob.jpg"));
+    assert_eq!(
+        fetched_album.cover_url.as_deref(),
+        Some("https://img.example/kob.jpg")
+    );
 
     let err_404 = qobuz.get_track("404").await.unwrap_err();
     assert!(matches!(err_404, ProviderError::TrackNotFound(_)));
 
     let fmt = AudioFormat::pcm(AudioCodec::Flac, 192000, 24, 2).unwrap();
-    let trk = TrackSource::new("v1", ProviderKind::Qobuz, "101", "So What", 1, 1, 540000, fmt)
-        .unwrap()
-        .with_replay_gain(Some(-5.2), Some(-6.0), Some(0.92), Some(0.95));
+    let trk = TrackSource::new(
+        "v1",
+        ProviderKind::Qobuz,
+        "101",
+        "So What",
+        1,
+        1,
+        540000,
+        fmt,
+    )
+    .unwrap()
+    .with_replay_gain(Some(-5.2), Some(-6.0), Some(0.92), Some(0.95));
 
     let resolved = qobuz.resolve_stream(&trk).await.unwrap();
     assert_eq!(resolved.url_or_path, "http://cdn.example/101.flac");
@@ -316,9 +331,15 @@ async fn test_tidal_live_pkce_refresh_search_and_bts_manifest() {
     let tidal = TidalProvider::live(cfg, Some(cred_store));
 
     let pkce = tidal.start_pkce_login().await;
-    assert!(pkce.auth_url.starts_with(&format!("{base_url}/auth/authorize")));
+    assert!(
+        pkce.auth_url
+            .starts_with(&format!("{base_url}/auth/authorize"))
+    );
 
-    let tokens = tidal.exchange_pkce_code("auth_code_xyz", &pkce.verifier).await.unwrap();
+    let tokens = tidal
+        .exchange_pkce_code("auth_code_xyz", &pkce.verifier)
+        .await
+        .unwrap();
     assert_eq!(tokens.access_token, "tid_acc_1");
     assert_eq!(tokens.user_id, 9001);
 
@@ -327,17 +348,34 @@ async fn test_tidal_live_pkce_refresh_search_and_bts_manifest() {
     assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].title, "Aja");
-    assert_eq!(albums[0].versions[0].edition_label.as_deref(), Some("Remastered"));
+    assert_eq!(
+        albums[0].versions[0].edition_label.as_deref(),
+        Some("Remastered")
+    );
 
     let fmt = AudioFormat::pcm(AudioCodec::Flac, 96000, 24, 2).unwrap();
-    let trk = TrackSource::new("v1", ProviderKind::Tidal, "777", "Aja", 1, 1, 470000, fmt.clone()).unwrap();
+    let trk = TrackSource::new(
+        "v1",
+        ProviderKind::Tidal,
+        "777",
+        "Aja",
+        1,
+        1,
+        470000,
+        fmt.clone(),
+    )
+    .unwrap();
     let resolved = tidal.resolve_stream(&trk).await.unwrap();
-    assert_eq!(resolved.url_or_path, "https://sp-cf.tidal.com/audio/777.flac");
+    assert_eq!(
+        resolved.url_or_path,
+        "https://sp-cf.tidal.com/audio/777.flac"
+    );
     assert_eq!(resolved.replay_gain_track_db, Some(-4.8));
     assert_eq!(resolved.replay_gain_album_db, Some(-5.1));
     assert_eq!(resolved.replay_gain_track_peak, Some(0.98));
 
-    let drm_trk = TrackSource::new("v1", ProviderKind::Tidal, "666", "DRM", 1, 2, 1000, fmt).unwrap();
+    let drm_trk =
+        TrackSource::new("v1", ProviderKind::Tidal, "666", "DRM", 1, 2, 1000, fmt).unwrap();
     let drm_err = tidal.resolve_stream(&drm_trk).await.unwrap_err();
     assert!(matches!(drm_err, ProviderError::DrmRestricted(_)));
 
@@ -492,21 +530,26 @@ async fn test_webdav_live_propfind_xml_scan_search_and_stream() {
     assert_eq!(sync.tracks.len(), 1);
     assert_eq!(sync.albums[0].title, "Spirit of Eden");
     assert_eq!(sync.albums[0].artist_name, "Talk Talk");
-    assert_eq!(sync.albums[0].versions[0].edition_label.as_deref(), Some("Remastered"));
-    assert!(sync.albums[0]
-        .cover_url
-        .as_deref()
-        .unwrap()
-        .ends_with("/music/Talk%20Talk/Spirit%20of%20Eden%20(Remastered)/cover.jpg"));
+    assert_eq!(
+        sync.albums[0].versions[0].edition_label.as_deref(),
+        Some("Remastered")
+    );
+    assert!(
+        sync.albums[0]
+            .cover_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/music/Talk%20Talk/Spirit%20of%20Eden%20(Remastered)/cover.jpg")
+    );
     assert_eq!(sync.tracks[0].title, "The Rainbow");
 
     let search = webdav.search("Spirit", 10).await.unwrap();
     assert_eq!(search.len(), 1);
 
     let stream = webdav.resolve_stream(&sync.tracks[0]).await.unwrap();
-    assert!(stream
-        .url_or_path
-        .ends_with("/music/Talk%20Talk/Spirit%20of%20Eden%20(Remastered)/01%20-%20The%20Rainbow.flac"));
+    assert!(stream.url_or_path.ends_with(
+        "/music/Talk%20Talk/Spirit%20of%20Eden%20(Remastered)/01%20-%20The%20Rainbow.flac"
+    ));
     assert_eq!(stream.headers[0].0, "Authorization");
 
     server.abort();
@@ -520,7 +563,10 @@ async fn test_smb_filesystem_and_mock_transports_plus_manager() {
     // Create a minimal valid synthetic FLAC file for MetadataExtractor
     let flac_bytes = build_minimal_flac();
     let file_path = alb_dir.join("01 - Generique.flac");
-    File::create(&file_path).unwrap().write_all(&flac_bytes).unwrap();
+    File::create(&file_path)
+        .unwrap()
+        .write_all(&flac_bytes)
+        .unwrap();
 
     let smb_uri = parse_remote_share_uri("smb://user:pass@nas.local/Music/").unwrap();
     let fs_transport = Arc::new(FilesystemSmbTransport::new(dir.path()));
@@ -564,11 +610,16 @@ async fn test_smb_filesystem_and_mock_transports_plus_manager() {
             Some(mock_smb),
         )
         .await;
-    manager.configure_local(LocalProviderConfig::default()).await;
+    manager
+        .configure_local(LocalProviderConfig::default())
+        .await;
 
     let smb_sync = manager.sync_provider(ProviderKind::Smb).await.unwrap();
     assert_eq!(smb_sync.tracks.len(), 1);
-    assert_eq!(smb_sync.tracks[0].external_track_id, "Artist/Album/01 - Mock.flac");
+    assert_eq!(
+        smb_sync.tracks[0].external_track_id,
+        "Artist/Album/01 - Mock.flac"
+    );
 }
 
 fn build_minimal_flac() -> Vec<u8> {
@@ -676,7 +727,10 @@ async fn test_webdav_hardening_encoding_prefix_status_dotdir_and_truncated_xml()
         .iter()
         .find(|t| t.external_track_id.contains("Song #1?.flac"))
         .expect("track with # and ? must be scanned");
-    assert_eq!(special_track.external_track_id, "dir a/Album #1/01 - Song #1?.flac");
+    assert_eq!(
+        special_track.external_track_id,
+        "dir a/Album #1/01 - Song #1?.flac"
+    );
 
     // resolve_stream percent-encodes #, ?, spaces and never doubles "My%20Music"
     let resolved = webdav.resolve_stream(special_track).await.unwrap();
@@ -730,7 +784,17 @@ async fn test_qobuz_token_is_authenticated_and_manager_anonymous_lan_resolve_str
     manager.configure_qobuz(q_cfg, false).await.unwrap();
 
     let fmt = AudioFormat::cd_quality();
-    let q_trk = TrackSource::new("v1", ProviderKind::Qobuz, "101", "Song", 1, 1, 1000, fmt.clone()).unwrap();
+    let q_trk = TrackSource::new(
+        "v1",
+        ProviderKind::Qobuz,
+        "101",
+        "Song",
+        1,
+        1,
+        1000,
+        fmt.clone(),
+    )
+    .unwrap();
     let q_stream = manager.resolve_stream(&q_trk).await.unwrap();
     assert_eq!(q_stream.url_or_path, "http://cdn.example/101.flac");
 
@@ -746,19 +810,59 @@ async fn test_qobuz_token_is_authenticated_and_manager_anonymous_lan_resolve_str
             Some(mock_smb),
         )
         .await;
-    let smb_trk = TrackSource::new("v2", ProviderKind::Smb, "Artist/Track.flac", "Track", 1, 1, 1000, fmt.clone()).unwrap();
+    let smb_trk = TrackSource::new(
+        "v2",
+        ProviderKind::Smb,
+        "Artist/Track.flac",
+        "Track",
+        1,
+        1,
+        1000,
+        fmt.clone(),
+    )
+    .unwrap();
     let smb_stream = manager.resolve_stream(&smb_trk).await.unwrap();
-    assert_eq!(smb_stream.url_or_path, "smb://nas.local/PublicShare/Artist/Track.flac");
+    assert_eq!(
+        smb_stream.url_or_path,
+        "smb://nas.local/PublicShare/Artist/Track.flac"
+    );
 
     let dav_uri = parse_remote_share_uri("http://127.0.0.1:9999/public/").unwrap();
-    manager.configure_webdav(WebDavConfig { uri: dav_uri }).await;
-    let dav_trk = TrackSource::new("v3", ProviderKind::WebDav, "Artist/Track.flac", "Track", 1, 1, 1000, fmt.clone()).unwrap();
+    manager
+        .configure_webdav(WebDavConfig { uri: dav_uri })
+        .await;
+    let dav_trk = TrackSource::new(
+        "v3",
+        ProviderKind::WebDav,
+        "Artist/Track.flac",
+        "Track",
+        1,
+        1,
+        1000,
+        fmt.clone(),
+    )
+    .unwrap();
     let dav_stream = manager.resolve_stream(&dav_trk).await.unwrap();
-    assert_eq!(dav_stream.url_or_path, "http://127.0.0.1:9999/public/Artist/Track.flac");
+    assert_eq!(
+        dav_stream.url_or_path,
+        "http://127.0.0.1:9999/public/Artist/Track.flac"
+    );
 
     // 3. Unauthenticated streaming provider (Tidal) is still gated with Unauthenticated
-    let tidal_trk = TrackSource::new("v4", ProviderKind::Tidal, "999", "Tidal Track", 1, 1, 1000, fmt).unwrap();
-    manager.register_provider(Arc::new(TidalProvider::new(None))).await;
+    let tidal_trk = TrackSource::new(
+        "v4",
+        ProviderKind::Tidal,
+        "999",
+        "Tidal Track",
+        1,
+        1,
+        1000,
+        fmt,
+    )
+    .unwrap();
+    manager
+        .register_provider(Arc::new(TidalProvider::new(None)))
+        .await;
     let tidal_err = manager.resolve_stream(&tidal_trk).await.unwrap_err();
     assert!(matches!(tidal_err, ProviderError::Unauthenticated(_)));
 
@@ -822,7 +926,17 @@ async fn test_deezer_media_fallback_and_non_lossless_codec_inference() {
     assert!(!user.can_stream_lossless);
 
     // 1. Media fallback: media[0] has empty sources, media[1] has MP3_320 URL
-    let trk = TrackSource::new("v1", ProviderKind::Deezer, "111", "Fallback Track", 1, 1, 200000, AudioFormat::cd_quality()).unwrap();
+    let trk = TrackSource::new(
+        "v1",
+        ProviderKind::Deezer,
+        "111",
+        "Fallback Track",
+        1,
+        1,
+        200000,
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
     let res = deezer.resolve_stream(&trk).await.unwrap();
     assert_eq!(res.url_or_path, "https://cdn.dz/ok.mp3");
     assert_eq!(res.format.codec, AudioCodec::Mp3);

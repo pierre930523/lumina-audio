@@ -5,7 +5,10 @@ use url::Url;
 /// Or with nonce: `lumina-pair://pair?server={host}%3A{port}&pin={pin}&nonce={nonce}`
 pub fn generate_qr_pairing_uri(pin: &str, host: &str, port: u16, nonce: Option<&str>) -> String {
     if let Some(n) = nonce {
-        format!("lumina-pair://pair?server={}%3A{}&pin={}&nonce={}", host, port, pin, n)
+        format!(
+            "lumina-pair://pair?server={}%3A{}&pin={}&nonce={}",
+            host, port, pin, n
+        )
     } else {
         format!("lumina://pair?pin={}&host={}&port={}", pin, host, port)
     }
@@ -43,7 +46,10 @@ mod tests {
     #[test]
     fn test_generate_and_validate_qr_uris() {
         let uri1 = generate_qr_pairing_uri("849201", "192.168.1.100", 9888, None);
-        assert_eq!(uri1, "lumina://pair?pin=849201&host=192.168.1.100&port=9888");
+        assert_eq!(
+            uri1,
+            "lumina://pair?pin=849201&host=192.168.1.100&port=9888"
+        );
         assert!(validate_qr_pairing_uri(&uri1));
 
         let uri2 = generate_qr_pairing_uri("849201", "192.168.1.100", 9888, Some("abc123nonce"));

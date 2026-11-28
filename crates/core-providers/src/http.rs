@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::RwLock;
 
 use crate::error::ProviderError;
@@ -109,6 +109,21 @@ impl HttpResponse {
 #[async_trait]
 pub trait HttpTransport: Send + Sync {
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, ProviderError>;
+
+    async fn execute_cancellable(
+        &self,
+        req: HttpRequest,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<HttpResponse, ProviderError> {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ProviderError::Cancelled),
+            res = self.execute(req) => res,
+        }
+    }
 }
 
 /// Live HTTP transport powered by `reqwest` with `rustls-tls`.
@@ -168,10 +183,9 @@ impl HttpTransport for ReqwestHttpTransport {
             builder = builder.body(body);
         }
 
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(format!("HTTP request to '{}' failed: {e:?}", req.url)))?;
+        let resp = builder.send().await.map_err(|e| {
+            ProviderError::Network(format!("HTTP request to '{}' failed: {e:?}", req.url))
+        })?;
 
         let status = resp.status().as_u16();
         let headers = resp
@@ -184,10 +198,9 @@ impl HttpTransport for ReqwestHttpTransport {
             })
             .collect();
 
-        let body_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| ProviderError::Network(format!("Failed reading HTTP response body: {e}")))?;
+        let body_bytes = resp.bytes().await.map_err(|e| {
+            ProviderError::Network(format!("Failed reading HTTP response body: {e}"))
+        })?;
         let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
         Ok(HttpResponse {
@@ -264,5 +277,50 @@ pub fn endpoint_url(base_url: &str, path: &str) -> String {
         b.to_string()
     } else {
         format!("{b}/{p}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct HangingTransport;
+
+    #[async_trait]
+    impl HttpTransport for HangingTransport {
+        async fn execute(&self, _req: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_cancellable_aborts_immediately_and_midflight() {
+        let transport = MockHttpTransport::new();
+        transport
+            .register_exact("/ping", HttpResponse::ok_json(r#"{"pong":true}"#))
+            .await;
+
+        let pre_cancelled = tokio_util::sync::CancellationToken::new();
+        pre_cancelled.cancel();
+        let err = transport
+            .execute_cancellable(
+                HttpRequest::get("https://example.test/ping"),
+                &pre_cancelled,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled());
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let trigger = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            trigger.cancel();
+        });
+        let err = HangingTransport
+            .execute_cancellable(HttpRequest::get("https://example.test/hang"), &token)
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled());
     }
 }

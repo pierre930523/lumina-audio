@@ -60,12 +60,7 @@ pub fn compute_content_fingerprint(path: &Path) -> io::Result<ContentFingerprint
     })
 }
 
-fn hash_window(
-    file: &mut File,
-    offset: u64,
-    len: u64,
-    hasher: &mut Sha256,
-) -> io::Result<()> {
+fn hash_window(file: &mut File, offset: u64, len: u64, hasher: &mut Sha256) -> io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     let mut remaining = len as usize;
     let mut buf = [0u8; 16 * 1024];
@@ -129,11 +124,7 @@ fn skip_leading_id3v2(file: &mut File, file_len: u64) -> u64 {
     let body_len = u64::from(decode_syncsafe(&hdr[6..10]));
     let footer_len = if (flags & 0x10) != 0 { 10 } else { 0 };
     let end_pos = 10u64.saturating_add(body_len).saturating_add(footer_len);
-    if end_pos < file_len {
-        end_pos
-    } else {
-        0
-    }
+    if end_pos < file_len { end_pos } else { 0 }
 }
 
 fn strip_trailing_tags(file: &mut File, min_start: u64, mut end: u64) -> u64 {

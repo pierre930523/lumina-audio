@@ -83,9 +83,10 @@ where
             .map_err(|e| ProviderError::Network(format!("Failed reading HTTP body: {e}")))?;
 
         if status == 429 {
-            return Err(ProviderError::RateLimited(format!(
-                "Upstream API rate limited (HTTP 429): {body}"
-            )));
+            return Err(ProviderError::rate_limited(
+                format!("Upstream API rate limited (HTTP 429): {body}"),
+                None,
+            ));
         }
 
         return Ok((status, body));

@@ -39,7 +39,10 @@ class _RedesignTestAudioService extends MockAudioService {
       unmodifiableQueue ? List<TrackInfo>.unmodifiable(super.queue) : super.queue;
 
   @override
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100}) async {
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  }) async {
     return albumsList;
   }
 
@@ -778,7 +781,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byKey(const Key('nav_tab_albums')));
+        await tester.tap(find.byKey(const Key('capsule_nav_albums')));
         await tester.pumpAndSettle();
 
         for (final scale in const [1.0, 1.5]) {

@@ -60,9 +60,9 @@ void main() {
     await tester.pumpAndSettle();
 
     // Switch to Library browser
-    await tester.ensureVisible(find.byKey(const Key('nav_tab_library')));
+    await tester.ensureVisible(find.byKey(const Key('capsule_nav_library')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('nav_tab_library')));
+    await tester.tap(find.byKey(const Key('capsule_nav_library')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('track_queue_list')), findsOneWidget);
@@ -114,8 +114,8 @@ void main() {
     await tester.pumpAndSettle();
 
     // Return to Library and confirm .dsf track is excluded while FLAC track plays
-    await tester.ensureVisible(find.byKey(const Key('nav_tab_library')));
-    await tester.tap(find.byKey(const Key('nav_tab_library')));
+    await tester.ensureVisible(find.byKey(const Key('capsule_nav_library')));
+    await tester.tap(find.byKey(const Key('capsule_nav_library')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('queue_track_trk-002')), findsNothing);
     expect(find.byKey(const Key('queue_track_trk-001')), findsOneWidget);

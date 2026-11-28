@@ -6,6 +6,7 @@ import '../../services/audio_service.dart';
 import '../../services/media_sources_controller.dart';
 import '../media/media_source_widgets.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
 
 // ─── Audiobooks View ──────────────────────────────────────────────────────────
 
@@ -19,6 +20,7 @@ class AudiobooksView extends StatefulWidget {
 }
 
 class _AudiobooksViewState extends State<AudiobooksView> {
+  final GlideScrollController _scrollController = GlideScrollController();
   final List<_AudiobookItem> _items = [
     _AudiobookItem(
       id: 'ab-001',
@@ -42,6 +44,12 @@ class _AudiobooksViewState extends State<AudiobooksView> {
   void initState() {
     super.initState();
     MediaSourcesController.instance.load();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -95,29 +103,33 @@ class _AudiobooksViewState extends State<AudiobooksView> {
                 MediaSourceKind.audiobook,
               );
               final totalCount = custom.length + _items.length;
-              return ListView.builder(
-                key: const Key('audiobooks_list_view'),
-                padding: const EdgeInsets.only(
-                  bottom: LuminaTokens.bottomScrollClearance,
-                ),
-                itemCount: totalCount,
-                itemBuilder: (context, index) {
-                  if (index < custom.length) {
-                    final e = custom[index];
-                    return CustomSourceTile(
-                      key: Key('custom_${e.id}'),
-                      entry: e,
-                      icon: Icons.menu_book_rounded,
-                      audioService: widget.audioService,
+              return SmoothScrollWrapper(
+                controller: _scrollController,
+                child: ListView.builder(
+                  key: const Key('audiobooks_list_view'),
+                  controller: _scrollController,
+                  padding: const EdgeInsets.only(
+                    bottom: LuminaTokens.bottomScrollClearance,
+                  ),
+                  itemCount: totalCount,
+                  itemBuilder: (context, index) {
+                    if (index < custom.length) {
+                      final e = custom[index];
+                      return CustomSourceTile(
+                        key: Key('custom_${e.id}'),
+                        entry: e,
+                        icon: Icons.menu_book_rounded,
+                        audioService: widget.audioService,
+                      );
+                    }
+                    final item = _items[index - custom.length];
+                    return _AudiobookTile(
+                      key: Key('audiobook_tile_${item.id}'),
+                      item: item,
+                      onPlay: () => _playSample(item),
                     );
-                  }
-                  final item = _items[index - custom.length];
-                  return _AudiobookTile(
-                    key: Key('audiobook_tile_${item.id}'),
-                    item: item,
-                    onPlay: () => _playSample(item),
-                  );
-                },
+                  },
+                ),
               );
             },
           ),

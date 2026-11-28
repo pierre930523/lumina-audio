@@ -7,44 +7,87 @@ import 'package:material_ui/material_ui.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/listen_later_controller.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/lumina_context_menu.dart';
+import '../common/preference_toggle_button.dart';
+import '../tags/tag_picker_dialog.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
+import 'album_status_badges.dart';
+
+part 'album_collection_card_parts.dart';
+part 'album_collection_card_glow.dart';
+part 'album_collection_list_tile.dart';
 
 Future<void> _showAlbumContextMenu({
   required BuildContext buttonContext,
+  Offset? globalPosition,
   required VoidCallback onPlayAlbum,
   VoidCallback? onAddToQueue,
+  VoidCallback? onAddToListenLater,
+  Future<void> Function(int pref)? onSetPreference,
   required VoidCallback onOpenAlbumDetail,
   VoidCallback? onOpenArtist,
+  VoidCallback? onManageTags,
 }) async {
-  final overlayBox =
-      Overlay.maybeOf(buttonContext)?.context.findRenderObject() as RenderBox?;
-  final buttonBox = buttonContext.findRenderObject() as RenderBox?;
-  if (overlayBox == null || buttonBox == null) return;
-  final position = RelativeRect.fromRect(
-    Rect.fromPoints(
-      buttonBox.localToGlobal(Offset.zero, ancestor: overlayBox),
-      buttonBox.localToGlobal(
-        buttonBox.size.bottomRight(Offset.zero),
-        ancestor: overlayBox,
-      ),
-    ),
-    Offset.zero & overlayBox.size,
-  );
-  final action = await showMenu<String>(
+  final action = await showLuminaContextMenu<String>(
     context: buttonContext,
-    position: position,
-    color: LuminaTokens.glassMenuBg,
-    elevation: 12,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-      side: const BorderSide(color: LuminaTokens.glassCardBorder),
-    ),
-    items: [
-      _buildAlbumMenuItem('play', Icons.play_arrow_rounded, '播放專輯'),
-      _buildAlbumMenuItem('queue', Icons.playlist_add_rounded, '加入播放佇列'),
-      _buildAlbumMenuItem('detail', Icons.album_rounded, '檢視專輯詳情'),
-      _buildAlbumMenuItem('artist', Icons.person_rounded, '前往藝術家'),
+    globalPosition: globalPosition,
+    anchorContext: globalPosition == null ? buttonContext : null,
+    menuKey: const Key('album_context_menu'),
+    entries: [
+      const LuminaContextMenuAction<String>(
+        value: 'play',
+        icon: Icons.play_arrow_rounded,
+        label: '播放專輯',
+      ),
+      const LuminaContextMenuAction<String>(
+        value: 'queue',
+        icon: Icons.playlist_add_rounded,
+        label: '加入播放佇列',
+      ),
+      if (onAddToListenLater != null)
+        const LuminaContextMenuAction<String>(
+          value: 'listen_later',
+          icon: Icons.watch_later_outlined,
+          label: '加入稍後收聽',
+        ),
+      if (onSetPreference != null) ...[
+        const LuminaContextMenuDivider<String>(),
+        const LuminaContextMenuAction<String>(
+          value: 'pref_1',
+          icon: Icons.favorite_rounded,
+          label: '標記為喜愛',
+        ),
+        const LuminaContextMenuAction<String>(
+          value: 'pref_0',
+          icon: Icons.favorite_border_rounded,
+          label: '設為普通',
+        ),
+        const LuminaContextMenuAction<String>(
+          value: 'pref_-1',
+          icon: Icons.block_rounded,
+          label: '封鎖此專輯',
+        ),
+      ],
+      const LuminaContextMenuDivider<String>(),
+      const LuminaContextMenuAction<String>(
+        value: 'detail',
+        icon: Icons.album_rounded,
+        label: '檢視專輯詳情',
+      ),
+      const LuminaContextMenuAction<String>(
+        value: 'artist',
+        icon: Icons.person_rounded,
+        label: '前往藝術家',
+      ),
+      if (onManageTags != null)
+        const LuminaContextMenuAction<String>(
+          value: 'tags',
+          icon: Icons.label_outlined,
+          label: '管理標籤...',
+        ),
     ],
   );
   switch (action) {
@@ -52,37 +95,21 @@ Future<void> _showAlbumContextMenu({
       onPlayAlbum();
     case 'queue':
       onAddToQueue?.call();
+    case 'listen_later':
+      onAddToListenLater?.call();
+    case 'pref_1':
+      await onSetPreference?.call(1);
+    case 'pref_0':
+      await onSetPreference?.call(0);
+    case 'pref_-1':
+      await onSetPreference?.call(-1);
     case 'detail':
       onOpenAlbumDetail();
     case 'artist':
       onOpenArtist?.call();
+    case 'tags':
+      onManageTags?.call();
   }
-}
-
-PopupMenuItem<String> _buildAlbumMenuItem(
-  String value,
-  IconData icon,
-  String label,
-) {
-  return PopupMenuItem<String>(
-    value: value,
-    height: 38,
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 17, color: LuminaTokens.textSecondary),
-        const SizedBox(width: 10),
-        Text(
-          label,
-          style: const TextStyle(
-            color: LuminaTokens.textPrimary,
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 String _albumSubtitle(CanonicalAlbumSummary album) {
@@ -96,8 +123,14 @@ class AlbumCollectionCard extends StatefulWidget {
   final int coverRevision;
   final AudioService audioService;
   final LibraryIndexCache? libraryCache;
+  final ListenLaterController? listenLaterController;
   final bool showCardContainer;
+  final bool showHiddenMode;
+  final bool multiSelectMode;
+  final bool isSelected;
   final VoidCallback onOpenAlbumDetail;
+  final VoidCallback? onTapCard;
+  final VoidCallback? onToggleSelect;
   final VoidCallback onPlayAlbum;
   final VoidCallback? onAddToQueue;
   final VoidCallback? onOpenArtist;
@@ -107,9 +140,15 @@ class AlbumCollectionCard extends StatefulWidget {
     required this.album,
     required this.audioService,
     this.libraryCache,
+    this.listenLaterController,
     this.coverRevision = 0,
     this.showCardContainer = false,
+    this.showHiddenMode = false,
+    this.multiSelectMode = false,
+    this.isSelected = false,
     required this.onOpenAlbumDetail,
+    this.onTapCard,
+    this.onToggleSelect,
     required this.onPlayAlbum,
     this.onAddToQueue,
     this.onOpenArtist,
@@ -266,14 +305,51 @@ class _AlbumCollectionCardState extends State<AlbumCollectionCard>
     }
   }
 
-  Future<void> _openMoreMenu(BuildContext btnCtx) async {
+  Future<void> _addToListenLater() async {
+    final ll = widget.listenLaterController;
+    if (ll == null) return;
+    await ll.addLocalAlbum(widget.album);
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text('已將「${widget.album.title}」加入稍後收聽'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _setAlbumPreference(int pref) async {
+    final groupId = widget.album.effectiveGroupId;
+    widget.libraryCache?.updateEntityPreferenceSync(
+      'album_group',
+      groupId,
+      pref,
+    );
+    await widget.audioService.setEntityPreference('album_group', groupId, pref);
+  }
+
+  Future<void> _openMoreMenu(
+    BuildContext btnCtx, {
+    Offset? globalPosition,
+  }) async {
     _menuOpen = true;
     await _showAlbumContextMenu(
       buttonContext: btnCtx,
+      globalPosition: globalPosition,
       onPlayAlbum: widget.onPlayAlbum,
       onAddToQueue: widget.onAddToQueue,
+      onAddToListenLater:
+          widget.listenLaterController != null ? _addToListenLater : null,
+      onSetPreference: _setAlbumPreference,
       onOpenAlbumDetail: widget.onOpenAlbumDetail,
       onOpenArtist: widget.onOpenArtist,
+      onManageTags: () => showTagPickerDialog(
+        context: context,
+        audioService: widget.audioService,
+        entityType: TagEntityType.albumGroup,
+        entityIds: <String>[widget.album.effectiveGroupId],
+        title: '管理專輯標籤：${widget.album.title}',
+      ),
     );
     _menuOpen = false;
     if (!mounted) return;
@@ -282,595 +358,8 @@ class _AlbumCollectionCardState extends State<AlbumCollectionCard>
     }
   }
 
-  Widget _buildFallbackGlowBox(double side) {
-    return Container(
-      width: side,
-      height: side,
-      decoration: const BoxDecoration(
-        borderRadius: _coverRadius,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF285E8E),
-            Color(0xFF5B52F2),
-            Color(0xFF1A2542),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGlowSource(double side) {
-    final cachePath = _resolvedCachePath;
-    if (cachePath != null && cachePath.isNotEmpty) {
-      return Image.file(
-        File(cachePath),
-        width: side,
-        height: side,
-        fit: BoxFit.cover,
-        cacheWidth: 32,
-        cacheHeight: 32,
-        filterQuality: FilterQuality.low,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _buildFallbackGlowBox(side),
-      );
-    }
-    final coverUrl = _resolvedCoverUrl;
-    if (coverUrl != null && coverUrl.isNotEmpty) {
-      return Image.network(
-        coverUrl,
-        width: side,
-        height: side,
-        fit: BoxFit.cover,
-        cacheWidth: 32,
-        cacheHeight: 32,
-        filterQuality: FilterQuality.low,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _buildFallbackGlowBox(side),
-      );
-    }
-    return _buildFallbackGlowBox(side);
-  }
-
-  Widget _buildActionEntrance({required Widget child}) {
-    return FadeTransition(
-      opacity: _hoverCurve,
-      child: AnimatedBuilder(
-        animation: _buttonSlideAnimation,
-        builder: (context, child) {
-          return Transform.translate(
-            offset: Offset(0, _buttonSlideAnimation.value),
-            child: child,
-          );
-        },
-        child: child,
-      ),
-    );
-  }
-
-  Widget _buildPlayButton() {
-    return Tooltip(
-      message: '播放專輯',
-      child: Semantics(
-        button: true,
-        label: '播放專輯 ${widget.album.title}',
-        child: MouseRegion(
-          cursor: SystemMouseCursors.click,
-          onEnter: (_) => _setPlayHovered(true),
-          onExit: (_) => _setPlayHovered(false),
-          child: GestureDetector(
-            key: Key('album_card_play_${widget.album.id}'),
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onPlayAlbum,
-            child: ScaleTransition(
-              scale: _playScaleAnimation,
-              child: ClipOval(
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: AnimatedBuilder(
-                    animation: _playHoverCurve,
-                    builder: (context, _) {
-                      final t = _playHoverCurve.value;
-                      final bgColor = Color.lerp(
-                        LuminaTokens.glassDrawerBg,
-                        LuminaTokens.glassSwitchOnTrack,
-                        t,
-                      )!;
-                      final borderColor = Color.lerp(
-                        LuminaTokens.glassCoverRim,
-                        LuminaTokens.glassSwitchOnTrack,
-                        t,
-                      )!;
-                      final iconColor = t >= 0.5
-                          ? LuminaTokens.onAccentDark
-                          : Colors.white;
-                      return Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: bgColor,
-                          border: Border.all(color: borderColor, width: 1.0),
-                        ),
-                        child: Icon(
-                          Icons.play_arrow_rounded,
-                          size: 20,
-                          color: iconColor,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMoreButton() {
-    return Tooltip(
-      message: '更多選項',
-      child: Semantics(
-        button: true,
-        label: '更多選項 ${widget.album.title}',
-        child: MouseRegion(
-          cursor: SystemMouseCursors.click,
-          onEnter: (_) => setState(() => _moreHovered = true),
-          onExit: (_) => setState(() => _moreHovered = false),
-          child: Builder(
-            builder: (btnCtx) => GestureDetector(
-              key: Key('album_card_more_${widget.album.id}'),
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _openMoreMenu(btnCtx),
-              child: ClipOval(
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _moreHovered
-                          ? LuminaTokens.glassPillHoverBg
-                          : LuminaTokens.glassDrawerBg,
-                      border: Border.all(
-                        color: _moreHovered
-                            ? LuminaTokens.glassSegmentSelectedBorder
-                            : LuminaTokens.glassCoverRim,
-                        width: 1.0,
-                      ),
-                    ),
-                    child: const Icon(
-                      Icons.more_horiz_rounded,
-                      size: 18,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCoverArea(double side) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => _onCoverHoverEnter(),
-      onExit: (_) => _onCoverHoverExit(),
-      child: SizedBox(
-        width: side,
-        height: side,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            if (_overlayMounted)
-              Positioned.fill(
-                key: const ValueKey('album_ambient_glow'),
-                child: IgnorePointer(
-                  child: FadeTransition(
-                    opacity: _glowOpacityAnimation,
-                    child: Transform.translate(
-                      offset: const Offset(0, 6),
-                      child: Transform.scale(
-                        scale: 1.08,
-                        child: ImageFiltered(
-                          imageFilter: ui.ImageFilter.blur(
-                            sigmaX: 16,
-                            sigmaY: 16,
-                            tileMode: TileMode.decal,
-                          ),
-                          child: _buildGlowSource(side),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            if (_overlayMounted)
-              Positioned.fill(
-                key: const ValueKey('album_depth_shadow'),
-                child: IgnorePointer(
-                  child: ScaleTransition(
-                    scale: _coverScaleAnimation,
-                    child: FadeTransition(
-                      opacity: _hoverCurve,
-                      child: const DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: _coverRadius,
-                          boxShadow: [
-                            BoxShadow(
-                              color: Color(0x88000000),
-                              blurRadius: 24,
-                              offset: Offset(0, 10),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ScaleTransition(
-              key: const ValueKey('album_cover_foreground'),
-              scale: _coverScaleAnimation,
-              child: SizedBox(
-                width: side,
-                height: side,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    AlbumArtworkView(
-                      album: widget.album,
-                      size: side,
-                      revision: widget.coverRevision,
-                      audioService: widget.audioService,
-                      libraryCache: widget.libraryCache,
-                      fullResolution: false,
-                      borderRadius: _coverRadius,
-                      fit: BoxFit.cover,
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.08),
-                        width: 1.0,
-                      ),
-                      boxShadow: const [],
-                      onArtworkResolved: _handleArtworkResolved,
-                    ),
-                    if (_overlayMounted)
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          child: ClipRRect(
-                            borderRadius: _coverRadius,
-                            child: FadeTransition(
-                              opacity: _hoverCurve,
-                              child: const DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                    stops: [0.35, 1.0],
-                                    colors: [
-                                      Colors.transparent,
-                                      Color(0xB3080A0F),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (_overlayMounted) ...[
-                      Positioned(
-                        left: 10,
-                        bottom: 10,
-                        child: _buildActionEntrance(child: _buildPlayButton()),
-                      ),
-                      Positioned(
-                        right: 10,
-                        bottom: 10,
-                        child: _buildActionEntrance(child: _buildMoreButton()),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  void _setState(VoidCallback fn) => setState(fn);
 
   @override
-  Widget build(BuildContext context) {
-    final album = widget.album;
-    final content = LayoutBuilder(
-      builder: (context, constraints) {
-        final maxW = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : 180.0;
-        final maxH = constraints.maxHeight;
-        final textReserve = 54.0;
-        final coverSide = maxH.isFinite
-            ? math.max(48.0, math.min(maxW, maxH - textReserve))
-            : maxW;
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildCoverArea(coverSide),
-            const SizedBox(height: 10),
-            MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: Text(
-                album.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13.5,
-                ),
-              ),
-            ),
-            const SizedBox(height: 2),
-            MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: Text(
-                _albumSubtitle(album),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: LuminaTokens.textSecondary,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-
-    final wrappedContainer = widget.showCardContainer
-        ? Container(
-            key: Key('album_surface_${album.id}'),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: LuminaTokens.glassCardBg,
-              borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-              border: Border.all(color: LuminaTokens.glassCardBorder),
-            ),
-            child: content,
-          )
-        : Container(
-            key: Key('album_surface_${album.id}'),
-            color: Colors.transparent,
-            padding: EdgeInsets.zero,
-            child: content,
-          );
-
-    return RepaintBoundary(
-      child: Semantics(
-        button: true,
-        label: '${album.title} ${album.artist}',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onOpenAlbumDetail,
-          child: wrappedContainer,
-        ),
-      ),
-    );
-  }
-}
-
-/// Horizontal row representation of an album for List view mode.
-class AlbumCollectionListTile extends StatefulWidget {
-  final CanonicalAlbumSummary album;
-  final int coverRevision;
-  final AudioService audioService;
-  final LibraryIndexCache? libraryCache;
-  final bool showCardContainer;
-  final VoidCallback onOpenAlbumDetail;
-  final VoidCallback onPlayAlbum;
-  final VoidCallback? onAddToQueue;
-  final VoidCallback? onOpenArtist;
-
-  const AlbumCollectionListTile({
-    super.key,
-    required this.album,
-    required this.audioService,
-    this.libraryCache,
-    this.coverRevision = 0,
-    this.showCardContainer = false,
-    required this.onOpenAlbumDetail,
-    required this.onPlayAlbum,
-    this.onAddToQueue,
-    this.onOpenArtist,
-  });
-
-  @override
-  State<AlbumCollectionListTile> createState() =>
-      _AlbumCollectionListTileState();
-}
-
-class _AlbumCollectionListTileState extends State<AlbumCollectionListTile> {
-  bool _playHovered = false;
-  bool _moreHovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final album = widget.album;
-    final rowContent = Row(
-      children: [
-        Expanded(
-          child: MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: widget.onOpenAlbumDetail,
-              child: Row(
-                children: [
-                  AlbumArtworkView(
-                    album: album,
-                    size: 56,
-                    revision: widget.coverRevision,
-                    audioService: widget.audioService,
-                    libraryCache: widget.libraryCache,
-                    fullResolution: false,
-                    borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-                    fit: BoxFit.cover,
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.08),
-                      width: 1.0,
-                    ),
-                    boxShadow: const [],
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          album.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: LuminaTokens.textPrimary,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 14,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          _albumSubtitle(album),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: LuminaTokens.textSecondary,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Tooltip(
-          message: '播放專輯',
-          child: Semantics(
-            button: true,
-            label: '播放專輯 ${album.title}',
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              onEnter: (_) => setState(() => _playHovered = true),
-              onExit: (_) => setState(() => _playHovered = false),
-              child: GestureDetector(
-                key: Key('album_card_play_${album.id}'),
-                behavior: HitTestBehavior.opaque,
-                onTap: widget.onPlayAlbum,
-                child: Container(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _playHovered
-                        ? LuminaTokens.glassSwitchOnTrack
-                        : LuminaTokens.glassPillBg,
-                    border: Border.all(
-                      color: _playHovered
-                          ? LuminaTokens.glassSwitchOnTrack
-                          : LuminaTokens.glassPillBorder,
-                    ),
-                  ),
-                  child: Icon(
-                    Icons.play_arrow_rounded,
-                    size: 19,
-                    color: _playHovered
-                        ? LuminaTokens.onAccentDark
-                        : LuminaTokens.glassTextPrimary,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Tooltip(
-          message: '更多選項',
-          child: Semantics(
-            button: true,
-            label: '更多選項 ${album.title}',
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              onEnter: (_) => setState(() => _moreHovered = true),
-              onExit: (_) => setState(() => _moreHovered = false),
-              child: Builder(
-                builder: (btnCtx) => GestureDetector(
-                  key: Key('album_card_more_${album.id}'),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => _showAlbumContextMenu(
-                    buttonContext: btnCtx,
-                    onPlayAlbum: widget.onPlayAlbum,
-                    onAddToQueue: widget.onAddToQueue,
-                    onOpenAlbumDetail: widget.onOpenAlbumDetail,
-                    onOpenArtist: widget.onOpenArtist,
-                  ),
-                  child: Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _moreHovered
-                          ? LuminaTokens.glassPillHoverBg
-                          : LuminaTokens.glassPillBg,
-                      border: Border.all(color: LuminaTokens.glassPillBorder),
-                    ),
-                    child: const Icon(
-                      Icons.more_horiz_rounded,
-                      size: 18,
-                      color: LuminaTokens.glassTextPrimary,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-
-    return RepaintBoundary(
-      child: widget.showCardContainer
-          ? Container(
-              key: Key('album_surface_${album.id}'),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: LuminaTokens.glassCardBg,
-                borderRadius: BorderRadius.circular(
-                  LuminaTokens.glassCardRadius,
-                ),
-                border: Border.all(color: LuminaTokens.glassCardBorder),
-              ),
-              child: rowContent,
-            )
-          : Container(
-              key: Key('album_surface_${album.id}'),
-              color: Colors.transparent,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: rowContent,
-            ),
-    );
-  }
+  Widget build(BuildContext context) => _buildCard(context);
 }

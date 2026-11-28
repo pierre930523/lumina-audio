@@ -3,8 +3,7 @@ use tempfile::tempdir;
 
 use core_db::open_test_database;
 use core_providers::local::lyrics::{
-    decode_text_cjk, LyricsFormat, LyricsKind, LyricsManager, LyricsSource,
-    LyricsTarget,
+    LyricsFormat, LyricsKind, LyricsManager, LyricsSource, LyricsTarget, decode_text_cjk,
 };
 
 #[tokio::test]

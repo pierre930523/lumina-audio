@@ -10,139 +10,11 @@ import 'audio_service.dart';
 import 'library_index_cache.dart';
 import 'library_settings_controller.dart';
 import 'streaming/streaming_manager.dart';
+import 'unified_search/search_models.dart';
 
-/// Unified search result wrapper for a track from either local library or a
-/// connected streaming provider.
-@immutable
-class SearchTrackMatch {
-  final TrackInfo track;
-  final String sourceKind;
+export 'unified_search/search_models.dart';
 
-  const SearchTrackMatch({
-    required this.track,
-    required this.sourceKind,
-  });
-
-  bool get isLocal => sourceKind == 'local';
-}
-
-/// Unified search result wrapper for an album from either local library or a
-/// connected streaming provider.
-@immutable
-class SearchAlbumMatch {
-  final String id;
-  final String title;
-  final String artist;
-  final int? year;
-  final String? coverUrl;
-  final String? qualityLabel;
-  final String sourceKind;
-  final CanonicalAlbumSummary? localAlbum;
-  final StreamingAlbum? streamingAlbum;
-
-  const SearchAlbumMatch({
-    required this.id,
-    required this.title,
-    required this.artist,
-    required this.sourceKind,
-    this.year,
-    this.coverUrl,
-    this.qualityLabel,
-    this.localAlbum,
-    this.streamingAlbum,
-  });
-
-  factory SearchAlbumMatch.local(CanonicalAlbumSummary album) {
-    return SearchAlbumMatch(
-      id: album.id,
-      title: album.title,
-      artist: album.artist,
-      year: album.year,
-      coverUrl: album.coverUrl,
-      sourceKind: 'local',
-      localAlbum: album,
-    );
-  }
-
-  factory SearchAlbumMatch.streaming(StreamingAlbum album) {
-    return SearchAlbumMatch(
-      id: album.id,
-      title: album.title,
-      artist: album.artist,
-      year: album.year,
-      coverUrl: album.coverUrl,
-      qualityLabel: album.qualityLabel,
-      sourceKind: album.providerKind,
-      streamingAlbum: album,
-    );
-  }
-
-  bool get isLocal => sourceKind == 'local';
-}
-
-/// Unified search result wrapper for an artist extracted from local library
-/// or streaming search catalogs.
-@immutable
-class SearchArtistMatch {
-  final String name;
-  final List<String> sourceKinds;
-  final int albumCount;
-  final int trackCount;
-  final String? coverUrl;
-  final CanonicalAlbumSummary? representativeAlbum;
-  final TrackInfo? representativeTrack;
-
-  const SearchArtistMatch({
-    required this.name,
-    required this.sourceKinds,
-    this.albumCount = 0,
-    this.trackCount = 0,
-    this.coverUrl,
-    this.representativeAlbum,
-    this.representativeTrack,
-  });
-}
-
-/// Per-provider streaming search state & results bucket.
-@immutable
-class ProviderSearchBucket {
-  final String providerKind;
-  final List<TrackInfo> tracks;
-  final List<StreamingAlbum> albums;
-  final List<SearchArtistMatch> artists;
-  final bool isLoading;
-  final String? error;
-
-  const ProviderSearchBucket({
-    required this.providerKind,
-    this.tracks = const [],
-    this.albums = const [],
-    this.artists = const [],
-    this.isLoading = false,
-    this.error,
-  });
-
-  int get totalCount => tracks.length + albums.length + artists.length;
-  bool get hasError => error != null && error!.trim().isNotEmpty;
-
-  ProviderSearchBucket copyWith({
-    List<TrackInfo>? tracks,
-    List<StreamingAlbum>? albums,
-    List<SearchArtistMatch>? artists,
-    bool? isLoading,
-    String? error,
-    bool clearError = false,
-  }) {
-    return ProviderSearchBucket(
-      providerKind: providerKind,
-      tracks: tracks ?? this.tracks,
-      albums: albums ?? this.albums,
-      artists: artists ?? this.artists,
-      isLoading: isLoading ?? this.isLoading,
-      error: clearError ? null : (error ?? this.error),
-    );
-  }
-}
+part 'unified_search/search_artist_aggregator.dart';
 
 /// Coordinates debounced, cancellable, non-blocking parallel search across
 /// the local library and all connected streaming providers.
@@ -263,62 +135,7 @@ class UnifiedSearchController extends ChangeNotifier {
     return merged;
   }
 
-  List<SearchArtistMatch> get visibleArtists {
-    if (_selectedSource == 'local') {
-      return _localArtists;
-    }
-    if (_selectedSource != 'all') {
-      return _streamingBuckets[_selectedSource]?.artists ?? const [];
-    }
-
-    final accByKey = <String, _MutableArtistAcc>{};
-    void ingest(SearchArtistMatch artist) {
-      final key = LibraryIndexCache.normalizeArtistKey(artist.name);
-      if (key.isEmpty) return;
-      final existing = accByKey[key];
-      if (existing == null) {
-        accByKey[key] = _MutableArtistAcc(
-          name: artist.name,
-          sourceKinds: List<String>.from(artist.sourceKinds),
-          albumCount: artist.albumCount,
-          trackCount: artist.trackCount,
-          coverUrl: artist.coverUrl,
-          representativeAlbum: artist.representativeAlbum,
-          representativeTrack: artist.representativeTrack,
-        );
-      } else {
-        for (final sk in artist.sourceKinds) {
-          if (!existing.sourceKinds.contains(sk)) {
-            existing.sourceKinds.add(sk);
-          }
-        }
-        existing.albumCount += artist.albumCount;
-        existing.trackCount += artist.trackCount;
-        existing.coverUrl ??= artist.coverUrl;
-        existing.representativeAlbum ??= artist.representativeAlbum;
-        existing.representativeTrack ??= artist.representativeTrack;
-      }
-    }
-
-    for (final a in _localArtists) {
-      ingest(a);
-    }
-    for (final kind in orderedStreamingKinds) {
-      for (final a in _streamingBuckets[kind]!.artists) {
-        ingest(a);
-      }
-    }
-
-    final lower = _query.toLowerCase();
-    final list = accByKey.values.map((a) => a.build()).toList();
-    list.sort((a, b) {
-      final aMatch = a.name.toLowerCase().contains(lower);
-      final bMatch = b.name.toLowerCase().contains(lower);
-      if (aMatch != bMatch) return aMatch ? -1 : 1;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return list;
-  }
+  List<SearchArtistMatch> get visibleArtists => _mergeVisibleArtists();
 
   List<({String kind, String name, String error})> get visibleErrors {
     final out = <({String kind, String name, String error})>[];
@@ -561,67 +378,6 @@ class UnifiedSearchController extends ChangeNotifier {
     );
   }
 
-  List<SearchArtistMatch> _extractArtistsFromCatalog(
-    String kind,
-    StreamingCatalog catalog,
-    String lowerQuery,
-  ) {
-    final accByKey = <String, _MutableArtistAcc>{};
-
-    bool isPlaceholderArtist(String name) {
-      final lower = name.toLowerCase();
-      return lower.isEmpty ||
-          lower == '未知藝術家' ||
-          lower == 'unknown artist';
-    }
-
-    _MutableArtistAcc ensureArtist(String rawName) {
-      final trimmed = rawName.trim();
-      final key = LibraryIndexCache.normalizeArtistKey(trimmed);
-      return accByKey.putIfAbsent(
-        key,
-        () => _MutableArtistAcc(
-          name: trimmed,
-          sourceKinds: <String>[kind],
-        ),
-      );
-    }
-
-    for (final album in catalog.albums) {
-      final name = album.artist.trim();
-      if (isPlaceholderArtist(name)) continue;
-      final acc = ensureArtist(name);
-      acc.albumCount++;
-      acc.coverUrl ??= album.coverUrl;
-      acc.representativeAlbum ??= CanonicalAlbumSummary(
-        id: 'streaming:${album.providerKind}:${album.id}',
-        title: album.title,
-        artist: album.artist,
-        year: album.year,
-        availableProviders: <String>[album.providerKind],
-        coverUrl: album.coverUrl,
-      );
-    }
-
-    for (final track in catalog.tracks) {
-      final name = track.artist.trim();
-      if (isPlaceholderArtist(name)) continue;
-      final acc = ensureArtist(name);
-      acc.trackCount++;
-      acc.coverUrl ??= track.coverUrl ?? track.albumArtUrl;
-      acc.representativeTrack ??= track;
-    }
-
-    final artists = accByKey.values.map((a) => a.build()).toList();
-    artists.sort((a, b) {
-      final aMatch = a.name.toLowerCase().contains(lowerQuery);
-      final bMatch = b.name.toLowerCase().contains(lowerQuery);
-      if (aMatch != bMatch) return aMatch ? -1 : 1;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return artists;
-  }
-
   void _safeNotify() {
     if (!_disposed) {
       notifyListeners();
@@ -638,34 +394,4 @@ class UnifiedSearchController extends ChangeNotifier {
     _activeCancel = null;
     super.dispose();
   }
-}
-
-class _MutableArtistAcc {
-  final String name;
-  final List<String> sourceKinds;
-  int albumCount;
-  int trackCount;
-  String? coverUrl;
-  CanonicalAlbumSummary? representativeAlbum;
-  TrackInfo? representativeTrack;
-
-  _MutableArtistAcc({
-    required this.name,
-    required this.sourceKinds,
-    this.albumCount = 0,
-    this.trackCount = 0,
-    this.coverUrl,
-    this.representativeAlbum,
-    this.representativeTrack,
-  });
-
-  SearchArtistMatch build() => SearchArtistMatch(
-    name: name,
-    sourceKinds: List<String>.unmodifiable(sourceKinds),
-    albumCount: albumCount,
-    trackCount: trackCount,
-    coverUrl: coverUrl,
-    representativeAlbum: representativeAlbum,
-    representativeTrack: representativeTrack,
-  );
 }

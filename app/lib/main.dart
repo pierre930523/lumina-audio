@@ -9,11 +9,15 @@ import 'services/now_playing_view_controller.dart';
 import 'services/ui_scale_controller.dart';
 import 'ui/home_screen.dart';
 import 'ui/theme/lumina_tokens.dart';
+import 'ui/theme/smooth_scroll.dart';
 
 /// Desktop-friendly scroll behavior supporting mouse wheel, trackpad, touch,
 /// and drag scrolling without mobile-style rubber-band overscroll jank.
 class LuminaDesktopScrollBehavior extends MaterialScrollBehavior {
-  const LuminaDesktopScrollBehavior();
+  @visibleForTesting
+  final bool? forceDesktop;
+
+  const LuminaDesktopScrollBehavior({this.forceDesktop});
 
   @override
   Set<PointerDeviceKind> get dragDevices => const {
@@ -34,15 +38,16 @@ class LuminaDesktopScrollBehavior extends MaterialScrollBehavior {
     Widget child,
     ScrollableDetails details,
   ) {
+    final Widget scrollbarChild;
     switch (axisDirectionToAxis(details.direction)) {
       case Axis.horizontal:
-        return child;
+        scrollbarChild = child;
       case Axis.vertical:
         switch (getPlatform(context)) {
           case TargetPlatform.linux:
           case TargetPlatform.macOS:
           case TargetPlatform.windows:
-            return Scrollbar(
+            scrollbarChild = Scrollbar(
               controller: details.controller,
               thumbVisibility: false,
               interactive: true,
@@ -51,9 +56,23 @@ class LuminaDesktopScrollBehavior extends MaterialScrollBehavior {
           case TargetPlatform.android:
           case TargetPlatform.fuchsia:
           case TargetPlatform.iOS:
-            return child;
+            scrollbarChild = child;
         }
     }
+
+    final controller = details.controller;
+    if (controller == null ||
+        !isLuminaDesktopPlatform(forceDesktop: forceDesktop) ||
+        SmoothScrollWrapper.isControllerManagedByAncestor(context, controller)) {
+      return scrollbarChild;
+    }
+
+    return LuminaDesktopScrollScope(
+      controller: controller,
+      axisDirection: details.direction,
+      forceDesktop: forceDesktop,
+      child: scrollbarChild,
+    );
   }
 }
 
@@ -138,6 +157,7 @@ class _LuminaAppState extends State<LuminaApp> with WidgetsBindingObserver {
     _audioService = widget.audioService ?? FfiAudioService();
     _ownsScaleController = widget.uiScaleController == null;
     _scaleController = widget.uiScaleController ?? UiScaleController();
+    _scaleController.loadSync();
     _scaleController.load(audioService: _audioService);
   }
 
@@ -184,7 +204,9 @@ class _LuminaAppState extends State<LuminaApp> with WidgetsBindingObserver {
           title: 'Lumina Audio',
           debugShowCheckedModeBanner: false,
           scrollBehavior: const LuminaDesktopScrollBehavior(),
-          theme: LuminaTokens.buildDarkTheme(),
+          theme: LuminaTokens.buildLightTheme(),
+          darkTheme: LuminaTokens.buildDarkTheme(),
+          themeMode: _scaleController.themeMode,
           builder: (context, child) {
             if (child == null) return const SizedBox.shrink();
             final isScaled = (scale - 1.0).abs() >= 0.001;

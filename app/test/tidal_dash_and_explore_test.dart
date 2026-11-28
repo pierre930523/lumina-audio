@@ -564,23 +564,96 @@ void main() {
         expect(chunkBytes.length, greaterThan(100));
 
         // 2. Serve init.mp4 and chunk_00001.m4s over local HTTP.
+        // Use a raw ServerSocket and defer sock.close() until client EOF (onDone)
+        // so Windows loopback responses flush cleanly without TCP RST (-10054).
         var initHits = 0;
         var chunkHits = 0;
-        final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-        addTearDown(() => upstream.close(force: true));
-        upstream.listen((req) async {
-          if (req.uri.path == '/init.mp4') {
-            initHits++;
-            req.response.headers.contentType = ContentType('audio', 'mp4');
-            req.response.add(initBytes);
-          } else if (req.uri.path == '/chunk_00001.m4s') {
-            chunkHits++;
-            req.response.headers.contentType = ContentType('audio', 'mp4');
-            req.response.add(chunkBytes);
-          } else {
-            req.response.statusCode = HttpStatus.notFound;
+        final activeSockets = <Socket>{};
+        final upstream = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+          backlog: 128,
+        );
+        addTearDown(() async {
+          for (final sock in List<Socket>.from(activeSockets)) {
+            sock.destroy();
           }
-          await req.response.close();
+          activeSockets.clear();
+          await upstream.close();
+        });
+        upstream.listen((sock) {
+          activeSockets.add(sock);
+          final buf = <int>[];
+          var handled = false;
+          sock.listen(
+            (data) async {
+              if (handled) return;
+              buf.addAll(data);
+              final raw = latin1.decode(buf);
+              final headerEnd = raw.indexOf('\r\n\r\n');
+              if (headerEnd < 0) return;
+              handled = true;
+
+              final requestLine = raw
+                  .substring(0, headerEnd)
+                  .split('\r\n')
+                  .first;
+              final parts = requestLine.split(' ');
+              final method = parts.isNotEmpty ? parts[0].toUpperCase() : 'GET';
+              final reqUri = parts.length > 1 ? Uri.tryParse(parts[1]) : null;
+              final path = reqUri?.path ?? '/';
+
+              final Uint8List? payload;
+              if (path == '/init.mp4') {
+                initHits++;
+                payload = initBytes;
+              } else if (path == '/chunk_00001.m4s') {
+                chunkHits++;
+                payload = chunkBytes;
+              } else {
+                payload = null;
+              }
+
+              try {
+                if (payload != null) {
+                  final headers = utf8.encode(
+                    'HTTP/1.1 200 OK\r\n'
+                    'Content-Type: audio/mp4\r\n'
+                    'Content-Length: ${payload.length}\r\n'
+                    'Connection: close\r\n'
+                    '\r\n',
+                  );
+                  if (method == 'HEAD') {
+                    sock.add(headers);
+                  } else {
+                    sock.add(Uint8List.fromList([...headers, ...payload]));
+                  }
+                } else {
+                  sock.add(
+                    utf8.encode(
+                      'HTTP/1.1 404 Not Found\r\n'
+                      'Content-Length: 0\r\n'
+                      'Connection: close\r\n'
+                      '\r\n',
+                    ),
+                  );
+                }
+                await sock.flush();
+              } catch (_) {
+                activeSockets.remove(sock);
+                sock.destroy();
+              }
+            },
+            onDone: () {
+              activeSockets.remove(sock);
+              unawaited(sock.close().catchError((_) {}));
+            },
+            onError: (_) {
+              activeSockets.remove(sock);
+              sock.destroy();
+            },
+            cancelOnError: true,
+          );
         });
 
         // Rewrite segment paths in the synthesized MPD to point at our HTTP server.

@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import '../theme/lumina_glass_theme.dart';
 import '../theme/lumina_tokens.dart';
 
 class VolumeControl extends StatefulWidget {
@@ -28,6 +29,26 @@ class _VolumeControlState extends State<VolumeControl> {
 
   @override
   Widget build(BuildContext context) {
+    final glass = LuminaGlassTheme.of(context);
+    final isDark = glass.isDark;
+    final primaryFg =
+        isDark ? LuminaTokens.glassTextPrimary : glass.textPrimary;
+    final secondaryFg =
+        isDark ? LuminaTokens.glassTextSecondary : glass.textSecondary;
+    final inactiveTrack = isDark
+        ? LuminaTokens.glassTrackUnplayed
+        : glass.textPrimary.withValues(alpha: 0.22);
+    final lockedAccent =
+        isDark ? LuminaTokens.accentPurpleText : const Color(0xFF6D28D9);
+    final lockedTrack =
+        isDark ? LuminaTokens.accentPurple : const Color(0xFF7C3AED);
+    final disabledTrack = isDark
+        ? LuminaTokens.textDisabled.withValues(alpha: 0.45)
+        : glass.textDisabled.withValues(alpha: 0.45);
+    final hoverBg = isDark ? LuminaTokens.glassPillBg : glass.pillBg;
+    final focusColor = isDark ? LuminaTokens.focusRing : glass.accent;
+    final glowColor = isDark ? Colors.white : glass.accent;
+
     final lockedUnity = widget.lockedUnity;
     final effectiveVolume = lockedUnity
         ? 1.0
@@ -43,11 +64,11 @@ class _VolumeControlState extends State<VolumeControl> {
           padding: EdgeInsets.zero,
           constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           style: IconButton.styleFrom(
-            foregroundColor: LuminaTokens.glassTextSecondary,
-            disabledForegroundColor: LuminaTokens.accentPurpleText,
+            foregroundColor: secondaryFg,
+            disabledForegroundColor: lockedAccent,
             backgroundColor: Colors.transparent,
-            hoverColor: LuminaTokens.glassPillBg,
-            focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
+            hoverColor: hoverBg,
+            focusColor: focusColor.withValues(alpha: 0.25),
             shape: const CircleBorder(),
           ).copyWith(
             mouseCursor: WidgetStateProperty.resolveWith(
@@ -57,7 +78,7 @@ class _VolumeControlState extends State<VolumeControl> {
             ),
             side: WidgetStateProperty.resolveWith(
               (states) => states.contains(WidgetState.focused)
-                  ? const BorderSide(color: LuminaTokens.focusRing, width: 1.5)
+                  ? BorderSide(color: focusColor, width: 1.5)
                   : BorderSide.none,
             ),
           ),
@@ -89,19 +110,14 @@ class _VolumeControlState extends State<VolumeControl> {
                 trackHeight: activeHover ? 3.0 : 2.5,
                 thumbShape: _VolumeGlowingThumbShape(
                   radius: activeHover ? 5.0 : 4.0,
-                  color: lockedUnity
-                      ? LuminaTokens.accentPurpleText
-                      : LuminaTokens.glassTextPrimary,
-                  glowAlpha: lockedUnity ? 0.0 : (activeHover ? 0.45 : 0.22),
+                  color: lockedUnity ? lockedAccent : primaryFg,
+                  glowColor: glowColor,
+                  glowAlpha: lockedUnity ? 0.0 : (activeHover ? 0.42 : 0.20),
                 ),
                 overlayShape: const RoundSliderOverlayShape(overlayRadius: 9),
-                overlayColor: LuminaTokens.glassTextPrimary.withValues(
-                  alpha: 0.12,
-                ),
-                thumbColor: lockedUnity
-                    ? LuminaTokens.accentPurpleText
-                    : LuminaTokens.glassTextPrimary,
-                disabledThumbColor: LuminaTokens.accentPurpleText,
+                overlayColor: primaryFg.withValues(alpha: 0.12),
+                thumbColor: lockedUnity ? lockedAccent : primaryFg,
+                disabledThumbColor: lockedAccent,
               ),
               child: Semantics(
                 label: lockedUnity ? '軟體音量已鎖定為 1.0 倍' : '音量控制',
@@ -112,12 +128,8 @@ class _VolumeControlState extends State<VolumeControl> {
                   value: effectiveVolume,
                   min: 0.0,
                   max: 1.0,
-                  activeColor: lockedUnity
-                      ? LuminaTokens.accentPurple
-                      : LuminaTokens.glassTextPrimary,
-                  inactiveColor: lockedUnity
-                      ? LuminaTokens.textDisabled.withValues(alpha: 0.45)
-                      : LuminaTokens.glassTrackUnplayed,
+                  activeColor: lockedUnity ? lockedTrack : primaryFg,
+                  inactiveColor: lockedUnity ? disabledTrack : inactiveTrack,
                   mouseCursor: lockedUnity
                       ? SystemMouseCursors.basic
                       : SystemMouseCursors.click,
@@ -144,11 +156,13 @@ class _VolumeControlState extends State<VolumeControl> {
 class _VolumeGlowingThumbShape extends SliderComponentShape {
   final double radius;
   final Color color;
+  final Color glowColor;
   final double glowAlpha;
 
   const _VolumeGlowingThumbShape({
     required this.radius,
     required this.color,
+    required this.glowColor,
     required this.glowAlpha,
   });
 
@@ -174,7 +188,7 @@ class _VolumeGlowingThumbShape extends SliderComponentShape {
     final canvas = context.canvas;
     if (glowAlpha > 0) {
       final glowPaint = Paint()
-        ..color = Colors.white.withValues(alpha: glowAlpha)
+        ..color = glowColor.withValues(alpha: glowAlpha)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.5);
       canvas.drawCircle(center, radius + 1.5, glowPaint);
     }

@@ -9,7 +9,6 @@ blowfish = { workspace = true }
 bytes = { workspace = true }
 cbc = { workspace = true }
 cipher = { workspace = true }
-core-db = { path = "../core-db" }
 core-types = { path = "../core-types" }
 cpal = "0.18"
 futures-util = { workspace = true }
@@ -26,7 +25,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = [
+windows = { workspace = true, features = [
     "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -68,4 +67,4 @@ wasapi = []
 asio = []
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

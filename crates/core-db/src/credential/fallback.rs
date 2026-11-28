@@ -25,23 +25,36 @@ impl FallbackCredentialStore {
 
 #[async_trait]
 impl CredentialStore for FallbackCredentialStore {
-    async fn set_secret(&self, service: &str, key: &str, secret: &str) -> Result<(), CredentialError> {
+    async fn set_secret(
+        &self,
+        service: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
         match self.primary.set_secret(service, key, secret).await {
             Ok(()) => Ok(()),
             Err(CredentialError::System(e)) | Err(CredentialError::Unavailable(e)) => {
-                warn!("Primary credential store unavailable ({e}); falling back to in-memory store");
+                warn!(
+                    "Primary credential store unavailable ({e}); falling back to in-memory store"
+                );
                 self.fallback.set_secret(service, key, secret).await
             }
             Err(e) => Err(e),
         }
     }
 
-    async fn get_secret(&self, service: &str, key: &str) -> Result<Option<String>, CredentialError> {
+    async fn get_secret(
+        &self,
+        service: &str,
+        key: &str,
+    ) -> Result<Option<String>, CredentialError> {
         match self.primary.get_secret(service, key).await {
             Ok(Some(secret)) => Ok(Some(secret)),
             Ok(None) => self.fallback.get_secret(service, key).await,
             Err(CredentialError::System(e)) | Err(CredentialError::Unavailable(e)) => {
-                warn!("Primary credential store unavailable ({e}); reading from in-memory fallback");
+                warn!(
+                    "Primary credential store unavailable ({e}); reading from in-memory fallback"
+                );
                 self.fallback.get_secret(service, key).await
             }
             Err(e) => Err(e),

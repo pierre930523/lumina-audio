@@ -54,11 +54,11 @@ abstract final class LuminaResponsive {
   }
 
   static double settingsRailWidth(double width) =>
-      width >= 1100.0 ? 192.0 : 168.0;
+      width >= 1100.0 ? 224.0 : 210.0;
 
   static double settingsContentHorizontalPadding(double width) {
-    if (width >= 1100.0) return 36.0;
-    if (width >= 760.0) return 22.0;
+    if (width >= 1100.0) return 40.0;
+    if (width >= 760.0) return 24.0;
     return 14.0;
   }
 
@@ -74,15 +74,23 @@ abstract final class LuminaResponsive {
     bool preferAbove = false,
     double anchorGap = 8.0,
     double edgeMargin = 12.0,
+    double topInset = 0.0,
+    double bottomInset = 0.0,
   }) {
     final maxAllowedWidth = math.max(
       180.0,
       overlaySize.width - edgeMargin * 2,
     );
     final width = math.min(preferredWidth, maxAllowedWidth);
+    final usableTop = math.min(topInset + edgeMargin, overlaySize.height);
+    final usableBottom = math.max(
+      usableTop,
+      overlaySize.height - bottomInset - edgeMargin,
+    );
+    final usableHeight = math.max(0.0, usableBottom - usableTop);
     final fallbackMaxHeight = math.min(
       preferredMaxHeight,
-      math.max(120.0, overlaySize.height - edgeMargin * 2),
+      usableHeight > 0.0 ? usableHeight : math.max(120.0, overlaySize.height - edgeMargin * 2),
     );
 
     if (targetTopLeft == null || targetSize == null) {
@@ -107,31 +115,21 @@ abstract final class LuminaResponsive {
 
     final targetTop = targetTopLeft.dy;
     final targetBottom = targetTop + targetSize.height;
-    final spaceBelow =
-        overlaySize.height - (targetBottom + anchorGap) - edgeMargin;
-    final spaceAbove = (targetTop - anchorGap) - edgeMargin;
+    final spaceBelow = usableBottom - (targetBottom + anchorGap);
+    final spaceAbove = (targetTop - anchorGap) - usableTop;
 
     final placeBelow = preferAbove
         ? (spaceAbove < 200.0 && spaceBelow > spaceAbove)
         : (spaceBelow >= 200.0 || spaceBelow >= spaceAbove);
 
-    final minHeight = math.min(
-      120.0,
-      math.max(0.0, overlaySize.height - edgeMargin * 2),
-    );
+    final minHeight = math.min(120.0, usableHeight);
 
     if (placeBelow) {
       final rawTop = targetBottom + anchorGap;
-      final maxTop = math.max(
-        edgeMargin,
-        overlaySize.height - edgeMargin - minHeight,
-      );
-      final clampedTop = rawTop.clamp(edgeMargin, maxTop).toDouble();
+      final maxTop = math.max(usableTop, usableBottom - minHeight);
+      final clampedTop = rawTop.clamp(usableTop, maxTop).toDouble();
       final dy = anchorGap + (clampedTop - rawTop);
-      final availableHeight = math.max(
-        0.0,
-        overlaySize.height - clampedTop - edgeMargin,
-      );
+      final availableHeight = math.max(0.0, usableBottom - clampedTop);
       final maxHeight = math.min(preferredMaxHeight, availableHeight);
       return PopoverClampResult(
         targetAnchor: Alignment.bottomRight,
@@ -143,11 +141,11 @@ abstract final class LuminaResponsive {
     }
 
     final rawBottom = targetTop - anchorGap;
-    final maxBottom = math.max(edgeMargin, overlaySize.height - edgeMargin);
-    final minBottom = math.min(maxBottom, edgeMargin + minHeight);
+    final maxBottom = usableBottom;
+    final minBottom = math.min(maxBottom, usableTop + minHeight);
     final clampedBottom = rawBottom.clamp(minBottom, maxBottom).toDouble();
     final dy = -anchorGap + (clampedBottom - rawBottom);
-    final availableHeight = math.max(0.0, clampedBottom - edgeMargin);
+    final availableHeight = math.max(0.0, clampedBottom - usableTop);
     final maxHeight = math.min(preferredMaxHeight, availableHeight);
     return PopoverClampResult(
       targetAnchor: Alignment.topRight,

@@ -9,9 +9,9 @@ pub mod zones;
 
 use anyhow::Result;
 use core_audio::AudioPlayer;
+use core_db::SqlitePool;
 use discovery::{MdnsConfig, MdnsService};
 use routes::build_router;
-use sqlx::SqlitePool;
 use state::AppState;
 pub use state::spawn_playback_transition_watcher;
 use std::net::SocketAddr;
@@ -73,7 +73,10 @@ impl AppServer {
         }
 
         let app = build_router(self.state.clone());
-        info!("Lumina Server listening on http://{}", self.config.bind_addr);
+        info!(
+            "Lumina Server listening on http://{}",
+            self.config.bind_addr
+        );
 
         let listener = tokio::net::TcpListener::bind(self.config.bind_addr).await?;
         let watcher_handle = spawn_playback_transition_watcher(self.state.clone());

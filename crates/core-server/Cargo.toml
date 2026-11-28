@@ -11,20 +11,19 @@ core-audio = { path = "../core-audio" }
 core-db = { path = "../core-db" }
 core-providers = { path = "../core-providers" }
 core-types = { path = "../core-types" }
-futures-util = "0.3"
+futures-util = { workspace = true }
 hex = "0.4"
 quick-xml = { workspace = true }
-rand = "0.8"
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "limit", "trace"] }
 tracing = { workspace = true }
-url = "2.5"
+url = { workspace = true }
 uuid = { workspace = true }

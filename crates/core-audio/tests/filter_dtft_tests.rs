@@ -57,7 +57,8 @@ fn test_peaking_eq_dtft_mathematical_response() {
     );
 
     // 3. Cut response check (-6 dB)
-    let cut_coeffs = BiquadCoefficients::compute(FilterType::Peaking, sample_rate, f0, -6.0, q).unwrap();
+    let cut_coeffs =
+        BiquadCoefficients::compute(FilterType::Peaking, sample_rate, f0, -6.0, q).unwrap();
     let cut_f0 = cut_coeffs.frequency_response_db(f0, sample_rate);
     assert!(
         (cut_f0 - (-6.0)).abs() < 0.05,
@@ -175,10 +176,15 @@ Filter 4: OFF PK Fc 450 Hz Gain -1.2 dB Q 2.0
     assert_eq!(profile.bands[3].filter_type, FilterType::Peaking);
     assert!(!profile.bands[3].enabled);
 
-    let peq = profile.to_peq(48000.0, 2).expect("Failed to construct PEQ from AutoEQ");
+    let peq = profile
+        .to_peq(48000.0, 2)
+        .expect("Failed to construct PEQ from AutoEQ");
     let resp_at_32 = peq.frequency_response_db(32.0);
     // At 32 Hz, both the 32 Hz peaking filter and 105 Hz low shelf contribute gain
-    assert!(resp_at_32 > 8.0, "Expected composite gain > 8 dB at 32 Hz, got {resp_at_32}");
+    assert!(
+        resp_at_32 > 8.0,
+        "Expected composite gain > 8 dB at 32 Hz, got {resp_at_32}"
+    );
 }
 
 #[test]
@@ -189,7 +195,10 @@ fn test_crossfeed_filter_itd_and_mono_invariance() {
     // 1. Mono invariance: left == right preserves identical left and right output
     let mono_val = 0.707;
     let (l_out, r_out) = crossfeed.process_stereo(mono_val, mono_val);
-    assert_eq!(l_out, r_out, "Mono signal should produce identical left and right");
+    assert_eq!(
+        l_out, r_out,
+        "Mono signal should produce identical left and right"
+    );
 
     // 2. Left-only impulse response test
     crossfeed.reset();
@@ -206,15 +215,28 @@ fn test_crossfeed_filter_itd_and_mono_invariance() {
 
     // For n < delay, right channel must be strictly zero (causal delay)
     let delay = crossfeed.delay_samples();
-    assert!((12..=14).contains(&delay), "Delay samples expected ~13, got {delay}");
+    assert!(
+        (12..=14).contains(&delay),
+        "Delay samples expected ~13, got {delay}"
+    );
     for &val in out_r.iter().take(delay) {
-        assert_eq!(val, 0.0, "Expected silence on right channel before delay {delay}");
+        assert_eq!(
+            val, 0.0,
+            "Expected silence on right channel before delay {delay}"
+        );
     }
     // At n = delay, impulse arrives at cross channel
-    assert!(out_r[delay] > 0.0, "Impulse should arrive on right channel at n = {delay}");
+    assert!(
+        out_r[delay] > 0.0,
+        "Impulse should arrive on right channel at n = {delay}"
+    );
 
     // Direct left impulse should appear at n=0
-    assert!(out_l[0] > 0.8, "Direct path expected at n=0, got {}", out_l[0]);
+    assert!(
+        out_l[0] > 0.8,
+        "Direct path expected at n=0, got {}",
+        out_l[0]
+    );
 }
 
 #[test]
@@ -297,9 +319,7 @@ fn test_dsp_pipeline_hard_bypass_zero_modification() {
     assert!(!pipeline.is_dsp_active());
 
     // Generate pseudo-random samples
-    let original: Vec<f64> = (0..500)
-        .map(|n| (n as f64 * 123.456).sin() * 0.8)
-        .collect();
+    let original: Vec<f64> = (0..500).map(|n| (n as f64 * 123.456).sin() * 0.8).collect();
 
     let mut processed = original.clone();
     pipeline.process_interleaved(&mut processed);

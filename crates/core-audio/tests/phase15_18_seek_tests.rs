@@ -396,7 +396,9 @@ fn test_phase16_paused_seek_and_resume_zero_stale_playback() {
     fs::write(&wav_path, build_wav_i16(48_000, 2, 96_000)).unwrap(); // 2000 ms
 
     let player = AudioPlayer::new_headless();
-    player.play_file(&wav_path, Some("PauseResumeWav".into())).unwrap();
+    player
+        .play_file(&wav_path, Some("PauseResumeWav".into()))
+        .unwrap();
 
     thread::sleep(Duration::from_millis(60));
     assert_eq!(player.playback_state(), PlaybackLifecycleState::Playing);
@@ -440,7 +442,9 @@ fn test_phase17_ended_seek_and_restart() {
     fs::write(&wav_path, build_wav_i16(44_100, 2, 8_820)).unwrap();
 
     let player = AudioPlayer::new_headless();
-    player.play_file(&wav_path, Some("EndedWav".into())).unwrap();
+    player
+        .play_file(&wav_path, Some("EndedWav".into()))
+        .unwrap();
 
     // Wait for stream to drain to EOF
     let start = std::time::Instant::now();
@@ -465,8 +469,7 @@ fn test_phase17_ended_seek_and_restart() {
 
     thread::sleep(Duration::from_millis(50));
     assert!(
-        player.playback_state() == PlaybackLifecycleState::Playing
-            || player.position_ms() >= 50
+        player.playback_state() == PlaybackLifecycleState::Playing || player.position_ms() >= 50
     );
 
     player.stop();
@@ -500,7 +503,10 @@ fn test_phase18_repeated_and_random_seeks_during_playback_and_track_switch() {
     for &target in &random_targets {
         player.seek_ms(target);
         let new_epoch = player.seek_epoch();
-        assert!(new_epoch > last_epoch, "Seek epoch must advance monotonically");
+        assert!(
+            new_epoch > last_epoch,
+            "Seek epoch must advance monotonically"
+        );
         last_epoch = new_epoch;
 
         let pos = player.position_ms();

@@ -37,6 +37,7 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
   AlbumGridSpacingPreset _spacingPreset = AlbumGridSpacingPreset.medium;
   AlbumViewMode _viewMode = AlbumViewMode.grid;
   bool _showCardContainer = false;
+  bool _showHiddenAlbums = false;
   bool _disposed = false;
   bool _isSaving = false;
   String? _pendingSavePayload;
@@ -64,6 +65,12 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
   AlbumViewMode get viewMode => _viewMode;
 
   bool get showCardContainer => _showCardContainer;
+
+  bool get showHiddenAlbums => _showHiddenAlbums;
+
+  bool get showHiddenItems => _showHiddenAlbums;
+
+  void setShowHiddenItems(bool enabled) => setShowHiddenAlbums(enabled);
 
   int computeCrossAxisCount(double availableWidth) {
     if (!availableWidth.isFinite || availableWidth <= 0) {
@@ -139,6 +146,11 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
         _showCardContainer = rawShowCard;
       }
 
+      final rawShowHidden = decoded['show_hidden_albums'];
+      if (rawShowHidden is bool) {
+        _showHiddenAlbums = rawShowHidden;
+      }
+
       if (!_disposed) {
         notifyListeners();
       }
@@ -157,6 +169,7 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
       'spacing_preset': _spacingPreset.name,
       'view_mode': _viewMode.name,
       'show_card_container': _showCardContainer,
+      'show_hidden_albums': _showHiddenAlbums,
     });
 
     if (prefsFileOverride != null) {
@@ -236,18 +249,27 @@ class AlbumLayoutSettingsController extends ChangeNotifier {
     _save();
   }
 
+  void setShowHiddenAlbums(bool enabled) {
+    if (_showHiddenAlbums == enabled) return;
+    _showHiddenAlbums = enabled;
+    notifyListeners();
+    _save();
+  }
+
   void resetToDefaults() {
     final alreadyDefault =
         (_coverTargetExtent - _defaultCoverExtent).abs() < 0.001 &&
         _spacingPreset == AlbumGridSpacingPreset.medium &&
         _viewMode == AlbumViewMode.grid &&
-        !_showCardContainer;
+        !_showCardContainer &&
+        !_showHiddenAlbums;
     if (alreadyDefault) return;
 
     _coverTargetExtent = _defaultCoverExtent;
     _spacingPreset = AlbumGridSpacingPreset.medium;
     _viewMode = AlbumViewMode.grid;
     _showCardContainer = false;
+    _showHiddenAlbums = false;
     notifyListeners();
     _save();
   }

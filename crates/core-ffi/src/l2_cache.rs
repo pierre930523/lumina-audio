@@ -1,10 +1,10 @@
-use crate::engine::{get_engine, EngineState};
+use crate::engine::{EngineState, get_engine};
 use crate::error::{
-    catch_unwind_ffi, set_last_error, LUMINA_ERR_DATABASE, LUMINA_ERR_GENERAL,
-    LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    LUMINA_ERR_DATABASE, LUMINA_ERR_GENERAL, LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER,
+    LUMINA_OK, catch_unwind_ffi, set_last_error,
 };
 use core_audio::streaming::{L2CacheConfig, L2CacheManager};
-use core_db::L2HeadCacheRepository;
+use core_db::SqliteL2HeadCacheStore;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,8 @@ pub(crate) fn ensure_default_l2_cache_manager(engine: &EngineState) -> Option<Ar
 
     let new_mgr = {
         let _rt_guard = engine.runtime.enter();
-        Arc::new(L2CacheManager::new(pool, L2CacheConfig::new(default_root)).ok()?)
+        let store = Arc::new(SqliteL2HeadCacheStore::new(pool));
+        Arc::new(L2CacheManager::new(store, L2CacheConfig::new(default_root)).ok()?)
     };
 
     let chosen = if let Ok(mut guard) = engine.l2_cache_manager.write() {
@@ -105,7 +106,8 @@ pub extern "C" fn lumina_l2_cache_init(
 
         let mgr = {
             let _rt_guard = engine.runtime.enter();
-            match L2CacheManager::new(pool, cfg) {
+            let store = Arc::new(SqliteL2HeadCacheStore::new(pool));
+            match L2CacheManager::new(store, cfg) {
                 Ok(m) => Arc::new(m),
                 Err(e) => {
                     set_last_error(format!("Failed to initialize L2CacheManager: {e}"));
@@ -147,7 +149,7 @@ pub extern "C" fn lumina_l2_cache_total_bytes(out_bytes: *mut u64) -> c_int {
 
         let total = engine
             .runtime
-            .block_on(L2HeadCacheRepository::total_cached_bytes(mgr.pool()))
+            .block_on(mgr.store().total_cached_bytes())
             .map_err(|e| anyhow::anyhow!("Failed to query L2 total_cached_bytes: {e}"))?;
         unsafe {
             *out_bytes = total;

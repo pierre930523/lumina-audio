@@ -48,9 +48,9 @@ impl AutoEqParser {
                 let val_str = parts.first().ok_or_else(|| {
                     DspError::InvalidAutoEqSyntax(format!("Missing Preamp value: {line}"))
                 })?;
-                let val: f64 = strip_unit_suffix(val_str, "db")
-                    .parse()
-                    .map_err(|_| DspError::InvalidAutoEqSyntax(format!("Invalid Preamp value: {line}")))?;
+                let val: f64 = strip_unit_suffix(val_str, "db").parse().map_err(|_| {
+                    DspError::InvalidAutoEqSyntax(format!("Invalid Preamp value: {line}"))
+                })?;
                 if !val.is_finite() || val.abs() > 60.0 {
                     return Err(DspError::InvalidFilterParameters(format!(
                         "Preamp out of bounds (+/-60dB): {val}"
@@ -62,9 +62,9 @@ impl AutoEqParser {
 
             // 2. Check for Filter <N>: line
             if line.to_ascii_lowercase().starts_with("filter") {
-                let colon_idx = line
-                    .find(':')
-                    .ok_or_else(|| DspError::InvalidAutoEqSyntax(format!("Missing colon in filter line: {line}")))?;
+                let colon_idx = line.find(':').ok_or_else(|| {
+                    DspError::InvalidAutoEqSyntax(format!("Missing colon in filter line: {line}"))
+                })?;
                 let tokens: Vec<&str> = line[colon_idx + 1..].split_whitespace().collect();
                 if tokens.is_empty() {
                     continue;
@@ -116,7 +116,12 @@ impl AutoEqParser {
                             }
                             let parsed_freq: f64 = strip_unit_suffix(tokens[i + 1], "hz")
                                 .parse()
-                                .map_err(|_| DspError::InvalidAutoEqSyntax(format!("Invalid Fc: {}", tokens[i + 1])))?;
+                                .map_err(|_| {
+                                DspError::InvalidAutoEqSyntax(format!(
+                                    "Invalid Fc: {}",
+                                    tokens[i + 1]
+                                ))
+                            })?;
                             freq_hz = Some(parsed_freq);
                             i += 2;
                             if i < tokens.len() && tokens[i].eq_ignore_ascii_case("HZ") {
@@ -129,9 +134,15 @@ impl AutoEqParser {
                                     "Missing Gain value in line: {line}"
                                 )));
                             }
-                            gain_db = strip_unit_suffix(tokens[i + 1], "db")
-                                .parse()
-                                .map_err(|_| DspError::InvalidAutoEqSyntax(format!("Invalid Gain: {}", tokens[i + 1])))?;
+                            gain_db =
+                                strip_unit_suffix(tokens[i + 1], "db")
+                                    .parse()
+                                    .map_err(|_| {
+                                        DspError::InvalidAutoEqSyntax(format!(
+                                            "Invalid Gain: {}",
+                                            tokens[i + 1]
+                                        ))
+                                    })?;
                             i += 2;
                             if i < tokens.len() && tokens[i].eq_ignore_ascii_case("DB") {
                                 i += 1;
@@ -143,14 +154,12 @@ impl AutoEqParser {
                                     "Missing Q value in line: {line}"
                                 )));
                             }
-                            q_factor = tokens[i + 1]
-                                .parse()
-                                .map_err(|_| {
-                                    DspError::InvalidAutoEqSyntax(format!(
-                                        "Invalid Q: {}",
-                                        tokens[i + 1]
-                                    ))
-                                })?;
+                            q_factor = tokens[i + 1].parse().map_err(|_| {
+                                DspError::InvalidAutoEqSyntax(format!(
+                                    "Invalid Q: {}",
+                                    tokens[i + 1]
+                                ))
+                            })?;
                             i += 2;
                         }
                         _ => {
@@ -160,18 +169,26 @@ impl AutoEqParser {
                 }
 
                 let freq_hz = freq_hz.ok_or_else(|| {
-                    DspError::InvalidAutoEqSyntax(format!("Missing Fc frequency in filter line: {line}"))
+                    DspError::InvalidAutoEqSyntax(format!(
+                        "Missing Fc frequency in filter line: {line}"
+                    ))
                 })?;
 
                 // Range validation
                 if !freq_hz.is_finite() || freq_hz <= 0.0 || freq_hz > 100_000.0 {
-                    return Err(DspError::InvalidFilterParameters(format!("Frequency out of bounds: {freq_hz}")));
+                    return Err(DspError::InvalidFilterParameters(format!(
+                        "Frequency out of bounds: {freq_hz}"
+                    )));
                 }
                 if !q_factor.is_finite() || q_factor <= 0.0 || q_factor > 100.0 {
-                    return Err(DspError::InvalidFilterParameters(format!("Q factor out of bounds: {q_factor}")));
+                    return Err(DspError::InvalidFilterParameters(format!(
+                        "Q factor out of bounds: {q_factor}"
+                    )));
                 }
                 if !gain_db.is_finite() || gain_db.abs() > 60.0 {
-                    return Err(DspError::InvalidFilterParameters(format!("Gain out of bounds (+/-60dB): {gain_db}")));
+                    return Err(DspError::InvalidFilterParameters(format!(
+                        "Gain out of bounds (+/-60dB): {gain_db}"
+                    )));
                 }
 
                 bands.push(ParametricBand {

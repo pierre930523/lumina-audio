@@ -5,7 +5,9 @@ pub mod sync;
 
 pub use sanitizer::sanitize_fts5_query;
 pub use sync::{
-    delete_fts_entry, rebuild_search_index, sync_album_fts, sync_artist_fts, sync_track_fts,
+    delete_fts_entry, delete_fts_entry_conn, rebuild_search_index, rebuild_search_index_conn,
+    sync_album_fts, sync_album_fts_conn, sync_artist_fts, sync_artist_fts_conn,
+    sync_single_album_fts_visibility_conn, sync_track_fts, sync_track_fts_conn,
 };
 
 use crate::error::Result;

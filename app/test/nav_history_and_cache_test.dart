@@ -7,8 +7,10 @@ import 'package:lumina_app/main.dart';
 import 'package:lumina_app/models/nav_entry.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/studio_models.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/services/library_index_cache.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/albums/album_detail_page.dart';
 import 'package:lumina_app/ui/artists/artist_detail_page.dart';
 import 'package:lumina_app/ui/artwork/album_artwork_view.dart';
@@ -305,6 +307,10 @@ void main() {
         addTearDown(navController.dispose);
         final libraryCache = LibraryIndexCache();
         addTearDown(libraryCache.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(scaleCtrl.dispose);
 
         await libraryCache.prime(service);
         await libraryCache.loadAlbumDetail(service, 'alb-dsotm');
@@ -322,6 +328,7 @@ void main() {
               audioService: service,
               libraryCache: libraryCache,
               navHistoryController: navController,
+              uiScaleController: scaleCtrl,
             ),
           ),
         );

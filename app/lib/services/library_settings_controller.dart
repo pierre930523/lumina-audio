@@ -78,6 +78,7 @@ class LibrarySettingsController extends ChangeNotifier {
   String _backgroundTaskSpeed = 'auto';
   Set<String> _excludedExtensions = <String>{};
   bool _mergeMultiDiscSets = true;
+  bool _autoMarkListenLaterListened = true;
   int _removedTrackCount = 0;
 
   List<MusicFolderEntry> get folders => List.unmodifiable(_folders);
@@ -91,6 +92,7 @@ class LibrarySettingsController extends ChangeNotifier {
   String get backgroundTaskSpeed => _backgroundTaskSpeed;
   Set<String> get excludedExtensions => Set.unmodifiable(_excludedExtensions);
   bool get mergeMultiDiscSets => _mergeMultiDiscSets;
+  bool get autoMarkListenLaterListened => _autoMarkListenLaterListened;
   int get removedTrackCount => _removedTrackCount;
 
   String get formattedCacheUsed {
@@ -162,6 +164,8 @@ class LibrarySettingsController extends ChangeNotifier {
       final rawExcl = decoded['excluded_extensions'] as List<dynamic>? ?? [];
       _excludedExtensions = rawExcl.map((e) => e.toString()).toSet();
       _mergeMultiDiscSets = decoded['merge_multi_disc_sets'] != false;
+      _autoMarkListenLaterListened =
+          decoded['auto_mark_listen_later_listened'] != false;
       _removedTrackCount =
           (decoded['removed_track_count'] as num?)?.toInt() ?? 0;
       notifyListeners();
@@ -190,6 +194,7 @@ class LibrarySettingsController extends ChangeNotifier {
           'background_task_speed': _backgroundTaskSpeed,
           'excluded_extensions': _excludedExtensions.toList(),
           'merge_multi_disc_sets': _mergeMultiDiscSets,
+          'auto_mark_listen_later_listened': _autoMarkListenLaterListened,
           'removed_track_count': _removedTrackCount,
         }),
       );
@@ -292,6 +297,13 @@ class LibrarySettingsController extends ChangeNotifier {
   void setMergeMultiDiscSets(bool value) {
     if (_mergeMultiDiscSets == value) return;
     _mergeMultiDiscSets = value;
+    notifyListeners();
+    _save();
+  }
+
+  void setAutoMarkListenLaterListened(bool value) {
+    if (_autoMarkListenLaterListened == value) return;
+    _autoMarkListenLaterListened = value;
     notifyListeners();
     _save();
   }

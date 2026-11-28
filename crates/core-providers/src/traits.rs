@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::path::Path;
 use async_trait::async_trait;
 use core_types::{
     AudioFormat, CanonicalAlbum, ProviderKind, StreamKey, StreamProviderCapabilities,
     StreamSourceSpec, TrackSource,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 use tokio::sync::mpsc::Sender;
 
 use crate::error::ProviderError;
@@ -284,7 +284,8 @@ pub trait MusicProvider: Send + Sync {
     fn capabilities(&self) -> ProviderCapabilities;
 
     async fn is_authenticated(&self) -> bool;
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<CanonicalAlbum>, ProviderError>;
+    async fn search(&self, query: &str, limit: usize)
+    -> Result<Vec<CanonicalAlbum>, ProviderError>;
     async fn resolve_stream(&self, track: &TrackSource) -> Result<ResolvedStream, ProviderError>;
 
     async fn sync_library(&self) -> Result<SyncResult, ProviderError>;
@@ -329,7 +330,10 @@ pub trait StreamResolver: Send + Sync {
     async fn resolve_source(&self, key: &StreamKey) -> Result<StreamSourceSpec, ProviderError>;
 }
 
-pub(crate) fn validate_stream_key(expected_provider: &str, key: &StreamKey) -> Result<(), ProviderError> {
+pub(crate) fn validate_stream_key(
+    expected_provider: &str,
+    key: &StreamKey,
+) -> Result<(), ProviderError> {
     if !key.provider_id.eq_ignore_ascii_case(expected_provider) {
         return Err(ProviderError::UnsupportedFormat(format!(
             "Cannot resolve '{}' stream key on '{}' resolver",
@@ -337,7 +341,10 @@ pub(crate) fn validate_stream_key(expected_provider: &str, key: &StreamKey) -> R
         )));
     }
     if key.track_id.trim().is_empty() {
-        return Err(ProviderError::track_not_found(expected_provider, &key.track_id));
+        return Err(ProviderError::track_not_found(
+            expected_provider,
+            &key.track_id,
+        ));
     }
     Ok(())
 }

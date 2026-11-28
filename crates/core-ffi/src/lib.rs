@@ -16,6 +16,7 @@ pub mod streaming_bridge;
 pub mod visualizer;
 pub mod zones;
 
+pub use error::lumina_last_error_json;
 pub use l1_cache::*;
 pub use l2_cache::*;
 pub use library::*;
@@ -27,7 +28,7 @@ pub use streaming_bridge::*;
 pub use visualizer::*;
 
 use engine::get_engine;
-use error::{catch_unwind_ffi, string_to_c_char, take_last_error, LUMINA_OK};
+use error::{LUMINA_OK, catch_unwind_ffi, string_to_c_char, take_last_error};
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
@@ -123,17 +124,35 @@ pub extern "C" fn lumina_last_error_message() -> *mut c_char {
         {
             *err_lock = None;
         }
+        if let Ok(mut s_lock) = engine.last_structured_error.write()
+            && s_lock.as_ref().is_some_and(|e| e.message == err)
+        {
+            *s_lock = None;
+        }
         return string_to_c_char(&err);
     }
     if let Some(player) = engine.player_clone()
         && let Some(err) = player.take_last_error()
     {
+        if let Ok(mut s_lock) = engine.last_structured_error.write()
+            && s_lock.as_ref().is_some_and(|e| e.message == err)
+        {
+            *s_lock = None;
+        }
         return string_to_c_char(&err);
     }
     if let Ok(mut err_lock) = engine.async_last_error.write()
         && let Some(err) = err_lock.take()
     {
+        if let Ok(mut s_lock) = engine.last_structured_error.write() {
+            *s_lock = None;
+        }
         return string_to_c_char(&err);
+    }
+    if let Ok(mut s_lock) = engine.last_structured_error.write()
+        && let Some(err) = s_lock.take()
+    {
+        return string_to_c_char(&err.message);
     }
     std::ptr::null_mut()
 }

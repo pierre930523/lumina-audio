@@ -34,10 +34,16 @@ pub enum CredentialError {
 #[async_trait]
 pub trait CredentialStore: Send + Sync {
     /// Stores a secret for the given service and account key.
-    async fn set_secret(&self, service: &str, key: &str, secret: &str) -> Result<(), CredentialError>;
+    async fn set_secret(
+        &self,
+        service: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError>;
 
     /// Retrieves a secret. Returns Ok(None) if not found.
-    async fn get_secret(&self, service: &str, key: &str) -> Result<Option<String>, CredentialError>;
+    async fn get_secret(&self, service: &str, key: &str)
+    -> Result<Option<String>, CredentialError>;
 
     /// Deletes a secret idempotently. Returns Ok(()) if nonexistent.
     async fn delete_secret(&self, service: &str, key: &str) -> Result<(), CredentialError>;
@@ -46,10 +52,14 @@ pub trait CredentialStore: Send + Sync {
 /// Validates that service and key strings are non-empty.
 pub fn validate_service_and_key(service: &str, key: &str) -> Result<(), CredentialError> {
     if service.trim().is_empty() {
-        return Err(CredentialError::InvalidKey("Keyring service name cannot be empty".into()));
+        return Err(CredentialError::InvalidKey(
+            "Keyring service name cannot be empty".into(),
+        ));
     }
     if key.trim().is_empty() {
-        return Err(CredentialError::InvalidKey("Keyring account name cannot be empty".into()));
+        return Err(CredentialError::InvalidKey(
+            "Keyring account name cannot be empty".into(),
+        ));
     }
     Ok(())
 }

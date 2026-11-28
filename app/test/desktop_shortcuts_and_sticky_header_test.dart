@@ -1,11 +1,13 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/nav_entry.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/library_index_cache.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:lumina_app/ui/library/library_browser_view.dart';
 import 'package:lumina_app/ui/theme/lumina_tokens.dart';
@@ -22,8 +24,14 @@ void main() {
 
       final service = MockAudioService();
       addTearDown(service.dispose);
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
+      addTearDown(scaleCtrl.dispose);
 
-      await tester.pumpWidget(LuminaApp(audioService: service));
+      await tester.pumpWidget(
+        LuminaApp(audioService: service, uiScaleController: scaleCtrl),
+      );
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('btn_nav_back')), findsOneWidget);
@@ -75,7 +83,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Navigate to Albums
-      await tester.tap(find.byKey(const Key('nav_tab_albums')));
+      await tester.tap(find.byKey(const Key('capsule_nav_albums')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('album_grid_view')), findsOneWidget);
 
@@ -84,7 +92,7 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+      expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
 
       // Alt + Right -> goes forward to Albums
       await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
@@ -96,10 +104,10 @@ void main() {
       // Backspace -> goes back to Home
       await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+      expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
     });
 
-    testWidgets('Global shortcuts: Ctrl+F expands & focuses top search box while nav_tab_library opens LibraryBrowserView', (
+    testWidgets('Global shortcuts: Ctrl+F expands & focuses top search box while capsule_nav_library opens LibraryBrowserView', (
       WidgetTester tester,
     ) async {
       tester.view.physicalSize = const Size(1280, 800);
@@ -113,7 +121,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Ensure we start on home with top search collapsed
-      expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+      expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
       expect(find.byKey(const Key('btn_top_search_toggle')), findsOneWidget);
       expect(find.byKey(const Key('top_search_input')), findsNothing);
 
@@ -133,8 +141,8 @@ void main() {
         isTrue,
       );
 
-      // Sidebar nav_tab_library still navigates to LibraryBrowserView
-      await tester.tap(find.byKey(const Key('nav_tab_library')));
+      // Top capsulenav_library navigates to LibraryBrowserView
+      await tester.tap(find.byKey(const Key('capsule_nav_library')));
       await tester.pumpAndSettle();
       expect(find.byType(LibraryBrowserView), findsOneWidget);
       expect(find.byKey(const Key('library_search_input')), findsOneWidget);
@@ -188,7 +196,7 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('now_playing_overlay')), findsNothing);
-      expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+      expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
     });
 
     testWidgets('Global shortcuts: Typing in TextField does NOT trigger Space/M/Backspace shortcuts', (
@@ -205,7 +213,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Go to Library search tab
-      await tester.tap(find.byKey(const Key('nav_tab_library')));
+      await tester.tap(find.byKey(const Key('capsule_nav_library')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('library_search_input')), findsOneWidget);
 
@@ -380,12 +388,17 @@ void main() {
         initialEntry: NavEntry.album('test-album-1'),
       );
       addTearDown(nav.dispose);
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
+      addTearDown(scaleCtrl.dispose);
 
       await tester.pumpWidget(
         MaterialApp(
           theme: LuminaTokens.buildDarkTheme(),
           home: HomeScreen(
             audioService: service,
+            uiScaleController: scaleCtrl,
             libraryCache: cache,
             navHistoryController: nav,
           ),
@@ -447,12 +460,17 @@ void main() {
         initialEntry: NavEntry.artist(artistName: 'Pink Floyd'),
       );
       addTearDown(nav.dispose);
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
+      addTearDown(scaleCtrl.dispose);
 
       await tester.pumpWidget(
         MaterialApp(
           theme: LuminaTokens.buildDarkTheme(),
           home: HomeScreen(
             audioService: service,
+            uiScaleController: scaleCtrl,
             libraryCache: cache,
             navHistoryController: nav,
           ),

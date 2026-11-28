@@ -1,18 +1,17 @@
 use std::fs::{self, File};
 use std::io::Write;
 
-use core_db::{open_test_database, LibraryRepository};
+use core_db::{LibraryRepository, open_test_database};
 use core_types::ProviderKind;
 use tempfile::tempdir;
 
-use core_providers::{AlbumMapper, LibrarySyncService, LocalProvider, MetadataExtractor, MusicProvider};
+use core_providers::{
+    AlbumMapper, LibrarySyncService, LocalProvider, MetadataExtractor, MusicProvider,
+};
 
 fn approx_eq(a: Option<f64>, b: f64) {
     let val = a.unwrap_or_else(|| panic!("Expected Some({b}), got None"));
-    assert!(
-        (val - b).abs() < 0.005,
-        "Expected {b} +- 0.005, got {val}"
-    );
+    assert!((val - b).abs() < 0.005, "Expected {b} +- 0.005, got {val}");
 }
 
 fn crc8(data: &[u8]) -> u8 {
@@ -319,7 +318,10 @@ async fn test_replaygain_flac_vorbis_extraction_and_db_roundtrip() {
         "MUSICBRAINZ_RELEASEGROUPID=11111111-2222-3333-4444-555555555555",
     ]);
     let flac_path = alb_dir.join("01 - Vorbis Song.flac");
-    File::create(&flac_path).unwrap().write_all(&flac_bytes).unwrap();
+    File::create(&flac_path)
+        .unwrap()
+        .write_all(&flac_bytes)
+        .unwrap();
 
     // Direct extraction + extract_from_bytes
     let meta = MetadataExtractor::extract(&flac_path).unwrap();
@@ -428,7 +430,10 @@ fn test_replaygain_m4a_itunes_freeform_and_dsf_id3v2() {
     // 1. M4A with ----:com.apple.iTunes:* (UTF-8 & Float32)
     let m4a_bytes = build_synthetic_m4a_with_replaygain();
     let m4a_path = dir.path().join("01 - MP4 Track.m4a");
-    File::create(&m4a_path).unwrap().write_all(&m4a_bytes).unwrap();
+    File::create(&m4a_path)
+        .unwrap()
+        .write_all(&m4a_bytes)
+        .unwrap();
 
     let m4a_meta = MetadataExtractor::extract(&m4a_path).unwrap();
     assert_eq!(m4a_meta.title, "MP4 Track");
@@ -457,7 +462,10 @@ fn test_replaygain_m4a_itunes_freeform_and_dsf_id3v2() {
     ]);
     let dsf_bytes = build_synthetic_dsf_with_id3(dsf_tag);
     let dsf_path = dir.path().join("01 - DSD Nocturne.dsf");
-    File::create(&dsf_path).unwrap().write_all(&dsf_bytes).unwrap();
+    File::create(&dsf_path)
+        .unwrap()
+        .write_all(&dsf_bytes)
+        .unwrap();
 
     let dsf_meta = MetadataExtractor::extract(&dsf_path).unwrap();
     assert_eq!(dsf_meta.title, "DSD Nocturne");

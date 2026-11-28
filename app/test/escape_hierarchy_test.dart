@@ -217,7 +217,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byKey(const Key('nav_tab_library')));
+        await tester.tap(find.byKey(const Key('capsule_nav_library')));
         await tester.pumpAndSettle();
         expect(nav.canGoBack, isTrue);
 
@@ -271,7 +271,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byKey(const Key('nav_tab_albums')));
+        await tester.tap(find.byKey(const Key('capsule_nav_albums')));
         await tester.pumpAndSettle();
 
         // Open output popover -> Esc closes it.
@@ -537,7 +537,7 @@ void main() {
         await tester.pumpAndSettle();
 
         // Build Level 5: Home -> Albums -> AlbumDetail.
-        await tester.tap(find.byKey(const Key('nav_tab_albums')));
+        await tester.tap(find.byKey(const Key('capsule_nav_albums')));
         await tester.pumpAndSettle();
         nav.push(NavEntry.album('alb-cascade-1'));
         await tester.pumpAndSettle();

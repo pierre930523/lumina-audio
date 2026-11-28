@@ -7,15 +7,15 @@ use core_types::{AudioCodec, AudioFormat, ProviderKind, TrackSource};
 use tempfile::tempdir;
 
 use core_providers::{
-    find_folder_cover, find_folder_cover_in_files, generate_pkce_challenge, is_scannable_audio,
-    is_token_expired, make_basic_auth, normalize_path, normalize_qobuz_sample_rate,
-    parse_remote_share_uri, qobuz_format_ids, resolve_qobuz_format_id, validate_arl_cookie,
-    validate_pkce_verifier, AlbumMapper, DeezerConfig, DeezerProvider, DirectoryScanner,
+    AlbumMapper, COVER_ART_FILENAMES, DeezerConfig, DeezerProvider, DirectoryScanner,
     ExtractedMetadata, HttpResponse, LocalProvider, LocalProviderConfig, MetadataExtractor,
     MockHttpTransport, MusicProvider, ProviderCapabilities, ProviderError, ProviderManager,
-    ProviderRegistry, QobuzConfig, QobuzProvider, RemoteShareUri, SmbConfig, SmbProvider,
-    TidalConfig, TidalProvider, TidalTokenResponse, WebDavConfig, WebDavProvider,
-    COVER_ART_FILENAMES, SCANNABLE_AUDIO_EXTENSIONS,
+    ProviderRegistry, QobuzConfig, QobuzProvider, RemoteShareUri, SCANNABLE_AUDIO_EXTENSIONS,
+    SmbConfig, SmbProvider, TidalConfig, TidalProvider, TidalTokenResponse, WebDavConfig,
+    WebDavProvider, find_folder_cover, find_folder_cover_in_files, generate_pkce_challenge,
+    is_scannable_audio, is_token_expired, make_basic_auth, normalize_path,
+    normalize_qobuz_sample_rate, parse_remote_share_uri, qobuz_format_ids, resolve_qobuz_format_id,
+    validate_arl_cookie, validate_pkce_verifier,
 };
 
 // ==============================================================================
@@ -60,7 +60,12 @@ fn test_is_scannable_audio_extensions() {
 
 #[test]
 fn test_cover_art_detection() {
-    let files = ["01 - Track.flac", "02 - Track.flac", "Cover.JPG", "notes.txt"];
+    let files = [
+        "01 - Track.flac",
+        "02 - Track.flac",
+        "Cover.JPG",
+        "notes.txt",
+    ];
     let found = find_folder_cover_in_files(&files);
     assert_eq!(found, Some("Cover.JPG".to_string()));
 
@@ -246,10 +251,7 @@ fn test_make_basic_auth() {
 #[tokio::test]
 async fn test_smb_provider_stream_resolution_with_credentials() {
     let uri = parse_remote_share_uri("smb://user:pass@nas.local:445/Music/Jazz/").unwrap();
-    let config = SmbConfig {
-        uri,
-        domain: None,
-    };
+    let config = SmbConfig { uri, domain: None };
     let provider = SmbProvider::new(config, None);
 
     assert_eq!(provider.kind(), ProviderKind::Smb);
@@ -269,7 +271,10 @@ async fn test_smb_provider_stream_resolution_with_credentials() {
     .unwrap();
 
     let resolved = provider.resolve_stream(&track).await.unwrap();
-    assert_eq!(resolved.url_or_path, "smb://nas.local/Music/Bill_Evans.flac");
+    assert_eq!(
+        resolved.url_or_path,
+        "smb://nas.local/Music/Bill_Evans.flac"
+    );
     assert_eq!(resolved.headers.len(), 1);
     assert_eq!(resolved.headers[0].0, "Authorization");
     assert_eq!(resolved.headers[0].1, "Basic dXNlcjpwYXNz");
@@ -278,10 +283,7 @@ async fn test_smb_provider_stream_resolution_with_credentials() {
 #[tokio::test]
 async fn test_smb_provider_offline_mode() {
     let uri = parse_remote_share_uri("smb://nas.local/Music/").unwrap();
-    let config = SmbConfig {
-        uri,
-        domain: None,
-    };
+    let config = SmbConfig { uri, domain: None };
     let provider = SmbProvider::new(config, None);
 
     provider.set_online(false).await;
@@ -437,13 +439,17 @@ async fn test_qobuz_direct_token_auth_and_stream_resolution() {
     let resolved = provider.resolve_stream(&track).await.unwrap();
     assert_eq!(resolved.format.sample_rate_hz, 192000);
     assert_eq!(resolved.format.bit_depth, 24);
-    assert!(resolved
-        .url_or_path
-        .contains("streaming-qobuz.akamaized.net"));
-    assert!(resolved
-        .headers
-        .iter()
-        .any(|(k, v)| k == "X-User-Auth-Token" && v == "qb_tok_1"));
+    assert!(
+        resolved
+            .url_or_path
+            .contains("streaming-qobuz.akamaized.net")
+    );
+    assert!(
+        resolved
+            .headers
+            .iter()
+            .any(|(k, v)| k == "X-User-Auth-Token" && v == "qb_tok_1")
+    );
 }
 
 #[tokio::test]
@@ -857,28 +863,40 @@ async fn test_webdav_custom_port_https_scheme() {
     assert!(uri_8443.is_ssl);
     let provider_8443 = WebDavProvider::new(WebDavConfig { uri: uri_8443 }, None);
     let res = provider_8443.resolve_stream(&track).await.unwrap();
-    assert_eq!(res.url_or_path, "https://dav.lumina.io:8443/music/song.flac");
+    assert_eq!(
+        res.url_or_path,
+        "https://dav.lumina.io:8443/music/song.flac"
+    );
 
     // davs scheme on custom port 5006 (Synology)
     let uri_davs = parse_remote_share_uri("davs://dav.lumina.io:5006/music/").unwrap();
     assert!(uri_davs.is_ssl);
     let provider_davs = WebDavProvider::new(WebDavConfig { uri: uri_davs }, None);
     let res_davs = provider_davs.resolve_stream(&track).await.unwrap();
-    assert_eq!(res_davs.url_or_path, "https://dav.lumina.io:5006/music/song.flac");
+    assert_eq!(
+        res_davs.url_or_path,
+        "https://dav.lumina.io:5006/music/song.flac"
+    );
 
     // Unencrypted HTTP on custom port 8080 should remain http
     let uri_http = parse_remote_share_uri("http://dav.lumina.io:8080/music/").unwrap();
     assert!(!uri_http.is_ssl);
     let provider_http = WebDavProvider::new(WebDavConfig { uri: uri_http }, None);
     let res_http = provider_http.resolve_stream(&track).await.unwrap();
-    assert_eq!(res_http.url_or_path, "http://dav.lumina.io:8080/music/song.flac");
+    assert_eq!(
+        res_http.url_or_path,
+        "http://dav.lumina.io:8080/music/song.flac"
+    );
 
     // dav scheme on port 80 should remain http
     let uri_dav = parse_remote_share_uri("dav://dav.lumina.io/music/").unwrap();
     assert!(!uri_dav.is_ssl);
     let provider_dav = WebDavProvider::new(WebDavConfig { uri: uri_dav }, None);
     let res_dav = provider_dav.resolve_stream(&track).await.unwrap();
-    assert_eq!(res_dav.url_or_path, "http://dav.lumina.io:80/music/song.flac");
+    assert_eq!(
+        res_dav.url_or_path,
+        "http://dav.lumina.io:80/music/song.flac"
+    );
 }
 
 #[test]
@@ -896,7 +914,13 @@ fn test_directory_scanner_directory_symlink_traversal() {
     #[cfg(windows)]
     {
         let status = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J", link_target.to_str().unwrap(), outside.to_str().unwrap()])
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                link_target.to_str().unwrap(),
+                outside.to_str().unwrap(),
+            ])
             .status();
         if status.is_err() || !status.unwrap().success() {
             return;
@@ -912,12 +936,19 @@ fn test_directory_scanner_directory_symlink_traversal() {
     // With follow_symlinks = false: should not find outside file
     let mut scanner_no_follow = DirectoryScanner::new(false);
     let scanned_no_follow = scanner_no_follow.scan_directory(&root);
-    assert!(scanned_no_follow.is_empty(), "Should not traverse symlink when follow_symlinks = false");
+    assert!(
+        scanned_no_follow.is_empty(),
+        "Should not traverse symlink when follow_symlinks = false"
+    );
 
     // With follow_symlinks = true: should traverse into LinkedAlbum and find 01 - OutsideTrack.flac
     let mut scanner = DirectoryScanner::new(true);
     let scanned = scanner.scan_directory(&root);
-    assert_eq!(scanned.len(), 1, "DirectoryScanner must traverse symlinked directories when follow_symlinks = true");
+    assert_eq!(
+        scanned.len(),
+        1,
+        "DirectoryScanner must traverse symlinked directories when follow_symlinks = true"
+    );
     assert_eq!(scanned[0].file_name().unwrap(), "01 - OutsideTrack.flac");
 
     #[cfg(windows)]
@@ -978,7 +1009,13 @@ async fn test_smb_and_webdav_ipv6_bracket_formatting() {
 
     // SMB with IPv6 host and default port 445
     let smb_uri = parse_remote_share_uri("smb://[fe80::1]:445/Music/").unwrap();
-    let smb_provider = SmbProvider::new(SmbConfig { uri: smb_uri, domain: None }, None);
+    let smb_provider = SmbProvider::new(
+        SmbConfig {
+            uri: smb_uri,
+            domain: None,
+        },
+        None,
+    );
     let track = TrackSource::new(
         "ver-1",
         ProviderKind::Smb,
@@ -995,15 +1032,27 @@ async fn test_smb_and_webdav_ipv6_bracket_formatting() {
 
     // SMB with IPv6 host and custom port 4455
     let smb_uri_port = parse_remote_share_uri("smb://[2001:db8::1]:4455/Music/").unwrap();
-    let smb_provider_port = SmbProvider::new(SmbConfig { uri: smb_uri_port, domain: None }, None);
+    let smb_provider_port = SmbProvider::new(
+        SmbConfig {
+            uri: smb_uri_port,
+            domain: None,
+        },
+        None,
+    );
     let smb_res_port = smb_provider_port.resolve_stream(&track).await.unwrap();
-    assert_eq!(smb_res_port.url_or_path, "smb://[2001:db8::1]:4455/Music/track.flac");
+    assert_eq!(
+        smb_res_port.url_or_path,
+        "smb://[2001:db8::1]:4455/Music/track.flac"
+    );
 
     // WebDAV with IPv6 host
     let dav_uri = parse_remote_share_uri("https://[fe80::1]:8443/music/").unwrap();
     let dav_provider = WebDavProvider::new(WebDavConfig { uri: dav_uri }, None);
     let dav_res = dav_provider.resolve_stream(&track).await.unwrap();
-    assert_eq!(dav_res.url_or_path, "https://[fe80::1]:8443/music/track.flac");
+    assert_eq!(
+        dav_res.url_or_path,
+        "https://[fe80::1]:8443/music/track.flac"
+    );
 }
 
 #[test]

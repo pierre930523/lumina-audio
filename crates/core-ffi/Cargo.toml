@@ -8,6 +8,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 core-audio = { path = "../core-audio" }
 core-db = { path = "../core-db" }
 core-providers = { path = "../core-providers" }
@@ -21,7 +22,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
     "Win32_System_Threading",

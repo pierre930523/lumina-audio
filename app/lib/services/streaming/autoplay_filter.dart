@@ -218,12 +218,61 @@ class EffectiveSeedPool {
 class AutoplayFilter {
   final RecentHistoryWindow recentHistory;
   final EffectiveSeedPool seedPool;
+  final bool Function(TrackMetadata candidate)? isCandidateBanned;
+  final Set<String> _bannedTrackFingerprints = <String>{};
+  final Set<String> _bannedArtistKeys = <String>{};
 
   AutoplayFilter({
     RecentHistoryWindow? recentHistory,
     EffectiveSeedPool? seedPool,
+    this.isCandidateBanned,
   })  : recentHistory = recentHistory ?? RecentHistoryWindow(),
         seedPool = seedPool ?? EffectiveSeedPool();
+
+  /// Registers or clears a banned track (`preference == -1`) so future
+  /// autoplay refills never re-introduce it.
+  void setBannedTrack(TrackMetadata track, bool banned) {
+    final keys = _fingerprintsForTrack(track);
+    if (banned) {
+      _bannedTrackFingerprints.addAll(keys);
+    } else {
+      _bannedTrackFingerprints.removeAll(keys);
+    }
+  }
+
+  /// Registers or clears a banned artist (`preference == -1`).
+  void setBannedArtist(String artist, bool banned) {
+    final fullKey = TrackMatcher.normalizeArtistForMatching(artist);
+    final primaryKey = TrackMatcher.normalizeArtistForMatching(
+      TrackMatcher.extractPrimaryArtist(artist),
+    );
+    for (final key in <String>{fullKey, primaryKey}) {
+      if (key.isEmpty) continue;
+      if (banned) {
+        _bannedArtistKeys.add(key);
+      } else {
+        _bannedArtistKeys.remove(key);
+      }
+    }
+  }
+
+  /// Returns `true` if [candidate] or its primary artist is banned.
+  bool isTrackBanned(TrackMetadata candidate) {
+    if (isCandidateBanned?.call(candidate) == true) return true;
+    if (_bannedTrackFingerprints.isNotEmpty &&
+        _fingerprintsForTrack(candidate).any(_bannedTrackFingerprints.contains)) {
+      return true;
+    }
+    if (_bannedArtistKeys.isNotEmpty) {
+      final fullKey = TrackMatcher.normalizeArtistForMatching(candidate.artist);
+      final primaryKey = _normalizedPrimaryArtistOf(candidate);
+      if ((fullKey.isNotEmpty && _bannedArtistKeys.contains(fullKey)) ||
+          (primaryKey.isNotEmpty && _bannedArtistKeys.contains(primaryKey))) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   static final RegExp _bracketLiveRegex = RegExp(
     r'[\(\[\{【][^)\]}】]*\blive\b[^)\]}】]*[\)\]}】]',
@@ -322,6 +371,10 @@ class AutoplayFilter {
 
     final eligible = <TrackMetadata>[];
     for (final candidate in candidates) {
+      if (isTrackBanned(candidate)) {
+        continue;
+      }
+
       final candidateKeys = _fingerprintsForTrack(candidate);
       if (candidateKeys.any(seenKeys.contains)) {
         continue;

@@ -1,7 +1,12 @@
 use std::f64::consts::PI;
 
 /// Generates a sine wave signal: s[n] = A * sin(2*pi * f/fs * n).
-pub fn generate_sine(sample_rate: u32, freq_hz: f64, num_frames: usize, amplitude: f64) -> Vec<f64> {
+pub fn generate_sine(
+    sample_rate: u32,
+    freq_hz: f64,
+    num_frames: usize,
+    amplitude: f64,
+) -> Vec<f64> {
     let mut out = Vec::with_capacity(num_frames);
     let fs = sample_rate as f64;
     for n in 0..num_frames {
@@ -22,7 +27,12 @@ pub fn generate_impulse(num_frames: usize, impulse_index: usize) -> Vec<f64> {
 }
 
 /// Generates a band-limited or full square wave: s[n] = A * sgn(sin(2*pi * f/fs * n)).
-pub fn generate_square(sample_rate: u32, freq_hz: f64, num_frames: usize, amplitude: f64) -> Vec<f64> {
+pub fn generate_square(
+    sample_rate: u32,
+    freq_hz: f64,
+    num_frames: usize,
+    amplitude: f64,
+) -> Vec<f64> {
     let mut out = Vec::with_capacity(num_frames);
     let fs = sample_rate as f64;
     for n in 0..num_frames {

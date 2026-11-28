@@ -3,15 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use core_db::IngestionRepository;
+use core_db::{IngestionRepository, LibraryRepository};
 use core_types::{ScanLifecycleState, ScanProgressEvent, WatchMode, WatchedRoot};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::ignore::should_ignore_relative_path;
-use super::pipeline::IngestionPipeline;
+use super::pipeline::{IngestionPipeline, remove_invalidated_artwork_files};
 use super::scanner::normalize_path;
 use crate::error::ProviderError;
 use crate::library::db_err;
@@ -20,9 +20,11 @@ struct ActiveNativeWatch {
     _watcher: RecommendedWatcher,
 }
 
+#[derive(Clone)]
 struct ManagedRootEntry {
     root: WatchedRoot,
     last_polled: Option<Instant>,
+    last_checked: Option<Instant>,
     was_online: bool,
 }
 
@@ -48,7 +50,6 @@ impl StorageWatcherManager {
         let native_watchers: Arc<RwLock<HashMap<String, ActiveNativeWatch>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::unbounded_channel::<(String, Vec<PathBuf>)>();
-
         let debounce_task = spawn_debounce_loop(
             pipeline.clone(),
             roots.clone(),
@@ -56,7 +57,6 @@ impl StorageWatcherManager {
             Duration::from_millis(debounce_ms),
         );
         let poll_task = spawn_polling_loop(pipeline.clone(), roots.clone());
-
         Self {
             pipeline,
             debounce_ms,
@@ -91,9 +91,7 @@ impl StorageWatcherManager {
         let mut count = 0usize;
         for r in persisted {
             let path = PathBuf::from(&r.root_path);
-            let _ = self
-                .attach_root_entry(r.clone(), &path)
-                .await;
+            let _ = self.attach_root_entry(r.clone(), &path).await;
             count += 1;
         }
         Ok(count)
@@ -109,22 +107,25 @@ impl StorageWatcherManager {
         poll_interval_sec: u32,
     ) -> Result<WatchedRoot, ProviderError> {
         let raw_str = root_path.to_string_lossy().to_string();
-        let effective_mode = if watch_mode == WatchMode::NativeOs && is_network_or_unc_path(&raw_str)
-        {
-            WatchMode::NasPolling
-        } else {
-            watch_mode
-        };
+        let effective_mode =
+            if watch_mode == WatchMode::NativeOs && is_network_or_unc_path(&raw_str) {
+                WatchMode::NasPolling
+            } else {
+                watch_mode
+            };
         let norm_root = normalize_path(root_path);
-        let stored = IngestionRepository::upsert_watched_root(
-            self.pipeline.pool(),
-            provider_id,
-            &norm_root,
-            effective_mode,
-            poll_interval_sec.max(10),
-        )
-        .await
-        .map_err(db_err)?;
+        let stored = {
+            let _wg = self.pipeline.write_coordinator().write_lock().await;
+            IngestionRepository::upsert_watched_root(
+                self.pipeline.pool(),
+                provider_id,
+                &norm_root,
+                effective_mode,
+                poll_interval_sec.max(10),
+            )
+            .await
+            .map_err(db_err)?
+        };
 
         self.attach_root_entry(stored.clone(), root_path).await?;
         Ok(stored)
@@ -136,47 +137,60 @@ impl StorageWatcherManager {
         fs_path: &Path,
     ) -> Result<(), ProviderError> {
         let key = normalize_path(&stored.root_path);
-        let online = fs_path.exists() && fs_path.is_dir();
+        let check_path = fs_path.to_path_buf();
+        let online =
+            tokio::task::spawn_blocking(move || check_path.exists() && check_path.is_dir())
+                .await
+                .unwrap_or(false);
 
         if stored.watch_mode == WatchMode::NativeOs && online {
             let tx = self.event_tx.clone();
             let root_key = key.clone();
             let watch_root = fs_path.to_path_buf();
-            let watcher_res = notify::recommended_watcher(move |res: notify::Result<Event>| {
-                if let Ok(ev) = res {
-                    let filtered: Vec<PathBuf> = ev
-                        .paths
-                        .into_iter()
-                        .filter(|p| !should_ignore_relative_path(p, &watch_root))
-                        .collect();
-                    if !filtered.is_empty() {
-                        let _ = tx.send((root_key.clone(), filtered));
-                    }
-                }
-            });
+            let watch_target = fs_path.to_path_buf();
+            let attach_res = tokio::task::spawn_blocking(move || {
+                let mut watcher =
+                    notify::recommended_watcher(move |res: notify::Result<Event>| {
+                        if let Ok(ev) = res {
+                            let filtered: Vec<PathBuf> = ev
+                                .paths
+                                .into_iter()
+                                .filter(|p| !should_ignore_relative_path(p, &watch_root))
+                                .collect();
+                            if !filtered.is_empty() {
+                                let _ = tx.send((root_key.clone(), filtered));
+                            }
+                        }
+                    })?;
+                watcher.watch(&watch_target, RecursiveMode::Recursive)?;
+                Ok::<RecommendedWatcher, notify::Error>(watcher)
+            })
+            .await;
 
-            match watcher_res {
-                Ok(mut watcher) => {
-                    if let Err(e) = watcher.watch(fs_path, RecursiveMode::Recursive) {
-                        warn!(
-                            "Failed to attach native watcher to '{}', falling back to polling: {e}",
-                            fs_path.display()
-                        );
-                    } else {
-                        self.native_watchers.write().await.insert(
-                            key.clone(),
-                            ActiveNativeWatch { _watcher: watcher },
-                        );
-                        let _ = self.pipeline.progress_sender().send(ScanProgressEvent {
-                            scan_id: String::new(),
-                            root_path: stored.root_path.clone(),
-                            state: ScanLifecycleState::Watching,
-                            ..Default::default()
-                        });
-                    }
+            match attach_res {
+                Ok(Ok(watcher)) => {
+                    self.native_watchers
+                        .write()
+                        .await
+                        .insert(key.clone(), ActiveNativeWatch { _watcher: watcher });
+                    let _ = self.pipeline.progress_sender().send(ScanProgressEvent {
+                        scan_id: String::new(),
+                        root_path: stored.root_path.clone(),
+                        state: ScanLifecycleState::Watching,
+                        ..Default::default()
+                    });
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "Failed to attach native watcher to '{}', falling back to polling: {e}",
+                        fs_path.display()
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to create OS watcher for '{}': {e}", fs_path.display());
+                    warn!(
+                        "Native watcher attach worker panicked for '{}': {e}",
+                        fs_path.display()
+                    );
                 }
             }
         }
@@ -186,32 +200,81 @@ impl StorageWatcherManager {
             ManagedRootEntry {
                 root: stored,
                 last_polled: None,
+                last_checked: Some(Instant::now()),
                 was_online: online,
             },
         );
         Ok(())
     }
 
+    /// Removes a watched root, stops its watcher, cleans up any local tracks under that root,
+    /// and unconditionally runs orphan cleanup (`album_versions`, `canonical_albums`,
+    /// `canonical_tracks`, `artists`, stale `search_fts`).
     pub async fn remove_root(&self, id_or_path: &str) -> Result<bool, ProviderError> {
-        let key_norm = normalize_path(id_or_path);
+        let trimmed = id_or_path.trim();
+        let key_norm = normalize_path(trimmed);
+
+        let mut target_root_info: Option<(String, String)> = None;
         {
             let mut roots = self.roots.write().await;
             let matched_key = roots
                 .iter()
                 .find(|(k, e)| {
-                    e.root.id == id_or_path.trim()
-                        || *k == &key_norm
-                        || e.root.root_path == id_or_path.trim()
+                    e.root.id == trimmed || **k == key_norm || e.root.root_path == trimmed
                 })
                 .map(|(k, _)| k.clone());
             if let Some(k) = matched_key {
-                roots.remove(&k);
+                if let Some(entry) = roots.remove(&k) {
+                    target_root_info =
+                        Some((entry.root.root_path.clone(), entry.root.provider_id.clone()));
+                }
                 self.native_watchers.write().await.remove(&k);
             }
         }
-        IngestionRepository::remove_watched_root(self.pipeline.pool(), id_or_path)
-            .await
-            .map_err(db_err)
+
+        if target_root_info.is_none() {
+            if let Ok(persisted) =
+                IngestionRepository::list_watched_roots(self.pipeline.pool()).await
+            {
+                if let Some(r) = persisted.into_iter().find(|r| {
+                    r.id == trimmed
+                        || normalize_path(&r.root_path) == key_norm
+                        || r.root_path == trimmed
+                }) {
+                    target_root_info = Some((r.root_path, r.provider_id));
+                }
+            }
+        }
+
+        let mut invalidated_artwork: Vec<String> = Vec::new();
+        let removed = {
+            let _wg = self.pipeline.write_coordinator().write_lock().await;
+            let removed = IngestionRepository::remove_watched_root(self.pipeline.pool(), trimmed)
+                .await
+                .map_err(db_err)?;
+
+            if let Some((ref root_path, ref provider_id)) = target_root_info {
+                if provider_id.eq_ignore_ascii_case("local") {
+                    let prune_rep = LibraryRepository::prune_missing_local_tracks(
+                        self.pipeline.pool(),
+                        Some(root_path),
+                        &HashSet::new(),
+                    )
+                    .await
+                    .map_err(db_err)?;
+                    invalidated_artwork.extend(prune_rep.invalidated_artwork_paths);
+                }
+            }
+            removed
+        };
+
+        if let Some((_, provider_id)) = target_root_info {
+            self.pipeline
+                .prune_orphans_under_write_lock(Some(&provider_id))
+                .await?;
+        }
+        remove_invalidated_artwork_files(invalidated_artwork).await;
+        Ok(removed)
     }
 
     pub async fn list_roots(&self) -> Result<Vec<WatchedRoot>, ProviderError> {
@@ -242,8 +305,15 @@ impl StorageWatcherManager {
 
         let result = self.pipeline.scan_root(&target_path, &provider_id).await;
         if result.is_ok() {
-            if let Some(entry) = self.roots.write().await.get_mut(&normalize_path(&target_path)) {
-                entry.last_polled = Some(Instant::now());
+            let now = Instant::now();
+            if let Some(entry) = self
+                .roots
+                .write()
+                .await
+                .get_mut(&normalize_path(&target_path))
+            {
+                entry.last_polled = Some(now);
+                entry.last_checked = Some(now);
                 entry.was_online = true;
             }
         }
@@ -331,6 +401,11 @@ fn spawn_debounce_loop(
     })
 }
 
+async fn set_root_online_locked(pipeline: &IngestionPipeline, root_id: &str, is_online: bool) {
+    let _wg = pipeline.write_coordinator().write_lock().await;
+    let _ = IngestionRepository::set_root_online_status(pipeline.pool(), root_id, is_online).await;
+}
+
 fn spawn_polling_loop(
     pipeline: IngestionPipeline,
     roots: Arc<RwLock<HashMap<String, ManagedRootEntry>>>,
@@ -341,63 +416,64 @@ fn spawn_polling_loop(
 
         loop {
             interval.tick().await;
-            let snapshot: Vec<(String, WatchedRoot, Option<Instant>, bool)> = {
-                let guard = roots.read().await;
-                guard
-                    .iter()
-                    .map(|(k, e)| (k.clone(), e.root.clone(), e.last_polled, e.was_online))
-                    .collect()
-            };
+            let snapshot: Vec<(String, ManagedRootEntry)> = roots
+                .read()
+                .await
+                .iter()
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect();
 
             let now = Instant::now();
-            for (key, root, last_polled, was_online) in snapshot {
+            for (key, entry) in snapshot {
+                let root = entry.root;
                 if root.watch_mode == WatchMode::Manual {
+                    continue;
+                }
+                let check_interval = Duration::from_secs(u64::from(root.poll_interval_sec.max(1)));
+                let check_due = entry
+                    .last_checked
+                    .is_none_or(|t| now.duration_since(t) >= check_interval);
+                let poll_due = root.watch_mode == WatchMode::NasPolling
+                    && entry
+                        .last_polled
+                        .is_none_or(|t| now.duration_since(t) >= check_interval);
+                if !check_due && !poll_due {
                     continue;
                 }
 
                 let path = PathBuf::from(&root.root_path);
                 let path_check = path.clone();
-                let is_online = tokio::task::spawn_blocking(move || {
-                    path_check.exists() && path_check.is_dir()
-                })
-                .await
-                .unwrap_or(false);
+                let is_online =
+                    tokio::task::spawn_blocking(move || path_check.exists() && path_check.is_dir())
+                        .await
+                        .unwrap_or(false);
+                if let Some(e) = roots.write().await.get_mut(&key) {
+                    e.last_checked = Some(Instant::now());
+                }
 
                 if !is_online {
-                    if was_online {
-                        let _ = IngestionRepository::set_root_online_status(
-                            pipeline.pool(),
-                            &root.id,
-                            false,
-                        )
-                        .await;
-                        if let Some(entry) = roots.write().await.get_mut(&key) {
-                            entry.was_online = false;
+                    if entry.was_online {
+                        set_root_online_locked(&pipeline, &root.id, false).await;
+                        if let Some(e) = roots.write().await.get_mut(&key) {
+                            e.was_online = false;
                         }
                     }
                     continue;
                 }
 
-                let reconnected = !was_online;
-                let poll_due = root.watch_mode == WatchMode::NasPolling
-                    && last_polled.is_none_or(|t| {
-                        now.duration_since(t) >= Duration::from_secs(u64::from(root.poll_interval_sec.max(1)))
-                    });
-
+                let reconnected = !entry.was_online;
                 if reconnected || poll_due {
                     if reconnected {
-                        info!("Watched root '{}' reconnected; triggering incremental sync", root.root_path);
-                        let _ = IngestionRepository::set_root_online_status(
-                            pipeline.pool(),
-                            &root.id,
-                            true,
-                        )
-                        .await;
+                        info!(
+                            "Watched root '{}' reconnected; triggering sync",
+                            root.root_path
+                        );
+                        set_root_online_locked(&pipeline, &root.id, true).await;
                     }
                     let _ = pipeline.scan_root(&path, &root.provider_id).await;
-                    if let Some(entry) = roots.write().await.get_mut(&key) {
-                        entry.was_online = true;
-                        entry.last_polled = Some(Instant::now());
+                    if let Some(e) = roots.write().await.get_mut(&key) {
+                        e.was_online = true;
+                        e.last_polled = Some(Instant::now());
                     }
                 }
             }

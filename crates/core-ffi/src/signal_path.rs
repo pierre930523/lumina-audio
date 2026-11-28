@@ -1,9 +1,9 @@
 use crate::engine::get_engine;
 use crate::error::{
-    catch_unwind_ffi, set_last_error, string_to_c_char, LUMINA_ERR_GENERAL,
-    LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    LUMINA_ERR_GENERAL, LUMINA_ERR_NOT_INITIALIZED, LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    catch_unwind_ffi, set_last_error, string_to_c_char,
 };
-use core_audio::{build_signal_path, parse_autoeq_txt, DspPipelineConfig, PeqBand};
+use core_audio::{DspPipelineConfig, PeqBand, build_signal_path, parse_autoeq_txt};
 use core_types::{
     AudioCodec, AudioFormat, DspPipelineConfig as SharedDspConfig, OutputBackendKind, SignalPath,
     SignalQuality,
@@ -150,7 +150,11 @@ pub extern "C" fn lumina_signal_path_inspect(
         };
 
         let dev_name = if !device_name.is_null() {
-            unsafe { CStr::from_ptr(device_name).to_str().unwrap_or("Default DAC") }
+            unsafe {
+                CStr::from_ptr(device_name)
+                    .to_str()
+                    .unwrap_or("Default DAC")
+            }
         } else {
             "Default DAC"
         };
@@ -270,6 +274,9 @@ mod tests {
 
     #[test]
     fn test_idle_signal_path_queries_real_player_not_hardcoded_asio_dummy() {
+        let _guard = crate::streaming_bridge::TEST_BRIDGE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         lumina_shutdown();
         assert_eq!(lumina_init_headless(), 0);
 

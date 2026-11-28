@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
 import 'package:lumina_app/models/audio_format.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/ffi_audio_service.dart';
@@ -19,6 +20,7 @@ import 'package:lumina_app/services/streaming/providers/youtube_music_provider.d
 import 'package:lumina_app/services/streaming/secure_credential_store.dart';
 import 'package:lumina_app/services/streaming/streaming_manager.dart';
 import 'package:lumina_app/services/streaming/streaming_provider.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/albums/album_detail_page.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:lumina_app/ui/theme/lumina_tokens.dart';
@@ -163,7 +165,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // 2. Albums Grid, Canonical Album detail & Versions switcher
-      await tester.tap(find.byKey(const Key('nav_tab_albums')));
+      await tester.tap(find.byKey(const Key('capsule_nav_albums')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('album_grid_view')), findsOneWidget);
 
@@ -436,12 +438,17 @@ void main() {
 
       final service = MockAudioService();
       addTearDown(service.dispose);
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
+      addTearDown(scaleCtrl.dispose);
 
       await tester.pumpWidget(
         MaterialApp(
           theme: LuminaTokens.buildDarkTheme(),
           home: HomeScreen(
             audioService: service,
+            uiScaleController: scaleCtrl,
             streamingManager: streamingManager,
           ),
         ),

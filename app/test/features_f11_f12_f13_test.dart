@@ -267,6 +267,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      expect(find.byKey(const Key('btn_play_album')), findsOneWidget);
+      expect(find.byKey(const Key('btn_add_album_to_queue')), findsOneWidget);
+      expect(find.byKey(const Key('btn_album_more_options')), findsOneWidget);
+      expect(find.byKey(const Key('btn_set_album_cover')), findsNothing);
+      expect(find.byKey(const Key('btn_clear_album_cover')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('btn_album_more_options')));
+      await tester.pumpAndSettle();
+
       expect(find.byKey(const Key('btn_set_album_cover')), findsOneWidget);
       expect(find.byKey(const Key('btn_clear_album_cover')), findsOneWidget);
 

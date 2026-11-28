@@ -666,7 +666,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+        expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
 
         // Ctrl+F -> expands top search and focuses top_search_input.
         await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
@@ -773,7 +773,7 @@ void main() {
         await tester.tap(find.byKey(const Key('btn_top_search_clear')));
         await tester.pumpAndSettle();
         expect(nav.current.tab, HomeTab.home);
-        expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+        expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
         expect(
           tester.widget<TextField>(find.byKey(const Key('top_search_input'))).controller!.text,
           isEmpty,

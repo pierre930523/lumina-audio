@@ -298,8 +298,8 @@ fn test_spsc_clear_empties_buffer_across_wraparound() {
 
 #[test]
 fn test_spsc_concurrent_seek_epoch_stress() {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     const MIN_ELEMENTS: usize = 600_000;
     const TARGET_FLUSHES: usize = 600;
@@ -433,8 +433,8 @@ fn test_spsc_concurrent_seek_epoch_stress() {
 
 #[test]
 fn test_spsc_clear_races_sync_epoch_and_push_slice() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     const CAPACITY: usize = 1024;

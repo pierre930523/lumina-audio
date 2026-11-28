@@ -1,6 +1,6 @@
 //! OS Keyring implementation using the `keyring` crate.
 
-use super::{validate_service_and_key, CredentialError, CredentialStore};
+use super::{CredentialError, CredentialStore, validate_service_and_key};
 use async_trait::async_trait;
 
 #[derive(Debug, Default, Clone)]
@@ -14,7 +14,12 @@ impl KeyringStore {
 
 #[async_trait]
 impl CredentialStore for KeyringStore {
-    async fn set_secret(&self, service: &str, key: &str, secret: &str) -> Result<(), CredentialError> {
+    async fn set_secret(
+        &self,
+        service: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
         validate_service_and_key(service, key)?;
         let service = service.to_string();
         let key = key.to_string();
@@ -32,7 +37,11 @@ impl CredentialStore for KeyringStore {
         .map_err(|e| CredentialError::System(format!("Join error: {e}")))?
     }
 
-    async fn get_secret(&self, service: &str, key: &str) -> Result<Option<String>, CredentialError> {
+    async fn get_secret(
+        &self,
+        service: &str,
+        key: &str,
+    ) -> Result<Option<String>, CredentialError> {
         validate_service_and_key(service, key)?;
         let service = service.to_string();
         let key = key.to_string();

@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 import 'podcast_models.dart';
+import 'studio/focus_models.dart';
 
 /// Top-level workspace destinations inside [HomeScreen].
 enum HomeTab {
@@ -10,6 +13,9 @@ enum HomeTab {
   albumDetail,
   credits,
   smartPlaylists,
+  listenLater,
+  tags,
+  folders,
   artists,
   artistDetail,
   audiobooks,
@@ -48,6 +54,12 @@ class NavEntry {
   final String? creditArtistId;
   final String? podcastShowId;
   final PodcastShow? podcastShow;
+  final String? tagId;
+  final String? folderId;
+  final String? focusQueryJson;
+  final String? viewStateJson;
+  final String? activeBookmarkId;
+  final String? editingSmartPlaylistId;
   final String? entryId;
 
   const NavEntry({
@@ -60,6 +72,12 @@ class NavEntry {
     this.creditArtistId,
     this.podcastShowId,
     this.podcastShow,
+    this.tagId,
+    this.folderId,
+    this.focusQueryJson,
+    this.viewStateJson,
+    this.activeBookmarkId,
+    this.editingSmartPlaylistId,
     this.entryId,
   });
 
@@ -113,11 +131,65 @@ class NavEntry {
         entryId: entryId,
       );
 
+  factory NavEntry.listenLater({String? entryId}) =>
+      NavEntry(tab: HomeTab.listenLater, entryId: entryId);
+
   factory NavEntry.streaming(String kind, {String? entryId}) => NavEntry(
     tab: HomeTab.streamingProvider,
     streamingKind: kind,
     entryId: entryId,
   );
+
+  factory NavEntry.tags({String? tagId, String? entryId}) => NavEntry(
+    tab: HomeTab.tags,
+    tagId: tagId,
+    entryId: entryId,
+  );
+
+  factory NavEntry.folders({String? folderId, String? entryId}) => NavEntry(
+    tab: HomeTab.folders,
+    folderId: folderId,
+    entryId: entryId,
+  );
+
+  factory NavEntry.focus(
+    FocusQuery query, {
+    String? viewStateJson,
+    String? activeBookmarkId,
+    String? editingSmartPlaylistId,
+    String? entryId,
+  }) => NavEntry(
+    tab: query.entity == FocusEntity.tracks ? HomeTab.library : HomeTab.albums,
+    focusQueryJson: jsonEncode(query.toJson()),
+    viewStateJson: viewStateJson,
+    activeBookmarkId: activeBookmarkId,
+    editingSmartPlaylistId: editingSmartPlaylistId,
+    entryId: entryId,
+  );
+
+  FocusQuery? get parsedFocusQuery {
+    final raw = focusQueryJson?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return FocusQuery.fromJson(Map<String, dynamic>.from(decoded));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Map<String, dynamic>? get parsedViewState {
+    final raw = viewStateJson?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+    return null;
+  }
 
   String get normalizedArtistKey =>
       (artistKey != null && artistKey!.trim().isNotEmpty)
@@ -132,6 +204,11 @@ class NavEntry {
     streamingKind ?? '',
     creditArtistId ?? '',
     podcastShowId ?? '',
+    tagId ?? '',
+    folderId ?? '',
+    focusQueryJson ?? '',
+    viewStateJson ?? '',
+    editingSmartPlaylistId ?? '',
   ].join('|');
 
   String get effectiveId => entryId ?? routeKey;
@@ -148,6 +225,16 @@ class NavEntry {
     String? creditArtistId,
     String? podcastShowId,
     PodcastShow? podcastShow,
+    String? tagId,
+    String? folderId,
+    String? focusQueryJson,
+    bool clearFocusQueryJson = false,
+    String? viewStateJson,
+    bool clearViewStateJson = false,
+    String? activeBookmarkId,
+    bool clearActiveBookmarkId = false,
+    String? editingSmartPlaylistId,
+    bool clearEditingSmartPlaylistId = false,
     String? entryId,
   }) {
     return NavEntry(
@@ -160,6 +247,20 @@ class NavEntry {
       creditArtistId: creditArtistId ?? this.creditArtistId,
       podcastShowId: podcastShowId ?? this.podcastShowId,
       podcastShow: podcastShow ?? this.podcastShow,
+      tagId: tagId ?? this.tagId,
+      folderId: folderId ?? this.folderId,
+      focusQueryJson: clearFocusQueryJson
+          ? null
+          : (focusQueryJson ?? this.focusQueryJson),
+      viewStateJson: clearViewStateJson
+          ? null
+          : (viewStateJson ?? this.viewStateJson),
+      activeBookmarkId: clearActiveBookmarkId
+          ? null
+          : (activeBookmarkId ?? this.activeBookmarkId),
+      editingSmartPlaylistId: clearEditingSmartPlaylistId
+          ? null
+          : (editingSmartPlaylistId ?? this.editingSmartPlaylistId),
       entryId: entryId ?? this.entryId,
     );
   }
@@ -178,6 +279,12 @@ class NavEntry {
           creditArtistId == other.creditArtistId &&
           podcastShowId == other.podcastShowId &&
           podcastShow == other.podcastShow &&
+          tagId == other.tagId &&
+          folderId == other.folderId &&
+          focusQueryJson == other.focusQueryJson &&
+          viewStateJson == other.viewStateJson &&
+          activeBookmarkId == other.activeBookmarkId &&
+          editingSmartPlaylistId == other.editingSmartPlaylistId &&
           entryId == other.entryId;
 
   @override
@@ -191,6 +298,12 @@ class NavEntry {
     creditArtistId,
     podcastShowId,
     podcastShow,
+    tagId,
+    folderId,
+    focusQueryJson,
+    viewStateJson,
+    activeBookmarkId,
+    editingSmartPlaylistId,
     entryId,
   );
 

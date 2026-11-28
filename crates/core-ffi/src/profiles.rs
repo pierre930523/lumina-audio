@@ -1,9 +1,9 @@
-use crate::engine::{get_engine, EngineState};
+use crate::engine::{EngineState, get_engine};
 use crate::error::{
-    catch_unwind_ffi, set_last_error, string_to_c_char, LUMINA_ERR_GENERAL,
-    LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    LUMINA_ERR_GENERAL, LUMINA_ERR_NULL_POINTER, LUMINA_OK, catch_unwind_ffi, set_last_error,
+    string_to_c_char,
 };
-use core_db::{open_test_database, ProfileRepository, SqlitePool};
+use core_db::{ProfileRepository, SqlitePool, open_test_database};
 use core_types::Profile;
 use serde::Deserialize;
 use std::ffi::CStr;
@@ -181,11 +181,7 @@ pub extern "C" fn lumina_profile_get_active() -> *mut c_char {
         let engine = get_engine();
         let pool = ensure_db_pool(&engine)?;
 
-        let active_id = engine
-            .active_profile_id
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let active_id = engine.active_profile_id.read().ok().and_then(|g| g.clone());
         let profile = if let Some(ref aid) = active_id {
             engine
                 .runtime

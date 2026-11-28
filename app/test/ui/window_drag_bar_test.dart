@@ -1,7 +1,9 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/services/desktop_window_controller.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/common/desktop_window_caption.dart';
 import 'package:lumina_app/ui/common/window_drag_bar.dart';
 import 'package:lumina_app/ui/home_screen.dart';
@@ -240,10 +242,17 @@ void main() {
 
       final service = MockAudioService();
       addTearDown(service.dispose);
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
+      addTearDown(scaleCtrl.dispose);
 
       await tester.pumpWidget(
         MaterialApp(
-          home: HomeScreen(audioService: service),
+          home: HomeScreen(
+            audioService: service,
+            uiScaleController: scaleCtrl,
+          ),
         ),
       );
       await tester.pumpAndSettle();

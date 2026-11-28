@@ -6,12 +6,17 @@ import '../../models/streaming_provider_meta.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/listen_later_controller.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../../services/unified_search_controller.dart';
 import '../artwork/album_artwork_view.dart';
+import '../common/track_context_menu.dart';
 import '../common/track_hover_prefetch.dart';
 import '../theme/lumina_tokens.dart';
 import '../theme/smooth_scroll.dart';
+
+part 'unified_search_filter_bar.dart';
+part 'unified_search_result_cards.dart';
 
 /// Unified search results workspace displaying instant local library matches
 /// alongside non-blocking parallel results from all connected streaming
@@ -21,6 +26,7 @@ class UnifiedSearchResultsView extends StatefulWidget {
   final AudioService audioService;
   final LibraryIndexCache libraryCache;
   final StreamingManager streamingManager;
+  final ListenLaterController? listenLaterController;
   final String? activeTrackId;
   final void Function(String albumId) onOpenLocalAlbum;
   final void Function(StreamingAlbum album) onOpenStreamingAlbum;
@@ -36,6 +42,7 @@ class UnifiedSearchResultsView extends StatefulWidget {
     required this.audioService,
     required this.libraryCache,
     required this.streamingManager,
+    this.listenLaterController,
     this.activeTrackId,
     required this.onOpenLocalAlbum,
     required this.onOpenStreamingAlbum,
@@ -49,11 +56,13 @@ class UnifiedSearchResultsView extends StatefulWidget {
 }
 
 class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
-  final ScrollController _scrollController = ScrollController();
+  final GlideScrollController _scrollController = GlideScrollController();
+  final GlideScrollController _filterScrollController = GlideScrollController();
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _filterScrollController.dispose();
     super.dispose();
   }
 
@@ -160,145 +169,6 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
             ),
           ),
       ],
-    );
-  }
-
-  Widget _buildSourceFilterBar(UnifiedSearchController ctrl) {
-    final buckets = ctrl.streamingBuckets;
-    final providerKinds = <String>[
-      ...ctrl.orderedStreamingKinds,
-      for (final p in widget.streamingManager.browsableProviders)
-        if (!buckets.containsKey(p.kind)) p.kind,
-    ];
-
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          _buildSourceChip(
-            chipKey: const Key('search_source_all'),
-            selected: ctrl.selectedSource == 'all',
-            onTap: () => ctrl.selectSource('all'),
-            leading: const Icon(
-              Icons.apps_rounded,
-              size: 15,
-              color: LuminaTokens.glassTextPrimary,
-            ),
-            label: '全部 (${ctrl.totalResultCount})',
-            isLoading: ctrl.isAnyLoading,
-            hasError: false,
-          ),
-          const SizedBox(width: LuminaTokens.spaceXs),
-          _buildSourceChip(
-            chipKey: const Key('search_source_local'),
-            selected: ctrl.selectedSource == 'local',
-            onTap: () => ctrl.selectSource('local'),
-            leading: const Icon(
-              Icons.library_music_rounded,
-              size: 15,
-              color: LuminaTokens.textSecondary,
-            ),
-            label: '本機曲庫 (${ctrl.localTotalCount})',
-            isLoading: ctrl.isSearchingLocal,
-            hasError: false,
-          ),
-          for (final kind in providerKinds)
-            if (StreamingProviderMeta.byKind(kind) case final meta?) ...[
-              const SizedBox(width: LuminaTokens.spaceXs),
-              _buildProviderFilterChip(
-                meta: meta,
-                bucket: buckets[kind],
-                selected: ctrl.selectedSource == kind,
-                onTap: () => ctrl.selectSource(kind),
-              ),
-            ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProviderFilterChip({
-    required StreamingProviderMeta meta,
-    required ProviderSearchBucket? bucket,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    final isLoading = bucket?.isLoading ?? false;
-    final hasError = bucket?.hasError ?? false;
-    final count = bucket?.totalCount ?? 0;
-    final label = (isLoading && count == 0)
-        ? meta.name
-        : '${meta.name} ($count)';
-
-    return _buildSourceChip(
-      chipKey: Key('search_source_${meta.kind}'),
-      selected: selected,
-      onTap: bucket != null ? onTap : null,
-      leading: meta.buildBadge(boxSize: 16, borderRadius: 4),
-      label: label,
-      isLoading: isLoading,
-      hasError: hasError,
-    );
-  }
-
-  Widget _buildSourceChip({
-    required Key chipKey,
-    required bool selected,
-    required VoidCallback? onTap,
-    required Widget leading,
-    required String label,
-    required bool isLoading,
-    required bool hasError,
-  }) {
-    return ChoiceChip(
-      key: chipKey,
-      selected: selected,
-      showCheckmark: false,
-      surfaceTintColor: Colors.transparent,
-      onSelected: onTap != null ? (_) => onTap() : null,
-      backgroundColor: LuminaTokens.glassPillBg,
-      selectedColor: LuminaTokens.glassSegmentSelectedBg,
-      side: BorderSide(
-        color: selected
-            ? LuminaTokens.glassSegmentSelectedBorder
-            : (hasError
-                  ? LuminaTokens.statusWarning
-                  : LuminaTokens.glassPillBorder),
-      ),
-      avatar: leading,
-      label: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: selected
-                  ? Colors.white
-                  : LuminaTokens.glassTextSecondary,
-              fontSize: 12.5,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-            ),
-          ),
-          if (isLoading) ...[
-            const SizedBox(width: 6),
-            const SizedBox(
-              width: 11,
-              height: 11,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.8,
-                color: LuminaTokens.glassTextPrimary,
-              ),
-            ),
-          ] else if (hasError) ...[
-            const SizedBox(width: 5),
-            const Icon(
-              Icons.error_outline_rounded,
-              size: 14,
-              color: LuminaTokens.statusWarning,
-            ),
-          ],
-        ],
-      ),
     );
   }
 
@@ -479,324 +349,6 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
     );
   }
 
-  Widget _buildTrackRow(SearchTrackMatch match) {
-    final track = match.track;
-    final isSelected = widget.activeTrackId == track.id;
-    final durationLabel = _formatDuration(track.duration);
-
-    return TrackHoverPrefetch(
-      track: track,
-      enabled: !match.isLocal,
-      child: Material(
-        color: isSelected ? LuminaTokens.glassNavActiveBg : Colors.transparent,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        child: InkWell(
-          key: Key('search_track_${match.sourceKind}_${track.id}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusSm),
-        hoverColor: LuminaTokens.glassRowHoverBg,
-        onTap: () {
-          if (match.isLocal) {
-            widget.audioService.play(track: track);
-          } else {
-            widget.onPlayStreamingTrack(
-              track,
-              queueContext: _streamingQueueFor(match.sourceKind),
-            );
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          child: Row(
-            children: [
-              AlbumArtworkView(
-                track: track,
-                size: 40,
-                borderRadius: BorderRadius.circular(6),
-                audioService: match.isLocal ? widget.audioService : null,
-                libraryCache: match.isLocal ? widget.libraryCache : null,
-                fullResolution: false,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      track.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: isSelected
-                            ? Colors.white
-                            : LuminaTokens.glassTextPrimary,
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      track.album.trim().isNotEmpty
-                          ? '${track.artist} · ${track.album}'
-                          : track.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: LuminaTokens.textMuted,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              _SourceBadge(sourceKind: match.sourceKind, size: 18),
-              if (MediaQuery.sizeOf(context).width >= 540) ...[
-                const SizedBox(width: 6),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 140),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: LuminaTokens.glassPillBg,
-                      borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusPill,
-                      ),
-                      border: Border.all(color: LuminaTokens.glassPillBorder),
-                    ),
-                    child: Text(
-                      track.format.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: LuminaTokens.textSecondary,
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-              if (durationLabel.isNotEmpty) ...[
-                const SizedBox(width: 8),
-                Text(
-                  durationLabel,
-                  style: const TextStyle(
-                    color: LuminaTokens.textMuted,
-                    fontSize: 12,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-      ),
-    );
-  }
-
-  Widget _buildAlbumCard(SearchAlbumMatch match) {
-    final artworkAlbum = match.localAlbum ??
-        CanonicalAlbumSummary(
-          id: 'streaming:${match.sourceKind}:${match.id}',
-          title: match.title,
-          artist: match.artist,
-          year: match.year,
-          availableProviders: <String>[match.sourceKind],
-          coverUrl: match.coverUrl,
-        );
-    final metaParts = <String>[
-      if (match.year != null) '${match.year}',
-      if (match.qualityLabel != null && match.qualityLabel!.trim().isNotEmpty)
-        match.qualityLabel!,
-    ];
-
-    return Material(
-      color: LuminaTokens.glassCardBg,
-      borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-      child: InkWell(
-        key: Key('search_album_${match.sourceKind}_${match.id}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-        hoverColor: LuminaTokens.glassRowHoverBg,
-        onTap: () {
-          if (match.localAlbum != null) {
-            widget.onOpenLocalAlbum(match.localAlbum!.id);
-          } else if (match.streamingAlbum != null) {
-            widget.onOpenStreamingAlbum(match.streamingAlbum!);
-          }
-        },
-        child: Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-            border: Border.all(color: LuminaTokens.glassCardBorder),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(
-                        LuminaTokens.radiusSm,
-                      ),
-                      child: AlbumArtworkView(
-                        album: artworkAlbum,
-                        size: 160,
-                        borderRadius: BorderRadius.circular(
-                          LuminaTokens.radiusSm,
-                        ),
-                        audioService:
-                            match.isLocal ? widget.audioService : null,
-                        libraryCache:
-                            match.isLocal ? widget.libraryCache : null,
-                        fullResolution: false,
-                      ),
-                    ),
-                    Positioned(
-                      top: 6,
-                      right: 6,
-                      child: _SourceBadge(sourceKind: match.sourceKind, size: 20),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                match.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: LuminaTokens.textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                match.artist,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: LuminaTokens.textSecondary,
-                  fontSize: 11.5,
-                ),
-              ),
-              if (metaParts.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Text(
-                  metaParts.join(' · '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: LuminaTokens.textMuted,
-                    fontSize: 10.5,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildArtistCard(SearchArtistMatch artist) {
-    final avatarAlbum = artist.representativeAlbum ??
-        (artist.coverUrl != null && artist.coverUrl!.trim().isNotEmpty
-            ? CanonicalAlbumSummary(
-                id: 'artist_art_${artist.name}',
-                title: artist.name,
-                artist: artist.name,
-                coverUrl: artist.coverUrl,
-              )
-            : null);
-    final isLocalArtist = artist.sourceKinds.contains('local');
-
-    return Material(
-      color: LuminaTokens.glassCardBg,
-      borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-      child: InkWell(
-        key: Key('search_artist_${artist.name}'),
-        borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-        hoverColor: LuminaTokens.glassRowHoverBg,
-        onTap: () => widget.onOpenArtist(artist.name),
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 160, maxWidth: 260),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(LuminaTokens.glassCardRadius),
-            border: Border.all(color: LuminaTokens.glassCardBorder),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AlbumArtworkView(
-                album: avatarAlbum,
-                track: artist.representativeTrack,
-                size: 36,
-                circular: true,
-                audioService: isLocalArtist ? widget.audioService : null,
-                libraryCache: isLocalArtist ? widget.libraryCache : null,
-                fullResolution: false,
-                placeholder: Container(
-                  width: 36,
-                  height: 36,
-                  decoration: const BoxDecoration(
-                    color: LuminaTokens.glassPillBg,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.person_rounded,
-                    size: 20,
-                    color: LuminaTokens.textSecondary,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      artist.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: LuminaTokens.textPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Wrap(
-                      spacing: 4,
-                      runSpacing: 4,
-                      children: [
-                        for (final kind in artist.sourceKinds)
-                          _SourceBadge(
-                            sourceKind: kind,
-                            size: 15,
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildCenteredMessage({
     required IconData icon,
     required String title,
@@ -829,59 +381,6 @@ class _UnifiedSearchResultsViewState extends State<UnifiedSearchResultsView> {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SourceBadge extends StatelessWidget {
-  final String sourceKind;
-  final double size;
-
-  const _SourceBadge({
-    required this.sourceKind,
-    this.size = 18,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (sourceKind == 'local') {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: LuminaTokens.glassPillBg,
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-          border: Border.all(color: LuminaTokens.glassPillBorder),
-        ),
-        child: const Text(
-          '本機',
-          style: TextStyle(
-            color: LuminaTokens.textSecondary,
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
-    }
-
-    final meta = StreamingProviderMeta.byKind(sourceKind);
-    if (meta != null) {
-      return meta.buildBadge(boxSize: size, borderRadius: 4);
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: LuminaTokens.glassPillBg,
-        borderRadius: BorderRadius.circular(LuminaTokens.radiusPill),
-        border: Border.all(color: LuminaTokens.glassPillBorder),
-      ),
-      child: Text(
-        sourceKind,
-        style: const TextStyle(
-          color: LuminaTokens.textSecondary,
-          fontSize: 10,
         ),
       ),
     );

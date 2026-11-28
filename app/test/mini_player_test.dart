@@ -114,9 +114,9 @@ void main() {
         expect(tester.takeException(), isNull);
 
         // Switch to library browser and ensure toolbar is responsive too
-        await tester.ensureVisible(find.byKey(const Key('nav_tab_library')));
+        await tester.ensureVisible(find.byKey(const Key('capsule_nav_library')));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const Key('nav_tab_library')));
+        await tester.tap(find.byKey(const Key('capsule_nav_library')));
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(find.byKey(const Key('track_queue_list')), findsOneWidget);

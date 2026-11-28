@@ -23,8 +23,12 @@ class _ArtworkTestAudioService extends MockAudioService {
   List<CanonicalAlbumSummary>? customAlbums;
 
   @override
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100}) async {
-    return customAlbums ?? await super.getAlbums(limit: limit);
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  }) async {
+    return customAlbums ??
+        await super.getAlbums(limit: limit, includeHidden: includeHidden);
   }
 
   @override
@@ -280,9 +284,10 @@ void main() {
       expect(imgWidget.isAntiAlias, isTrue);
       expect(imgWidget.image, isA<FileImage>());
       expect(find.byIcon(Icons.album_rounded), findsNothing);
+      expect(find.byIcon(Icons.music_note_rounded), findsNothing);
     });
 
-    testWidgets('falls back to gradient+disc placeholder only when no cover exists', (
+    testWidgets('falls back to gradient+note placeholder only when no cover exists', (
       tester,
     ) async {
       final service = _ArtworkTestAudioService();
@@ -306,7 +311,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(Image), findsNothing);
-      expect(find.byIcon(Icons.album_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.music_note_rounded), findsOneWidget);
     });
   });
 
@@ -483,7 +488,9 @@ void main() {
       // Initially no cover -> placeholder
       expect(find.byType(Image), findsNothing);
 
-      // Set external cover
+      // Set external cover via More Options menu
+      await tester.tap(find.byKey(const Key('btn_album_more_options')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('btn_set_album_cover')));
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -495,12 +502,14 @@ void main() {
 
       expect(find.byType(Image), findsOneWidget);
 
-      // Clear cover -> returns to placeholder
+      // Clear cover via More Options menu -> returns to placeholder
+      await tester.tap(find.byKey(const Key('btn_album_more_options')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('btn_clear_album_cover')));
       await tester.pumpAndSettle();
 
       expect(find.byType(Image), findsNothing);
-      expect(find.byIcon(Icons.album_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.music_note_rounded), findsOneWidget);
     });
   });
 }

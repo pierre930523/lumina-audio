@@ -11,11 +11,29 @@ import '../../models/streaming_provider_meta.dart';
 import '../../models/studio_models.dart';
 import '../../services/audio_service.dart';
 import '../../services/library_index_cache.dart';
+import '../../services/listen_later_controller.dart';
 import '../../services/streaming/streaming_manager.dart';
 import '../artwork/album_artwork_view.dart';
 import '../common/frosted_glass_container.dart';
+import '../common/lumina_context_menu.dart';
+import '../common/preference_toggle_button.dart';
+import '../common/track_context_menu.dart';
 import '../common/track_hover_prefetch.dart';
+import '../settings/settings_styles.dart';
+import '../tags/tag_picker_dialog.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
+import 'album_asset_gallery_lightbox.dart';
+import 'album_split_dialog.dart';
+import 'album_versions_section.dart';
+
+part 'album_detail_actions.dart';
+part 'album_detail_grouping_actions.dart';
+part 'album_detail_hero.dart';
+part 'album_detail_more_menu.dart';
+part 'album_detail_sections.dart';
+part 'album_detail_track_row.dart';
+part 'album_detail_widgets.dart';
 
 // ─── Standalone Album Detail Page ─────────────────────────────────────────────
 
@@ -23,6 +41,7 @@ class AlbumDetailPage extends StatefulWidget {
   final String albumId;
   final AudioService audioService;
   final StreamingManager? streamingManager;
+  final ListenLaterController? listenLaterController;
   final void Function(TrackInfo track, {List<TrackInfo>? queueContext})?
       onPlayStreamingTrack;
   final VoidCallback? onBack;
@@ -42,6 +61,7 @@ class AlbumDetailPage extends StatefulWidget {
     required this.albumId,
     required this.audioService,
     this.streamingManager,
+    this.listenLaterController,
     this.onPlayStreamingTrack,
     this.onBack,
     this.showInlineBackButton = true,
@@ -108,207 +128,21 @@ class AlbumDetailPage extends StatefulWidget {
   State<AlbumDetailPage> createState() => _AlbumDetailPageState();
 }
 
-@immutable
-class _ActivePlaybackSnapshot {
-  final String? trackId;
-  final String? trackTitle;
-  final String? albumTitle;
-  final PlaybackStatus status;
-
-  const _ActivePlaybackSnapshot({
-    required this.trackId,
-    required this.trackTitle,
-    required this.albumTitle,
-    required this.status,
-  });
-
-  factory _ActivePlaybackSnapshot.fromState(PlaybackState state) {
-    return _ActivePlaybackSnapshot(
-      trackId: state.track?.id,
-      trackTitle: state.track?.title,
-      albumTitle: state.track?.album,
-      status: state.status,
-    );
-  }
-
-  bool get isActivelyPlaying =>
-      status == PlaybackStatus.playing ||
-      status == PlaybackStatus.seeking ||
-      status == PlaybackStatus.buffering;
-
-  bool matchesTrack(AlbumVersionTrackInfo track, String albumName) {
-    if (trackId != null && trackId!.isNotEmpty && trackId == track.id) {
-      return true;
-    }
-    if (trackTitle != null &&
-        trackTitle == track.title &&
-        albumTitle != null &&
-        (albumTitle == albumName ||
-            albumTitle!.toLowerCase().startsWith(albumName.toLowerCase()))) {
-      return true;
-    }
-    return false;
-  }
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is _ActivePlaybackSnapshot &&
-          other.trackId == trackId &&
-          other.trackTitle == trackTitle &&
-          other.albumTitle == albumTitle &&
-          other.status == status;
-
-  @override
-  int get hashCode => Object.hash(trackId, trackTitle, albumTitle, status);
-}
-
-class _EditAlbumMetadataDialog extends StatefulWidget {
-  final String initialTitle;
-  final String initialArtist;
-
-  const _EditAlbumMetadataDialog({
-    required this.initialTitle,
-    required this.initialArtist,
-  });
-
-  @override
-  State<_EditAlbumMetadataDialog> createState() =>
-      _EditAlbumMetadataDialogState();
-}
-
-class _EditAlbumMetadataDialogState extends State<_EditAlbumMetadataDialog> {
-  late final TextEditingController _titleCtrl;
-  late final TextEditingController _artistCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _titleCtrl = TextEditingController(text: widget.initialTitle);
-    _artistCtrl = TextEditingController(text: widget.initialArtist);
-  }
-
-  @override
-  void dispose() {
-    _titleCtrl.dispose();
-    _artistCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: Colors.transparent,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440),
-        child: FrostedGlassContainer(
-          blurSigma: LuminaTokens.glassDialogBlur,
-          color: LuminaTokens.glassDialogBg,
-          borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-          border: Border.all(color: LuminaTokens.glassCardBorder),
-          padding: const EdgeInsets.all(LuminaTokens.spaceLg),
-          child: Material(
-            type: MaterialType.transparency,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  '編輯專輯詮釋資料（非破壞性覆寫）',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  '使用者覆寫優先於檔案標籤與雲端補全，重新掃描時不會被覆蓋。',
-                  style: TextStyle(
-                    color: LuminaTokens.textMuted,
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(height: LuminaTokens.spaceMd),
-                TextField(
-                  key: const Key('input_override_album_title'),
-                  controller: _titleCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                  decoration: const InputDecoration(
-                    labelText: '專輯名稱',
-                    labelStyle: TextStyle(color: LuminaTokens.textSecondary),
-                  ),
-                ),
-                const SizedBox(height: LuminaTokens.spaceSm),
-                TextField(
-                  key: const Key('input_override_album_artist'),
-                  controller: _artistCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                  decoration: const InputDecoration(
-                    labelText: '藝術家名稱',
-                    labelStyle: TextStyle(color: LuminaTokens.textSecondary),
-                  ),
-                ),
-                const SizedBox(height: LuminaTokens.spaceMd),
-                Row(
-                  children: [
-                    TextButton(
-                      key: const Key('btn_clear_album_metadata'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: LuminaTokens.textMuted,
-                      ),
-                      onPressed: () => Navigator.of(context).pop((
-                        action: 'clear',
-                        title: '',
-                        artist: '',
-                      )),
-                      child: const Text('清除覆寫'),
-                    ),
-                    const Spacer(),
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        foregroundColor: LuminaTokens.glassTextSecondary,
-                      ),
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('取消'),
-                    ),
-                    const SizedBox(width: LuminaTokens.spaceXs),
-                    FilledButton(
-                      key: const Key('btn_save_album_metadata'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: LuminaTokens.glassSwitchOnTrack,
-                        foregroundColor: LuminaTokens.onAccentDark,
-                      ),
-                      onPressed: () => Navigator.of(context).pop((
-                        action: 'save',
-                        title: _titleCtrl.text.trim(),
-                        artist: _artistCtrl.text.trim(),
-                      )),
-                      child: const Text('儲存'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _AlbumDetailPageState extends State<AlbumDetailPage> {
-  late final ScrollController _scrollController;
+  late final GlideScrollController _scrollController;
   late final ValueNotifier<_ActivePlaybackSnapshot> _playbackNotifier;
   StreamSubscription<PlaybackState>? _playbackSub;
+  StreamSubscription<ScanProgressEvent>? _scanProgressSub;
 
   CanonicalAlbumDetail? _detail;
   CanonicalAlbumSummary? _summaryFallback;
   List<MetadataOverrideRecord> _overrides = const <MetadataOverrideRecord>[];
+  List<TagSummary> _albumTags = const <TagSummary>[];
+  AlbumAssetsResponse? _albumAssets;
+  int _assetsLoadEpoch = 0;
   int _selectedVersionIndex = 0;
   int _coverRevision = 0;
+  int _lastCacheRefreshGen = 0;
   bool _loading = true;
   String? _error;
   int _loadEpoch = 0;
@@ -317,7 +151,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   @override
   void initState() {
     super.initState();
-    _scrollController = ScrollController(
+    _scrollController = GlideScrollController(
       initialScrollOffset: widget.initialScrollOffset,
     )..addListener(_onScroll);
 
@@ -330,6 +164,11 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         _playbackNotifier.value = snap;
       }
     });
+    _lastCacheRefreshGen = widget.libraryCache?.refreshGeneration ?? 0;
+    widget.libraryCache?.addListener(_onLibraryCacheChanged);
+    _scanProgressSub = widget.audioService.scanProgressStream.listen(
+      _onScanProgress,
+    );
 
     _hydrateFromCacheSync();
     _load();
@@ -346,8 +185,27 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
   @override
   void didUpdateWidget(covariant AlbumDetailPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.libraryCache != widget.libraryCache) {
+      oldWidget.libraryCache?.removeListener(_onLibraryCacheChanged);
+      _lastCacheRefreshGen = widget.libraryCache?.refreshGeneration ?? 0;
+      widget.libraryCache?.addListener(_onLibraryCacheChanged);
+    }
+    if (oldWidget.audioService != widget.audioService) {
+      _playbackSub?.cancel();
+      _playbackSub = widget.audioService.stateStream.listen((state) {
+        final snap = _ActivePlaybackSnapshot.fromState(state);
+        if (_playbackNotifier.value != snap) {
+          _playbackNotifier.value = snap;
+        }
+      });
+      _scanProgressSub?.cancel();
+      _scanProgressSub = widget.audioService.scanProgressStream.listen(
+        _onScanProgress,
+      );
+    }
     if (oldWidget.albumId != widget.albumId) {
       _selectedVersionIndex = 0;
+      _albumAssets = null;
       _error = null;
       _hydrateFromCacheSync();
       _load();
@@ -364,6 +222,9 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
 
   @override
   void dispose() {
+    widget.libraryCache?.removeListener(_onLibraryCacheChanged);
+    _scanProgressSub?.cancel();
+    _scanProgressSub = null;
     _streamingLoadCancel?.cancel();
     _streamingLoadCancel = null;
     _playbackSub?.cancel();
@@ -371,6 +232,66 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onLibraryCacheChanged() {
+    if (!mounted) return;
+    final cache = widget.libraryCache;
+    if (cache == null) return;
+    if (cache.refreshGeneration != _lastCacheRefreshGen) {
+      _lastCacheRefreshGen = cache.refreshGeneration;
+      _summaryFallback = cache.getAlbumSummarySync(widget.albumId);
+      setState(() => _coverRevision++);
+      unawaited(_load(forceRefresh: true));
+      return;
+    }
+    final cachedDetail = cache.getAlbumDetailSync(widget.albumId);
+    if (cachedDetail != null && !identical(cachedDetail, _detail)) {
+      final current = _detail;
+      final changed = current == null ||
+          current.title != cachedDetail.title ||
+          current.artistName != cachedDetail.artistName ||
+          current.releaseYear != cachedDetail.releaseYear ||
+          current.coverUrl != cachedDetail.coverUrl ||
+          current.versions.length != cachedDetail.versions.length ||
+          current.metaPolicy != cachedDetail.metaPolicy ||
+          current.hasUserEdits != cachedDetail.hasUserEdits;
+      if (changed) {
+        setState(() {
+          _detail = cachedDetail;
+          _loading = false;
+        });
+        _notifyTitleChanged();
+      }
+    }
+  }
+
+  void _onScanProgress(ScanProgressEvent event) {
+    if (!mounted || event.state != ScanLifecycleState.completed) return;
+    final cache = widget.libraryCache;
+    if (cache != null) {
+      unawaited(cache.refresh(widget.audioService));
+      return;
+    }
+    setState(() => _coverRevision++);
+    unawaited(_load(forceRefresh: true));
+  }
+
+  String? get _activeVersionId {
+    final detail = _detail;
+    if (detail == null) return null;
+    final visible = detail.versions.where((v) => v.tracks.isNotEmpty).toList();
+    if (visible.isEmpty) return detail.primaryVersionId;
+    return visible[_selectedVersionIndex.clamp(0, visible.length - 1)].id;
+  }
+
+  void _setState(VoidCallback fn) {
+    final prevVersionId = _activeVersionId;
+    setState(fn);
+    final nextVersionId = _activeVersionId;
+    if (nextVersionId != prevVersionId) {
+      unawaited(_loadAlbumAssets(nextVersionId ?? widget.albumId));
+    }
   }
 
   void _onScroll() {
@@ -419,7 +340,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
     );
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool forceRefresh = false}) async {
     final epoch = ++_loadEpoch;
     _streamingLoadCancel?.cancel();
     _streamingLoadCancel = null;
@@ -429,7 +350,7 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
       final CanonicalAlbumDetail? detail;
       if (streamingTarget != null && widget.streamingManager != null) {
         final cached = cache?.getAlbumDetailSync(widget.albumId);
-        if (cached != null && cached.versions.isNotEmpty) {
+        if (!forceRefresh && cached != null && cached.versions.isNotEmpty) {
           return;
         }
         final cancelToken = CancellationToken();
@@ -441,29 +362,53 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         );
       } else {
         detail = cache != null
-            ? await cache.loadAlbumDetail(widget.audioService, widget.albumId)
-            : await widget.audioService.getAlbumDetail(widget.albumId);
+            ? await cache.loadAlbumDetail(
+                widget.audioService,
+                widget.albumId,
+                forceRefresh: forceRefresh,
+              )
+            : await widget.audioService.getAlbumDetailFiltered(
+                widget.albumId,
+                includeHidden: widget.libraryCache?.includeHidden ?? false,
+              );
       }
       if (!mounted || epoch != _loadEpoch) return;
       List<MetadataOverrideRecord> overrides = const <MetadataOverrideRecord>[];
+      List<TagSummary> albumTags = const <TagSummary>[];
       try {
         overrides = await widget.audioService.getMetadataOverrides(
           'album',
           widget.albumId,
         );
       } catch (_) {}
+      try {
+        if (!widget.albumId.startsWith('streaming:')) {
+          albumTags = await widget.audioService.getEntityTags(
+            TagEntityType.albumGroup,
+            widget.albumId,
+          );
+        }
+      } catch (_) {}
       if (!mounted || epoch != _loadEpoch) return;
-      if (detail != null && cache != null) {
+      if (detail != null &&
+          cache != null &&
+          !identical(cache.getAlbumDetailSync(widget.albumId), detail)) {
         cache.putAlbumDetailSync(detail);
       }
       setState(() {
-        if (detail != null || _detail == null) {
+        if (detail != null || _detail == null || forceRefresh) {
+          final isFirstDetail = _detail == null || _detail!.versions.isEmpty;
           _detail = detail;
+          if (detail != null && isFirstDetail) {
+            _selectedVersionIndex = _preferredVersionIndexFor(detail);
+          }
         }
         _overrides = overrides;
+        _albumTags = albumTags;
         _loading = false;
       });
       _notifyTitleChanged();
+      unawaited(_loadAlbumAssets(_activeVersionId ?? widget.albumId));
     } catch (e) {
       if (!mounted || epoch != _loadEpoch) return;
       setState(() {
@@ -491,391 +436,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
           detail.credits.first;
       widget.onOpenArtistCredits!(match.artistId);
     }
-  }
-
-  Future<void> _promptSetExternalCover() async {
-    final txt = TextEditingController();
-    final path = await showDialog<String>(
-      context: context,
-      barrierColor: LuminaTokens.scrimBg,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: FrostedGlassContainer(
-            blurSigma: LuminaTokens.glassDialogBlur,
-            color: LuminaTokens.glassDialogBg,
-            borderRadius: BorderRadius.circular(LuminaTokens.radiusLg),
-            border: Border.all(color: LuminaTokens.glassCardBorder),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x88000000),
-                blurRadius: 32,
-                offset: Offset(0, 14),
-              ),
-            ],
-            padding: const EdgeInsets.all(LuminaTokens.spaceLg),
-            child: Material(
-              type: MaterialType.transparency,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text(
-                    '設定專輯外部封面',
-                    style: TextStyle(
-                      color: LuminaTokens.glassTextPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: LuminaTokens.spaceMd),
-                  TextField(
-                    controller: txt,
-                    key: const Key('input_album_cover_path'),
-                    style: const TextStyle(
-                      color: LuminaTokens.glassTextPrimary,
-                      fontSize: 13,
-                    ),
-                    decoration: InputDecoration(
-                      hintText: 'C:\\Music\\cover.jpg',
-                      hintStyle: const TextStyle(color: LuminaTokens.textMuted),
-                      filled: true,
-                      fillColor: LuminaTokens.glassPillBg,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(
-                          LuminaTokens.radiusSm,
-                        ),
-                        borderSide: const BorderSide(
-                          color: LuminaTokens.glassPillBorder,
-                        ),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(
-                          LuminaTokens.radiusSm,
-                        ),
-                        borderSide: const BorderSide(
-                          color: LuminaTokens.glassPillBorder,
-                        ),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(
-                          LuminaTokens.radiusSm,
-                        ),
-                        borderSide: const BorderSide(
-                          color: LuminaTokens.focusRing,
-                          width: 1.5,
-                        ),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: LuminaTokens.spaceSm,
-                        vertical: LuminaTokens.spaceSm,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: LuminaTokens.spaceLg),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          foregroundColor: LuminaTokens.glassTextSecondary,
-                        ),
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('取消'),
-                      ),
-                      const SizedBox(width: LuminaTokens.spaceXs),
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: LuminaTokens.glassSwitchOnTrack,
-                          foregroundColor: LuminaTokens.onAccentDark,
-                        ),
-                        onPressed: () => Navigator.of(ctx).pop(txt.text.trim()),
-                        child: const Text('設定'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    if (path != null && path.isNotEmpty) {
-      final cleaned = path.replaceAll(RegExp(r'''^["']|["']$'''), '').trim();
-      if (cleaned.isNotEmpty) {
-        await widget.audioService.setUserCover(widget.albumId, cleaned);
-        widget.libraryCache?.invalidateArtwork(widget.albumId);
-        if (mounted) {
-          setState(() => _coverRevision++);
-        }
-      }
-    }
-  }
-
-  Future<void> _handleClearCover() async {
-    await widget.audioService.clearUserCover(widget.albumId);
-    widget.libraryCache?.invalidateArtwork(widget.albumId);
-    if (mounted) {
-      setState(() => _coverRevision++);
-    }
-  }
-
-  Future<void> _promptEditMetadata(CanonicalAlbumDetail detail) async {
-    final result = await showDialog<({String action, String title, String artist})>(
-      context: context,
-      barrierColor: LuminaTokens.scrimBg,
-      builder: (_) => _EditAlbumMetadataDialog(
-        initialTitle: detail.title,
-        initialArtist: detail.artistName,
-      ),
-    );
-    if (result == null || !mounted) return;
-
-    if (result.action == 'clear') {
-      await widget.audioService.clearMetadataOverride(
-        'album',
-        detail.id,
-        'title',
-      );
-      await widget.audioService.clearMetadataOverride(
-        'album',
-        detail.id,
-        'artist_name',
-      );
-    } else if (result.action == 'save') {
-      if (result.title.isNotEmpty) {
-        await widget.audioService.setMetadataOverride(
-          'album',
-          detail.id,
-          'title',
-          result.title,
-        );
-      }
-      if (result.artist.isNotEmpty) {
-        await widget.audioService.setMetadataOverride(
-          'album',
-          detail.id,
-          'artist_name',
-          result.artist,
-        );
-      }
-    }
-
-    final refreshed = await widget.audioService.getAlbumDetail(widget.albumId);
-    final overrides = await widget.audioService.getMetadataOverrides(
-      'album',
-      widget.albumId,
-    );
-    if (!mounted) return;
-    if (refreshed != null) {
-      widget.libraryCache?.putAlbumDetailSync(refreshed);
-    }
-    setState(() {
-      if (refreshed != null) {
-        _detail = refreshed;
-      }
-      _overrides = overrides;
-    });
-    _notifyTitleChanged();
-  }
-
-  TrackInfo _toTrackInfo(
-    CanonicalAlbumDetail d,
-    AlbumVersionInfo ver,
-    AlbumVersionTrackInfo vTrack,
-  ) {
-    final ext = vTrack.externalTrackId;
-    final hasUri = ext.contains('/') ||
-        ext.contains('\\') ||
-        ext.startsWith('http://') ||
-        ext.startsWith('https://');
-    final providerMeta = StreamingProviderMeta.byKind(ver.provider);
-    return TrackInfo(
-      id: vTrack.id,
-      title: vTrack.title,
-      artist: d.artistName,
-      album: d.title,
-      duration: Duration(milliseconds: vTrack.durationMs),
-      format: AudioFormat(
-        codec: AudioCodec.fromString(vTrack.codec),
-        sampleRateHz: vTrack.sampleRateHz,
-        bitDepth: vTrack.bitDepth,
-        channels: 2,
-        isDsd: ver.isDsd || vTrack.isDsd,
-      ),
-      providerName: providerMeta?.name ?? ver.provider,
-      trackNumber: vTrack.trackNumber,
-      discNumber: vTrack.discNumber,
-      albumArtUrl: d.coverUrl,
-      coverUrl: d.coverUrl,
-      filePath: hasUri ? ext : null,
-    );
-  }
-
-  TrackInfo? _findTrack(
-    CanonicalAlbumDetail d, {
-    String? title,
-    AlbumVersionTrackInfo? versionTrack,
-  }) {
-    final q = widget.audioService.queue;
-    if (versionTrack != null) {
-      final byId = q.where((t) => t.id == versionTrack.id).firstOrNull;
-      if (byId != null) return byId;
-    }
-    final inAlbum = q
-        .where(
-          (t) =>
-              t.album == d.title ||
-              t.album.toLowerCase().startsWith(d.title.toLowerCase()),
-        )
-        .toList();
-    final targetTitle = versionTrack?.title ?? title;
-    if (targetTitle != null) {
-      final hit = inAlbum.where((t) => t.title == targetTitle).firstOrNull ??
-          q.where((t) => t.title == targetTitle).firstOrNull;
-      if (hit != null) return hit;
-    } else if (inAlbum.isNotEmpty && d.versions.isEmpty) {
-      return inAlbum.first;
-    }
-
-    final ver = d.versions.isNotEmpty
-        ? d.versions[_selectedVersionIndex.clamp(0, d.versions.length - 1)]
-        : null;
-    if (ver == null || ver.tracks.isEmpty) {
-      return inAlbum.firstOrNull;
-    }
-    final ordered = ver.orderedTrackEntries;
-    final vTrack = versionTrack ??
-        (targetTitle != null
-            ? (ver.tracks.where((t) => t.title == targetTitle).firstOrNull ??
-                ordered.first.track)
-            : ordered.first.track);
-    return _toTrackInfo(d, ver, vTrack);
-  }
-
-  Future<void> _playTrack(
-    CanonicalAlbumDetail d, {
-    String? title,
-    AlbumVersionTrackInfo? versionTrack,
-  }) async {
-    final track = _findTrack(d, title: title, versionTrack: versionTrack);
-    if (track == null) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('音樂庫中找不到此專輯的可播放曲目')),
-      );
-      return;
-    }
-    final ver = d.versions.isNotEmpty
-        ? d.versions[_selectedVersionIndex.clamp(0, d.versions.length - 1)]
-        : null;
-    final isStreamingAlbum = widget.albumId.startsWith('streaming:');
-    if (isStreamingAlbum && widget.onPlayStreamingTrack != null) {
-      final allAlbumTracks = (ver != null && ver.tracks.isNotEmpty)
-          ? ver.orderedTrackEntries
-              .map((e) => _toTrackInfo(d, ver, e.track))
-              .toList()
-          : <TrackInfo>[track];
-      widget.onPlayStreamingTrack!(track, queueContext: allAlbumTracks);
-      return;
-    }
-    await widget.audioService.play(track: track);
-  }
-
-  void _addTrackToQueue(
-    CanonicalAlbumDetail d,
-    AlbumVersionTrackInfo vTrack,
-  ) {
-    final track = _findTrack(d, title: vTrack.title, versionTrack: vTrack);
-    if (track == null) return;
-    try {
-      final q = widget.audioService.queue;
-      if (!q.any((t) => t.id == track.id)) {
-        q.add(track);
-      }
-    } catch (_) {}
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(
-        content: Text('已將「${track.title}」加入播放佇列'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  }
-
-  void _addAlbumToQueue(CanonicalAlbumDetail d, AlbumVersionInfo? ver) {
-    final entries = ver?.orderedTrackEntries ?? const [];
-    var added = 0;
-    for (final entry in entries) {
-      final track = _findTrack(
-        d,
-        title: entry.track.title,
-        versionTrack: entry.track,
-      );
-      if (track != null) {
-        added++;
-        try {
-          final q = widget.audioService.queue;
-          if (!q.any((t) => t.id == track.id)) {
-            q.add(track);
-          }
-        } catch (_) {}
-      }
-    }
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(
-        content: Text(
-          added > 0 ? '已將 $added 首曲目加入播放佇列' : '已將專輯加入播放佇列',
-        ),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  }
-
-  String _versionChipKey(String provider) {
-    return switch (provider) {
-      'local' => 'version_chip_local',
-      'tidal' => 'version_chip_tidal',
-      'qobuz' => 'version_chip_qobuz',
-      'apple_music' => 'version_chip_apple_music',
-      'youtube_music' => 'version_chip_youtube_music',
-      'deezer' => 'version_chip_deezer',
-      _ => 'version_chip_$provider',
-    };
-  }
-
-  Widget _buildCover({required double size}) {
-    final title = _detail?.title ?? _summaryFallback?.title ?? '';
-    final artist = _detail?.artistName ?? _summaryFallback?.artist ?? '';
-    final coverUrl = _detail?.coverUrl ?? _summaryFallback?.coverUrl;
-    return KeyedSubtree(
-      key: const Key('album_cover_view'),
-      child: AlbumArtworkView(
-        key: ValueKey('album_detail_cover_${widget.albumId}_$_coverRevision'),
-        album: CanonicalAlbumSummary(
-          id: widget.albumId,
-          title: title,
-          artist: artist,
-          coverUrl: coverUrl,
-        ),
-        size: size,
-        revision: _coverRevision,
-        audioService: widget.audioService,
-        libraryCache: widget.libraryCache,
-        fullResolution: true,
-        coverTargetSize: 1200,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x77000000),
-            blurRadius: 32,
-            offset: Offset(0, 12),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
@@ -930,999 +490,6 @@ class _AlbumDetailPageState extends State<AlbumDetailPage> {
         ),
         Expanded(child: body),
       ],
-    );
-  }
-
-  Widget _buildDetail(CanonicalAlbumDetail detail) {
-    final selectedVersion = detail.versions.isNotEmpty
-        ? detail.versions[
-            _selectedVersionIndex.clamp(0, detail.versions.length - 1)
-          ]
-        : null;
-    final trackEntries = selectedVersion?.orderedTrackEntries ?? const [];
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 560;
-        final coverSize = constraints.maxWidth >= 780
-            ? 200.0
-            : (isWide ? 168.0 : 148.0);
-        final hPad = isWide ? 28.0 : 16.0;
-        final vPad = isWide ? 24.0 : 16.0;
-
-        return CustomScrollView(
-          key: PageStorageKey<String>('album_detail_${widget.albumId}'),
-          controller: _scrollController,
-          slivers: [
-            // 1. Hero & Metadata Header Sliver
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(hPad, vPad, hPad, 12),
-              sliver: SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (isWide)
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildCover(size: coverSize),
-                          const SizedBox(width: 28),
-                          Expanded(
-                            child: _buildHeroMeta(
-                              detail,
-                              selectedVersion,
-                              isWide: true,
-                            ),
-                          ),
-                        ],
-                      )
-                    else
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Center(child: _buildCover(size: coverSize)),
-                          const SizedBox(height: 16),
-                          _buildHeroMeta(
-                            detail,
-                            selectedVersion,
-                            isWide: false,
-                          ),
-                        ],
-                      ),
-
-                    // Version switcher chips
-                    if (detail.versions.isNotEmpty) ...[
-                      const SizedBox(height: 20),
-                      const Text(
-                        '發行版本',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        children: [
-                          for (final (i, ver) in detail.versions.indexed)
-                            _VersionChip(
-                              key: Key(_versionChipKey(ver.provider)),
-                              version: ver,
-                              isSelected: _selectedVersionIndex == i,
-                              onTap: () => setState(
-                                () => _selectedVersionIndex = i,
-                              ),
-                            ),
-                        ],
-                      ),
-                      if (selectedVersion != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          '目前採用版本：${selectedVersion.editionLabel}',
-                          style: const TextStyle(
-                            color: LuminaTokens.glassTextSecondary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ],
-
-                    // Contributor chips (kept near Hero so always accessible without cluttering)
-                    if (detail.credits.isNotEmpty) ...[
-                      const SizedBox(height: 18),
-                      const Text(
-                        '製作人員',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final c in detail.credits)
-                            _CreditChip(
-                              credit: c,
-                              onTap: widget.onOpenArtistCredits != null
-                                  ? () => widget.onOpenArtistCredits!(
-                                      c.artistId,
-                                    )
-                                  : (widget.onOpenArtist != null
-                                        ? () => widget.onOpenArtist!(
-                                            c.artistName,
-                                          )
-                                        : null),
-                            ),
-                        ],
-                      ),
-                    ],
-
-                    if (trackEntries.isNotEmpty) ...[
-                      const SizedBox(height: 22),
-                      Container(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        decoration: const BoxDecoration(
-                          border: Border(
-                            bottom: BorderSide(
-                              color: LuminaTokens.glassCardDivider,
-                            ),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const SizedBox(
-                              width: 42,
-                              child: Text(
-                                '#',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: LuminaTokens.textMuted,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            const Expanded(
-                              child: Text(
-                                '曲目列表',
-                                style: TextStyle(
-                                  color: LuminaTokens.textSecondary,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                            ),
-                            Semantics(
-                              label: '曲目時長',
-                              child: const Icon(
-                                Icons.schedule_rounded,
-                                size: 15,
-                                color: LuminaTokens.textMuted,
-                              ),
-                            ),
-                            const SizedBox(width: 68),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-
-            // 2. Virtualized Track List Sliver (SliverList.builder)
-            if (trackEntries.isNotEmpty)
-              SliverPadding(
-                padding: EdgeInsets.symmetric(horizontal: hPad),
-                sliver: SliverList.builder(
-                  itemCount: trackEntries.length,
-                  itemBuilder: (context, i) {
-                    final entry = trackEntries[i];
-                    final isStreamingVersion =
-                        selectedVersion != null &&
-                        selectedVersion.provider != 'local';
-                    final row = RepaintBoundary(
-                      child: TrackHoverPrefetch(
-                        enabled: isStreamingVersion,
-                        trackIdentity: entry.track.id,
-                        trackBuilder: isStreamingVersion
-                            ? () => _toTrackInfo(
-                                detail,
-                                selectedVersion,
-                                entry.track,
-                              )
-                            : null,
-                        child: _AlbumTrackRow(
-                          key: Key('album_track_$i'),
-                          index: i,
-                          track: entry.track,
-                          displayNumber: entry.displayNumber,
-                          artistName: detail.artistName,
-                          albumTitle: detail.title,
-                          playbackListenable: _playbackNotifier,
-                          onPlay: () => _playTrack(
-                            detail,
-                            title: entry.track.title,
-                            versionTrack: entry.track,
-                          ),
-                          onAddToQueue: () =>
-                              _addTrackToQueue(detail, entry.track),
-                          onOpenArtist: () =>
-                              _handleOpenArtist(detail.artistName, detail),
-                        ),
-                      ),
-                    );
-                    if (!entry.showDiscHeader) {
-                      return row;
-                    }
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Padding(
-                          padding: EdgeInsets.only(
-                            top: i == 0 ? 4 : 14,
-                            bottom: 6,
-                            left: 8,
-                          ),
-                          child: Text(
-                            'Disc ${entry.track.discNumber}',
-                            style: const TextStyle(
-                              color: LuminaTokens.textMuted,
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.4,
-                            ),
-                          ),
-                        ),
-                        row,
-                      ],
-                    );
-                  },
-                ),
-              ),
-
-            // 3. Editorial Bio & Bottom Padding Sliver
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(
-                hPad,
-                LuminaTokens.spaceMd,
-                hPad,
-                vPad + LuminaTokens.bottomScrollClearance,
-              ),
-              sliver: SliverToBoxAdapter(
-                child:
-                    (detail.editorialBio != null &&
-                        detail.editorialBio!.isNotEmpty)
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            '簡介',
-                            style: TextStyle(
-                              color: LuminaTokens.textSecondary,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                          const SizedBox(height: LuminaTokens.spaceXs),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: LuminaTokens.glassCardBg,
-                              borderRadius: BorderRadius.circular(
-                                LuminaTokens.glassCardRadius,
-                              ),
-                              border: Border.all(
-                                color: LuminaTokens.glassCardBorder,
-                              ),
-                            ),
-                            child: Text(
-                              detail.editorialBio!,
-                              style: const TextStyle(
-                                color: LuminaTokens.textSecondary,
-                                fontSize: 13,
-                                height: 1.6,
-                              ),
-                            ),
-                          ),
-                        ],
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildHeroMeta(
-    CanonicalAlbumDetail detail,
-    AlbumVersionInfo? ver, {
-    required bool isWide,
-  }) {
-    final unifiedMetadata = AlbumDetailPage.formatUnifiedMetadata(ver);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Album Title (large bold white, wrapping cleanly)
-        Text(
-          detail.title,
-          key: const Key('album_hero_title'),
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: isWide ? 26 : 22,
-            fontWeight: FontWeight.w800,
-            height: 1.2,
-            letterSpacing: -0.3,
-          ),
-        ),
-        const SizedBox(height: 8),
-
-        // Hoverable & clickable artist name directly below title
-        RepaintBoundary(
-          child: _ClickableArtistLink(
-            key: const Key('album_hero_artist'),
-            artistName: detail.artistName,
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            defaultColor: LuminaTokens.glassTextSecondary,
-            hoverColor: Colors.white,
-            onTap: () => _handleOpenArtist(detail.artistName, detail),
-          ),
-        ),
-
-        // Release Year, Audio Format & User Override Badge
-        if (detail.releaseYear != null || ver != null || _overrides.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (detail.releaseYear != null)
-                Text(
-                  '${detail.releaseYear}',
-                  style: const TextStyle(
-                    color: LuminaTokens.textMuted,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              if (ver != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: LuminaTokens.glassPillBg,
-                    borderRadius: BorderRadius.circular(5),
-                    border: Border.all(
-                      color: LuminaTokens.glassPillBorder,
-                    ),
-                  ),
-                  child: Text(
-                    ver.formatSummary,
-                    style: const TextStyle(
-                      color: LuminaTokens.glassTextPrimary,
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              if (_overrides.isNotEmpty)
-                Container(
-                  key: const Key('album_override_badge'),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: LuminaTokens.statusSuccess.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(5),
-                    border: Border.all(
-                      color: LuminaTokens.statusSuccess.withValues(alpha: 0.45),
-                    ),
-                  ),
-                  child: const Text(
-                    '已自訂',
-                    style: TextStyle(
-                      color: LuminaTokens.statusSuccess,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ],
-
-        const SizedBox(height: 10),
-
-        // Single-line unified metadata row: '總時長 · 音檔格式 · 取樣率 · 位元深度 · 曲目數'
-        Text(
-          unifiedMetadata,
-          key: const Key('album_unified_metadata_row'),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: LuminaTokens.textSecondary,
-            fontSize: 12.5,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.2,
-          ),
-        ),
-
-        const SizedBox(height: LuminaTokens.spaceMd),
-
-        // Action Buttons Row (Primary pill '播放專輯' + Secondary buttons)
-        Wrap(
-          spacing: 10,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            FilledButton.icon(
-              key: const Key('btn_play_album'),
-              onPressed: () => _playTrack(detail),
-              icon: const Icon(Icons.play_arrow_rounded, size: 19),
-              label: const Text(
-                '播放專輯',
-                style: TextStyle(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              style: FilledButton.styleFrom(
-                backgroundColor: LuminaTokens.glassSwitchOnTrack,
-                foregroundColor: LuminaTokens.onAccentDark,
-                shape: const StadiumBorder(),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 22,
-                  vertical: 11,
-                ),
-              ),
-            ),
-            IconButton.outlined(
-              key: const Key('btn_add_album_to_queue'),
-              tooltip: '將專輯加入播放佇列',
-              onPressed: () => _addAlbumToQueue(detail, ver),
-              icon: const Icon(Icons.playlist_add_rounded, size: 19),
-              style: OutlinedButton.styleFrom(
-                backgroundColor: LuminaTokens.glassPillBg,
-                foregroundColor: LuminaTokens.glassTextPrimary,
-                side: const BorderSide(color: LuminaTokens.glassPillBorder),
-              ),
-            ),
-            OutlinedButton.icon(
-              key: const Key('btn_set_album_cover'),
-              onPressed: _promptSetExternalCover,
-              icon: const Icon(Icons.image_outlined, size: 16),
-              label: const Text('設定外部封面', style: TextStyle(fontSize: 12)),
-              style: OutlinedButton.styleFrom(
-                backgroundColor: LuminaTokens.glassPillBg,
-                foregroundColor: LuminaTokens.glassTextPrimary,
-                side: const BorderSide(color: LuminaTokens.glassPillBorder),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-              ),
-            ),
-            TextButton.icon(
-              key: const Key('btn_clear_album_cover'),
-              onPressed: _handleClearCover,
-              icon: const Icon(Icons.clear_rounded, size: 16),
-              label: const Text('清除封面', style: TextStyle(fontSize: 12)),
-              style: TextButton.styleFrom(
-                foregroundColor: LuminaTokens.textMuted,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              ),
-            ),
-            OutlinedButton.icon(
-              key: const Key('btn_edit_album_metadata'),
-              onPressed: () => _promptEditMetadata(detail),
-              icon: const Icon(Icons.edit_outlined, size: 15),
-              label: const Text('編輯詮釋資料', style: TextStyle(fontSize: 12)),
-              style: OutlinedButton.styleFrom(
-                backgroundColor: LuminaTokens.glassPillBg,
-                foregroundColor: LuminaTokens.glassTextPrimary,
-                side: const BorderSide(color: LuminaTokens.glassPillBorder),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-              ),
-            ),
-            PopupMenuButton<String>(
-              key: const Key('btn_album_more_options'),
-              tooltip: '更多專輯選項',
-              color: LuminaTokens.glassMenuBg,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(LuminaTokens.radiusMd),
-                side: const BorderSide(color: LuminaTokens.glassCardBorder),
-              ),
-              icon: const Icon(
-                Icons.more_horiz_rounded,
-                size: 19,
-                color: LuminaTokens.textSecondary,
-              ),
-              onSelected: (action) {
-                switch (action) {
-                  case 'add_queue':
-                    _addAlbumToQueue(detail, ver);
-                  case 'set_cover':
-                    _promptSetExternalCover();
-                  case 'clear_cover':
-                    _handleClearCover();
-                  case 'open_artist':
-                    _handleOpenArtist(detail.artistName, detail);
-                }
-              },
-              itemBuilder: (context) => [
-                const PopupMenuItem<String>(
-                  value: 'add_queue',
-                  child: Text(
-                    '全部加入待播佇列',
-                    style: TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-                const PopupMenuItem<String>(
-                  value: 'open_artist',
-                  child: Text(
-                    '檢視藝術家頁面',
-                    style: TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-                const PopupMenuDivider(),
-                const PopupMenuItem<String>(
-                  value: 'set_cover',
-                  child: Text(
-                    '設定外部封面...',
-                    style: TextStyle(color: Colors.white, fontSize: 13),
-                  ),
-                ),
-                const PopupMenuItem<String>(
-                  value: 'clear_cover',
-                  child: Text(
-                    '清除自訂封面',
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-// ─── Hover-Isolated Clickable Artist Link ─────────────────────────────────────
-
-class _ClickableArtistLink extends StatefulWidget {
-  final String artistName;
-  final double fontSize;
-  final FontWeight fontWeight;
-  final Color defaultColor;
-  final Color hoverColor;
-  final VoidCallback onTap;
-
-  const _ClickableArtistLink({
-    super.key,
-    required this.artistName,
-    required this.fontSize,
-    required this.fontWeight,
-    required this.defaultColor,
-    required this.hoverColor,
-    required this.onTap,
-  });
-
-  @override
-  State<_ClickableArtistLink> createState() => _ClickableArtistLinkState();
-}
-
-class _ClickableArtistLinkState extends State<_ClickableArtistLink> {
-  bool _isHovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final activeColor = _isHovered ? widget.hoverColor : widget.defaultColor;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) {
-        if (!_isHovered) setState(() => _isHovered = true);
-      },
-      onExit: (_) {
-        if (_isHovered) setState(() => _isHovered = false);
-      },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        child: Text(
-          widget.artistName,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: activeColor,
-            fontSize: widget.fontSize,
-            fontWeight: widget.fontWeight,
-            decoration: _isHovered
-                ? TextDecoration.underline
-                : TextDecoration.none,
-            decorationColor: activeColor,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Hover-Isolated Virtualized Track Row ─────────────────────────────────────
-
-class _AlbumTrackRow extends StatefulWidget {
-  final int index;
-  final AlbumVersionTrackInfo track;
-  final String displayNumber;
-  final String artistName;
-  final String albumTitle;
-  final ValueListenable<_ActivePlaybackSnapshot> playbackListenable;
-  final VoidCallback onPlay;
-  final VoidCallback onAddToQueue;
-  final VoidCallback onOpenArtist;
-
-  const _AlbumTrackRow({
-    super.key,
-    required this.index,
-    required this.track,
-    required this.displayNumber,
-    required this.artistName,
-    required this.albumTitle,
-    required this.playbackListenable,
-    required this.onPlay,
-    required this.onAddToQueue,
-    required this.onOpenArtist,
-  });
-
-  @override
-  State<_AlbumTrackRow> createState() => _AlbumTrackRowState();
-}
-
-class _AlbumTrackRowState extends State<_AlbumTrackRow> {
-  bool _isHovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<_ActivePlaybackSnapshot>(
-      valueListenable: widget.playbackListenable,
-      builder: (context, snapshot, _) {
-        final isMatched = snapshot.matchesTrack(
-          widget.track,
-          widget.albumTitle,
-        );
-        final isPlaying = isMatched && snapshot.isActivelyPlaying;
-
-        final rowBg = isPlaying
-            ? (_isHovered
-                  ? LuminaTokens.glassPillHoverBg
-                  : LuminaTokens.glassNavActiveBg)
-            : (_isHovered ? LuminaTokens.glassRowHoverBg : Colors.transparent);
-
-        return MouseRegion(
-          cursor: SystemMouseCursors.click,
-          onEnter: (_) {
-            if (!_isHovered) setState(() => _isHovered = true);
-          },
-          onExit: (_) {
-            if (_isHovered) setState(() => _isHovered = false);
-          },
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onPlay,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 110),
-              margin: const EdgeInsets.symmetric(vertical: 2),
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-              decoration: BoxDecoration(
-                color: rowBg,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: isPlaying
-                      ? LuminaTokens.glassCoverRim
-                      : Colors.transparent,
-                ),
-              ),
-              child: Row(
-                children: [
-                  // Track Number or Playing Indicator Icon (smooth 30ms transition on hover to play button)
-                  SizedBox(
-                    width: 34,
-                    child: Center(
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 30),
-                        transitionBuilder: (child, animation) => FadeTransition(
-                          opacity: animation,
-                          child: child,
-                        ),
-                        child: isPlaying
-                            ? Icon(
-                                Icons.equalizer_rounded,
-                                key: Key(
-                                  'track_playing_icon_${widget.track.id}',
-                                ),
-                                size: 18,
-                                color: Colors.white,
-                              )
-                            : (_isHovered
-                                ? Icon(
-                                    Icons.play_arrow_rounded,
-                                    key: Key('track_hover_play_${widget.index}'),
-                                    size: 18,
-                                    color: Colors.white,
-                                  )
-                                : Text(
-                                    widget.displayNumber,
-                                    key: Key('track_number_${widget.index}'),
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: LuminaTokens.textMuted,
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  )),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-
-                  // Track Title & Clickable Small Artist Name
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          widget.track.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: isPlaying
-                                ? Colors.white
-                                : LuminaTokens.glassTextPrimary,
-                            fontSize: 13.5,
-                            fontWeight: isPlaying
-                                ? FontWeight.w700
-                                : FontWeight.w500,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: _ClickableArtistLink(
-                                key: Key('album_track_artist_${widget.index}'),
-                                artistName: widget.artistName,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w400,
-                                defaultColor: LuminaTokens.textSecondary,
-                                hoverColor: Colors.white,
-                                onTap: widget.onOpenArtist,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-
-                  // Track Duration
-                  Text(
-                    _fmtMs(widget.track.durationMs),
-                    style: TextStyle(
-                      color: isPlaying
-                          ? Colors.white
-                          : LuminaTokens.textMuted,
-                      fontSize: 12.5,
-                      fontWeight: isPlaying
-                          ? FontWeight.w600
-                          : FontWeight.w400,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-
-                  // Right-side Quick Actions (Play / Add to Queue)
-                  IconButton(
-                    key: Key('album_track_play_${widget.index}'),
-                    onPressed: widget.onPlay,
-                    tooltip: '播放曲目',
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 28,
-                      minHeight: 28,
-                    ),
-                    icon: Icon(
-                      Icons.play_arrow_rounded,
-                      size: 18,
-                      color: isPlaying || _isHovered
-                          ? Colors.white
-                          : LuminaTokens.textMuted,
-                    ),
-                  ),
-                  IconButton(
-                    key: Key('album_track_queue_${widget.index}'),
-                    onPressed: widget.onAddToQueue,
-                    tooltip: '加入播放佇列',
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 28,
-                      minHeight: 28,
-                    ),
-                    icon: Icon(
-                      Icons.playlist_add_rounded,
-                      size: 17,
-                      color: _isHovered
-                          ? LuminaTokens.textPrimary
-                          : LuminaTokens.textMuted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  String _fmtMs(int ms) {
-    final d = Duration(milliseconds: ms);
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
-}
-
-// ─── Version Chip ─────────────────────────────────────────────────────────────
-
-class _VersionChip extends StatelessWidget {
-  final AlbumVersionInfo version;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _VersionChip({
-    super.key,
-    required this.version,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: Semantics(
-        button: true,
-        selected: isSelected,
-        label: version.editionLabel,
-        child: GestureDetector(
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: LuminaTokens.hoverDuration,
-            curve: LuminaTokens.motionCurve,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? LuminaTokens.glassSegmentSelectedBg
-                  : LuminaTokens.glassPillBg,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isSelected
-                    ? LuminaTokens.glassSegmentSelectedBorder
-                    : LuminaTokens.glassPillBorder,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  version.editionLabel,
-                  style: TextStyle(
-                    color: isSelected
-                        ? Colors.white
-                        : LuminaTokens.glassTextPrimary,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                Text(
-                  '${_providerLabel(version.provider)} · ${version.formatSummary}',
-                  style: TextStyle(
-                    color: isSelected
-                        ? LuminaTokens.glassTextSecondary
-                        : LuminaTokens.textMuted,
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _providerLabel(String provider) => switch (provider) {
-        'local' => '本機',
-        'tidal' => 'Tidal',
-        'qobuz' => 'Qobuz',
-        'apple_music' => 'Apple Music',
-        'youtube_music' => 'YTM',
-        'deezer' => 'Deezer',
-        _ => provider,
-      };
-}
-
-// ─── Credit Chip ──────────────────────────────────────────────────────────────
-
-class _CreditChip extends StatelessWidget {
-  final AlbumCreditInfo credit;
-  final VoidCallback? onTap;
-
-  const _CreditChip({required this.credit, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      key: Key('detail_credit_${credit.artistId}'),
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: LuminaTokens.glassPillBg,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: LuminaTokens.glassPillBorder),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              credit.artistName,
-              style: const TextStyle(
-                color: LuminaTokens.glassTextPrimary,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            Text(
-              credit.role,
-              style: const TextStyle(
-                color: LuminaTokens.glassTextSecondary,
-                fontSize: 11,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

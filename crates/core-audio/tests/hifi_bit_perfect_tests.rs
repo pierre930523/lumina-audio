@@ -6,15 +6,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use core_audio::dsd::{DopFramer, DsdiffReader, DsfReader};
 use core_audio::pcm::{AudioChunk, AudioDecoder, SymphoniaDecoder};
 use core_audio::verification::{
-    pack_chunk_to_wire_bytes, unpack_wire_bytes_to_chunk, AudioVerificationEngine,
-    VerificationConfig, WireSampleFormat,
+    AudioVerificationEngine, VerificationConfig, WireSampleFormat, pack_chunk_to_wire_bytes,
+    unpack_wire_bytes_to_chunk,
 };
 use core_audio::{AudioDeviceManager, AudioFormatManager, AudioPlayer, PlaybackLifecycleState};
 use core_types::{
     AudioCodec, AudioDeviceCapabilities, ChannelLayout, DeviceTransportKind, DsdOutputMode,
-    DsdRate, DspPipelineConfig, Endianness, Interleaving, OutputBackendKind, OutputMode, PeqBandConfig,
-    PeqFilterKind, PlaybackEnginePolicy, ReplayGainConfig, ReplayGainMode, SampleFormatKind,
-    UnifiedAudioFormat, VerificationStatus,
+    DsdRate, DspPipelineConfig, Endianness, Interleaving, OutputBackendKind, OutputMode,
+    PeqBandConfig, PeqFilterKind, PlaybackEnginePolicy, ReplayGainConfig, ReplayGainMode,
+    SampleFormatKind, UnifiedAudioFormat, VerificationStatus,
 };
 
 static REAL_HW_LOCK: Mutex<()> = Mutex::new(());
@@ -296,12 +296,20 @@ fn verify_exclusive_pipeline_roundtrip(
         // Simulate arbitrary backend buffer boundary (different from decoder chunk boundary)
         let stride = (wire.bytes_per_sample() * unified_src.channels as usize) * 64;
         for slice in wire_bytes.chunks(stride.max(16)) {
-            engine.record_backend_input_wire(slice, wire, unified_src.channels, unified_src.sample_rate);
+            engine.record_backend_input_wire(
+                slice,
+                wire,
+                unified_src.channels,
+                unified_src.sample_rate,
+            );
         }
     }
 
     let snap = engine.snapshot("WASAPI Exclusive / ASIO", "Reference DAC");
-    assert!(snap.verification.sample_hash_match, "Expected hash match: {snap:?}");
+    assert!(
+        snap.verification.sample_hash_match,
+        "Expected hash match: {snap:?}"
+    );
     assert_eq!(snap.verification.mismatched_frames, 0);
     assert_eq!(snap.verification.status, expected_status);
     assert!(snap.verification.verification_level.contains("Software"));
@@ -388,11 +396,19 @@ fn test_phase9_16bit_44k_wav_and_flac_bit_perfect_sha256() {
     .unwrap();
     let player = AudioPlayer::new_headless();
     player.set_strict_bit_perfect(true).unwrap();
-    player.play_file(&flac_p2, Some("16/44.1 FLAC".into())).unwrap();
+    player
+        .play_file(&flac_p2, Some("16/44.1 FLAC".into()))
+        .unwrap();
     thread::sleep(Duration::from_millis(80));
     let info = player.output_info();
-    assert!(info.verification.sample_hash_match, "Expected hash match in headless Strict Mode: {info:?}");
-    assert_eq!(info.verification.decoder_sha256, info.verification.backend_input_sha256);
+    assert!(
+        info.verification.sample_hash_match,
+        "Expected hash match in headless Strict Mode: {info:?}"
+    );
+    assert_eq!(
+        info.verification.decoder_sha256,
+        info.verification.backend_input_sha256
+    );
     assert_eq!(info.verification.status, VerificationStatus::PcmUnmodified);
     assert!(info.output.strict_mode);
     player.stop();
@@ -428,7 +444,10 @@ fn test_phase9_24bit_48k_96k_192k_integer_preservation_and_container_unpack() {
             }
             chunks.push(c);
         }
-        assert_eq!(recovered, i24_samples, "24-bit WAV integer mismatch at {rate}Hz");
+        assert_eq!(
+            recovered, i24_samples,
+            "24-bit WAV integer mismatch at {rate}Hz"
+        );
 
         // Verify both Int24PackedLe and Int24In32MsbLe container packing
         verify_exclusive_pipeline_roundtrip(
@@ -536,12 +555,21 @@ fn test_phase9_32bit_pcm_and_32bit_float_wav_verification() {
 #[test]
 fn test_phase9_channel_order_preservation_asymmetric_lr() {
     let chunk = AudioChunk::PcmI16 {
-        samples: vec![0x1111, -0x2222, 0x3333, -0x4444, 0x5555, -0x6666, 0x7777, -0x1234],
+        samples: vec![
+            0x1111, -0x2222, 0x3333, -0x4444, 0x5555, -0x6666, 0x7777, -0x1234,
+        ],
         channels: 2,
         sample_rate: 44_100,
     };
     let wire_bytes = pack_chunk_to_wire_bytes(&chunk, WireSampleFormat::Int24In32MsbLe, None);
-    let unpacked = unpack_wire_bytes_to_chunk(&wire_bytes, WireSampleFormat::Int24In32MsbLe, 2, 44_100, None).unwrap();
+    let unpacked = unpack_wire_bytes_to_chunk(
+        &wire_bytes,
+        WireSampleFormat::Int24In32MsbLe,
+        2,
+        44_100,
+        None,
+    )
+    .unwrap();
     let AudioChunk::PcmI24In32 { samples, .. } = unpacked else {
         panic!("Expected PcmI24In32");
     };
@@ -555,7 +583,9 @@ fn test_phase9_channel_order_preservation_asymmetric_lr() {
 fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
     // 1. Test DSF planar-block -> interleaved fix + Native DSD + DoP v1.1 verification across DSD64/128/256/512
     let dsd_l: Vec<u8> = (0..1024u32).map(|i| ((i * 37) & 0xFF) as u8).collect();
-    let dsd_r: Vec<u8> = (0..1024u32).map(|i| (((i * 91) ^ 0xA5) & 0xFF) as u8).collect();
+    let dsd_r: Vec<u8> = (0..1024u32)
+        .map(|i| (((i * 91) ^ 0xA5) & 0xFF) as u8)
+        .collect();
 
     for (rate_hz, expected_rate) in [
         (2_822_400u32, DsdRate::Dsd64),
@@ -568,7 +598,13 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
         let mut reader = DsfReader::new(std::fs::File::open(&dsf_path).unwrap()).unwrap();
         assert_eq!(reader.unified_format().dsd_rate, Some(expected_rate));
         let chunk = reader.next_chunk().unwrap().unwrap();
-        if let AudioChunk::DsdBitstream { ref bytes, channels, is_lsb_first, .. } = chunk {
+        if let AudioChunk::DsdBitstream {
+            ref bytes,
+            channels,
+            is_lsb_first,
+            ..
+        } = chunk
+        {
             assert_eq!(channels, 2);
             assert!(is_lsb_first);
             assert_eq!(bytes[0], dsd_l[0]);
@@ -604,7 +640,11 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
     }
 
     // 2. Test DSDIFF (.dff) parsing + 1-bit Native DSD preservation
-    let inter_dff: Vec<u8> = dsd_l.iter().zip(&dsd_r).flat_map(|(&l, &r)| [l, r]).collect();
+    let inter_dff: Vec<u8> = dsd_l
+        .iter()
+        .zip(&dsd_r)
+        .flat_map(|(&l, &r)| [l, r])
+        .collect();
     let dff_path = temp_audio_path("dsd_64", "dff");
     std::fs::write(&dff_path, build_synthetic_dsdiff(2_822_400, &inter_dff)).unwrap();
     let mut dff_reader = DsdiffReader::new(std::fs::File::open(&dff_path).unwrap()).unwrap();
@@ -674,26 +714,51 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
     let snap = corrupt_engine.snapshot("WASAPI Exclusive", "DAC");
     assert_ne!(snap.verification.status, VerificationStatus::DsdDop);
     assert!(snap.verification.mismatched_frames > 0);
-    assert!(snap.verification.pcm_sample_check.contains("DoP marker corruption"));
+    assert!(
+        snap.verification
+            .pcm_sample_check
+            .contains("DoP marker corruption")
+    );
 
     // 4. Headless Player: Auto -> DSD DoP vs Explicit DsdOutputMode::DsdToPcm labeling
     let dsf_live = temp_audio_path("dsf_live", "dsf");
     let dsd_block_l = vec![0x96u8; 262_144];
     let dsd_block_r = vec![0x69u8; 262_144];
-    std::fs::write(&dsf_live, build_synthetic_dsf(2_822_400, &dsd_block_l, &dsd_block_r)).unwrap();
+    std::fs::write(
+        &dsf_live,
+        build_synthetic_dsf(2_822_400, &dsd_block_l, &dsd_block_r),
+    )
+    .unwrap();
     let player = AudioPlayer::new_headless();
     player.set_strict_bit_perfect(true).unwrap();
     player.set_dsd_output_mode(DsdOutputMode::DoP).unwrap();
-    player.play_file(&dsf_live, Some("DSD64 Test".into())).unwrap();
+    player
+        .play_file(&dsf_live, Some("DSD64 Test".into()))
+        .unwrap();
     thread::sleep(Duration::from_millis(80));
     let info_dop = player.output_info();
-    assert_eq!(info_dop.verification.status, VerificationStatus::DsdDop, "{info_dop:?}");
+    assert_eq!(
+        info_dop.verification.status,
+        VerificationStatus::DsdDop,
+        "{info_dop:?}"
+    );
 
-    // Explicit DSD-to-PCM MUST report DsdToPcm and NEVER DsdNative / DsdDop
+    // Strict Bit-Perfect MUST reject DSD-to-PCM downgrade while strict mode is enabled.
+    assert!(
+        player.set_dsd_output_mode(DsdOutputMode::DsdToPcm).is_err(),
+        "strict_bit_perfect=true must reject DsdOutputMode::DsdToPcm"
+    );
+
+    // Explicit DSD-to-PCM (in non-strict mode) MUST report DsdToPcm and NEVER DsdNative / DsdDop
+    player.set_strict_bit_perfect(false).unwrap();
     player.set_dsd_output_mode(DsdOutputMode::DsdToPcm).unwrap();
     thread::sleep(Duration::from_millis(120));
     let info_pcm = player.output_info();
-    assert_eq!(info_pcm.verification.status, VerificationStatus::DsdToPcm, "{info_pcm:?}");
+    assert_eq!(
+        info_pcm.verification.status,
+        VerificationStatus::DsdToPcm,
+        "{info_pcm:?}"
+    );
     player.stop();
     player.shutdown();
     let _ = std::fs::remove_file(&dsf_live);
@@ -701,7 +766,9 @@ fn test_phase9_dsd_native_dop_markers_and_dsd_to_pcm_labeling() {
 
 #[test]
 fn test_phase9_strict_mode_blocks_dsp_volume_resampling_and_normal_restores() {
-    let i16_samples: Vec<i16> = (0..144_000i32).map(|i| ((i % 4000) - 2000) as i16).collect();
+    let i16_samples: Vec<i16> = (0..144_000i32)
+        .map(|i| ((i % 4000) - 2000) as i16)
+        .collect();
     let wav_path = temp_audio_path("strict_dsp", "wav");
     std::fs::write(&wav_path, build_wav_i16(48_000, 2, &i16_samples)).unwrap();
 
@@ -726,11 +793,16 @@ fn test_phase9_strict_mode_blocks_dsp_volume_resampling_and_normal_restores() {
         })
         .unwrap();
     player.set_volume(0.45);
-    player.play_file(&wav_path, Some("DSP Test".into())).unwrap();
+    player
+        .play_file(&wav_path, Some("DSP Test".into()))
+        .unwrap();
     thread::sleep(Duration::from_millis(80));
 
     let normal_info = player.output_info();
-    assert_eq!(normal_info.verification.status, VerificationStatus::NotBitPerfect);
+    assert_eq!(
+        normal_info.verification.status,
+        VerificationStatus::NotBitPerfect
+    );
     assert!(!normal_info.verification.sample_hash_match);
     assert!(!normal_info.output.strict_mode);
 
@@ -747,8 +819,14 @@ fn test_phase9_strict_mode_blocks_dsp_volume_resampling_and_normal_restores() {
 
     let strict_info = player.output_info();
     assert!(strict_info.output.strict_mode);
-    assert!(strict_info.verification.sample_hash_match, "{strict_info:?}");
-    assert_eq!(strict_info.verification.status, VerificationStatus::PcmUnmodified);
+    assert!(
+        strict_info.verification.sample_hash_match,
+        "{strict_info:?}"
+    );
+    assert_eq!(
+        strict_info.verification.status,
+        VerificationStatus::PcmUnmodified
+    );
 
     // Disabling Strict Mode restores user's EQ & SW volume cleanly
     player.set_strict_bit_perfect(false).unwrap();
@@ -756,7 +834,10 @@ fn test_phase9_strict_mode_blocks_dsp_volume_resampling_and_normal_restores() {
     assert!(!player.is_dsp_bypassed());
     assert!((player.volume() - 0.2).abs() < 1e-4);
     let restored_info = player.output_info();
-    assert_eq!(restored_info.verification.status, VerificationStatus::NotBitPerfect);
+    assert_eq!(
+        restored_info.verification.status,
+        VerificationStatus::NotBitPerfect
+    );
 
     player.stop();
     player.shutdown();
@@ -766,7 +847,9 @@ fn test_phase9_strict_mode_blocks_dsp_volume_resampling_and_normal_restores() {
 #[test]
 fn test_phase9_seek_track_switch_gapless_and_format_reinit() {
     let tone_a: Vec<i16> = (0..32_768i32).map(|i| ((i % 5000) - 2500) as i16).collect();
-    let tone_b: Vec<i16> = (0..32_768i32).map(|i| (((i * 3) % 5000) - 2500) as i16).collect();
+    let tone_b: Vec<i16> = (0..32_768i32)
+        .map(|i| (((i * 3) % 5000) - 2500) as i16)
+        .collect();
     let tone_c: Vec<i32> = (0..32_768i32).map(|i| (i * 777) % 1_000_000).collect();
 
     let p_a = temp_audio_path("gapless_a", "wav");
@@ -780,7 +863,9 @@ fn test_phase9_seek_track_switch_gapless_and_format_reinit() {
     let player = AudioPlayer::new_headless();
     player.set_strict_bit_perfect(true).unwrap();
     player.queue_next_file(&p_b, Some("Track B (44.1)".into()));
-    player.play_file(&p_a, Some("Track A (44.1)".into())).unwrap();
+    player
+        .play_file(&p_a, Some("Track A (44.1)".into()))
+        .unwrap();
     // Queue next right after play starts because play_stream clears stale pre-queue
     player.queue_next_file(&p_b, Some("Track B (44.1)".into()));
 
@@ -794,14 +879,20 @@ fn test_phase9_seek_track_switch_gapless_and_format_reinit() {
     );
     assert_eq!(player.format_reinit_count(), 0);
     let gapless_info = player.output_info();
-    assert_eq!(gapless_info.verification.mismatched_frames, 0, "{gapless_info:?}");
+    assert_eq!(
+        gapless_info.verification.mismatched_frames, 0,
+        "{gapless_info:?}"
+    );
     assert!(gapless_info.verification.sample_hash_match);
 
     // 2. Format Switch: 16/44.1 -> 24/96kHz triggers FormatSwitchNext re-initialization cleanly!
-    player.play_file(&p_a, Some("Track A (44.1)".into())).unwrap();
+    player
+        .play_file(&p_a, Some("Track A (44.1)".into()))
+        .unwrap();
     player.queue_next_file(&p_c, Some("Track C (96k)".into()));
     for _ in 0..30 {
-        if player.format_reinit_count() >= 1 && player.output_info().output.sample_rate_hz == 96_000 {
+        if player.format_reinit_count() >= 1 && player.output_info().output.sample_rate_hz == 96_000
+        {
             break;
         }
         thread::sleep(Duration::from_millis(50));
@@ -887,7 +978,10 @@ fn test_phase9_exclusive_unavailable_fallback_and_strict_rejection() {
         exclusive_unavailable_reason: Some("AUDCLNT_E_DEVICE_IN_USE (0x8889000A)".into()),
     });
     let snap = engine.snapshot("WASAPI Shared", "USB DAC");
-    assert_eq!(snap.verification.status, VerificationStatus::ExclusiveModeUnavailable);
+    assert_eq!(
+        snap.verification.status,
+        VerificationStatus::ExclusiveModeUnavailable
+    );
     assert!(snap.output.degradation_reason.is_some());
 }
 
@@ -898,7 +992,11 @@ fn test_phase9_real_hardware_wasapi_exclusive_or_asio_live_probe() {
     let Some(usb_or_excl) = caps
         .iter()
         .find(|c| c.exclusive_available && c.transport == DeviceTransportKind::UsbDac)
-        .or_else(|| caps.iter().find(|c| c.exclusive_available && c.backend == OutputBackendKind::WindowsWasapiExclusive))
+        .or_else(|| {
+            caps.iter().find(|c| {
+                c.exclusive_available && c.backend == OutputBackendKind::WindowsWasapiExclusive
+            })
+        })
     else {
         println!("No physical WASAPI Exclusive DAC active; hardware probe skipped safely");
         return;
@@ -907,7 +1005,11 @@ fn test_phase9_real_hardware_wasapi_exclusive_or_asio_live_probe() {
     let rate = if usb_or_excl.supported_sample_rates.contains(&48_000) {
         48_000
     } else {
-        usb_or_excl.supported_sample_rates.first().copied().unwrap_or(48_000)
+        usb_or_excl
+            .supported_sample_rates
+            .first()
+            .copied()
+            .unwrap_or(48_000)
     };
     let silence_wav = temp_audio_path("hw_wasapi_excl", "wav");
     // Use tiny non-clipped near-silence (-60 dBFS) for real speaker safety while proving non-zero pipeline frames
@@ -1020,7 +1122,11 @@ fn test_phase9_real_asio_driver_live_probe() {
     let rate = if asio_dev.supported_sample_rates.contains(&48_000) {
         48_000
     } else {
-        asio_dev.supported_sample_rates.first().copied().unwrap_or(44_100)
+        asio_dev
+            .supported_sample_rates
+            .first()
+            .copied()
+            .unwrap_or(44_100)
     };
     let wav_path = temp_audio_path("hw_asio", "wav");
     let samples: Vec<i32> = (0..rate * 2)
@@ -1030,7 +1136,10 @@ fn test_phase9_real_asio_driver_live_probe() {
 
     let player = AudioPlayer::new();
     player
-        .select_output_device(Some(&asio_dev.device_id), Some(OutputBackendKind::WindowsAsio))
+        .select_output_device(
+            Some(&asio_dev.device_id),
+            Some(OutputBackendKind::WindowsAsio),
+        )
         .unwrap();
     player.set_strict_bit_perfect(true).unwrap();
 

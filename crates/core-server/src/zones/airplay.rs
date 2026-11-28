@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,7 +80,9 @@ impl AirPlayClient {
         loop {
             let n = self.stream.read(&mut tmp).await?;
             if n == 0 {
-                return Err(anyhow!("AirPlay RTSP connection closed cleanly during {method}"));
+                return Err(anyhow!(
+                    "AirPlay RTSP connection closed cleanly during {method}"
+                ));
             }
             buf.extend_from_slice(&tmp[..n]);
             if buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -108,7 +110,9 @@ impl AirPlayClient {
         }
 
         if code >= 400 {
-            return Err(anyhow!("AirPlay RTSP {method} rejected with HTTP/RTSP {code}"));
+            return Err(anyhow!(
+                "AirPlay RTSP {method} rejected with HTTP/RTSP {code}"
+            ));
         }
         Ok((code, headers))
     }

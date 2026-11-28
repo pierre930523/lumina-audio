@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/studio_models.dart';
 import 'package:lumina_app/services/media_sources_controller.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
@@ -34,7 +35,10 @@ class _ResponsiveTestAudioService extends MockAudioService {
   }
 
   @override
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100}) async {
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  }) async {
     return _albums.take(limit).toList();
   }
 
@@ -207,7 +211,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();
@@ -283,7 +289,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();
@@ -338,7 +346,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();
@@ -417,7 +427,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();
@@ -566,7 +578,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();
@@ -669,7 +683,9 @@ void main() {
     (tester) async {
       addTearDown(tester.view.reset);
       final svc = _ResponsiveTestAudioService(coverFilePath);
-      final scaleCtrl = UiScaleController();
+      final scaleCtrl = UiScaleController(
+        initialHomeLayoutPreset: HomeLayoutPreset.classic,
+      );
       addTearDown(() {
         svc.dispose();
         scaleCtrl.dispose();

@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/lyric.dart';
 import 'package:lumina_app/services/library_index_cache.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:lumina_app/ui/lyrics/lyrics_view.dart';
 import 'package:lumina_app/ui/mini_player/floating_capsule.dart';
@@ -31,11 +33,18 @@ void main() {
 
         final audioService = MockAudioService();
         addTearDown(audioService.dispose);
+        final scaleCtrl = UiScaleController(
+          initialHomeLayoutPreset: HomeLayoutPreset.classic,
+        );
+        addTearDown(scaleCtrl.dispose);
 
         await tester.pumpWidget(
           MaterialApp(
             theme: LuminaTokens.buildDarkTheme(),
-            home: HomeScreen(audioService: audioService),
+            home: HomeScreen(
+              audioService: audioService,
+              uiScaleController: scaleCtrl,
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -56,12 +65,51 @@ void main() {
           find.byType(FloatingCapsuleMiniPlayer),
         );
 
-        // 1. Trigger open in Split Lyrics mode -> frame 1 + 150ms (mid-open of 300ms transition)
+        // 1. Trigger open in Split Lyrics mode -> frame 1 + 140ms (mid-open of 280ms transition)
         await tester.tap(find.byKey(const Key('btn_toggle_lyrics')));
         await tester.pump();
-        await tester.pump(const Duration(milliseconds: 150));
 
-        expect(find.byKey(const Key('now_playing_stage')), findsOneWidget);
+        // Zero outer FadeTransition wrapping NowPlayingOverlay (eliminates full-screen saveLayer & bleed-through).
+        final nowPlayingLayerFinder = find.byKey(
+          const ValueKey('home_now_playing_layer'),
+        );
+        expect(nowPlayingLayerFinder, findsOneWidget);
+        final outerFades = find.descendant(
+          of: nowPlayingLayerFinder,
+          matching: find.byType(FadeTransition),
+        );
+        for (final elem in outerFades.evaluate()) {
+          expect(
+            find.descendant(
+              of: find.byElementPredicate((e) => identical(e, elem)),
+              matching: find.byKey(const ValueKey('now_playing_stage')),
+            ),
+            findsNothing,
+          );
+        }
+
+        // Verify full-sheet SlideTransition starts at Offset(0.0, 1.0) on frame 0
+        final slideFinder = find.byKey(const Key('now_playing_slide_transition'));
+        expect(slideFinder, findsOneWidget);
+        final slideWidget = tester.widget<SlideTransition>(slideFinder);
+        expect(slideWidget.position.value, const Offset(0.0, 1.0));
+
+        // Verify opaque backing ColoredBox inside now_playing_bg_repaint_boundary
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('now_playing_bg_repaint_boundary')),
+            matching: find.byWidgetPredicate(
+              (w) => w is ColoredBox && w.color == LuminaTokens.canvasBg,
+            ),
+          ),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 140));
+        expect(slideWidget.position.value.dy, greaterThan(0.0));
+        expect(slideWidget.position.value.dy, lessThan(1.0));
+
+        expect(find.byKey(const ValueKey('now_playing_stage')), findsOneWidget);
         expect(find.byType(FloatingCapsuleMiniPlayer), findsOneWidget);
         expect(
           identical(
@@ -86,7 +134,7 @@ void main() {
         );
         // FFT MUST stay false mid-open before AnimationStatus.completed.
         expect(audioService.nowPlayingVisible, isFalse);
-        // Zero BackdropFilter inside NowPlayingOverlay or LyricsView.
+        // Zero BackdropFilter inside NowPlayingOverlay, LyricsView, or MiniPlayer mid-open.
         expect(
           find.descendant(
             of: find.byType(NowPlayingOverlay),
@@ -101,6 +149,13 @@ void main() {
           ),
           findsNothing,
         );
+        expect(
+          find.descendant(
+            of: find.byType(FloatingCapsuleMiniPlayer),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
         // Zero per-line ImageFiltered blur while transition is unsettled.
         expect(
           find.descendant(
@@ -110,11 +165,14 @@ void main() {
           findsNothing,
         );
 
-        // 2. Complete remaining 150ms -> AnimationStatus.completed (300ms total)
-        await tester.pump(const Duration(milliseconds: 155));
+        // 2. Complete remaining 140ms -> AnimationStatus.completed (280ms total)
+        await tester.pump(const Duration(milliseconds: 145));
         await tester.pump();
 
+        expect(slideWidget.position.value, Offset.zero);
         expect(audioService.nowPlayingVisible, isTrue);
+        // Home ambient layer is offstage while Now Playing covers it.
+        expect(find.byKey(const Key('home_bg_repaint_boundary')), findsNothing);
         expect(
           identical(
             tester.element(workspaceBoundaryFinder),
@@ -157,8 +215,15 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pump();
 
-        // FFT resets to false on frame 1 of closing!
+        // FFT resets to false on frame 1 of closing, and mini-player BackdropFilter stays suppressed!
         expect(audioService.nowPlayingVisible, isFalse);
+        expect(
+          find.descendant(
+            of: find.byType(FloatingCapsuleMiniPlayer),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
         expect(
           identical(
             tester.element(workspaceBoundaryFinder),
@@ -181,9 +246,18 @@ void main() {
           isTrue,
         );
 
-        // 4. Mid-close (150ms) -> still identical and FFT remains false
-        await tester.pump(const Duration(milliseconds: 150));
+        // 4. Mid-close (110ms of 220ms reverseDuration) -> still animating, FFT false, zero mini-player BackdropFilter
+        await tester.pump(const Duration(milliseconds: 110));
+        expect(slideWidget.position.value.dy, greaterThan(0.0));
+        expect(slideWidget.position.value.dy, lessThan(1.0));
         expect(audioService.nowPlayingVisible, isFalse);
+        expect(
+          find.descendant(
+            of: find.byType(FloatingCapsuleMiniPlayer),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
         expect(
           identical(
             tester.state(find.byType(FloatingCapsuleMiniPlayer)),
@@ -192,12 +266,19 @@ void main() {
           isTrue,
         );
 
-        // 5. Complete close (remaining 150ms + settle) -> back to closed
-        await tester.pump(const Duration(milliseconds: 160));
+        // 5. Complete close (remaining 115ms -> 225ms > 220ms reverseDuration) -> dismissed
+        await tester.pump(const Duration(milliseconds: 115));
         await tester.pumpAndSettle();
 
-        expect(find.byKey(const Key('now_playing_stage')), findsNothing);
+        expect(find.byKey(const ValueKey('now_playing_stage')), findsNothing);
         expect(find.byType(FloatingCapsuleMiniPlayer), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(FloatingCapsuleMiniPlayer),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsOneWidget,
+        );
         expect(audioService.nowPlayingVisible, isFalse);
         expect(
           identical(
@@ -210,6 +291,51 @@ void main() {
           identical(
             tester.renderObject(workspaceBoundaryFinder),
             initialWorkspaceRenderObj,
+          ),
+          isTrue,
+        );
+        expect(
+          identical(
+            tester.state(find.byType(FloatingCapsuleMiniPlayer)),
+            initialMiniPlayerState,
+          ),
+          isTrue,
+        );
+
+        // 6. Five rapid open/close cycles settle cleanly without exceptions or identity churn
+        for (var cycle = 0; cycle < 5; cycle++) {
+          await tester.tap(find.byKey(const Key('btn_expand_now_playing')));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 120));
+          expect(audioService.nowPlayingVisible, isFalse);
+
+          // Mid-flight reverse from ~0.43 takes ~94ms (220ms * 0.43); check at 40ms mid-close
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 40));
+          expect(
+            find.descendant(
+              of: find.byType(FloatingCapsuleMiniPlayer),
+              matching: find.byType(BackdropFilter),
+            ),
+            findsNothing,
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.descendant(
+              of: find.byType(FloatingCapsuleMiniPlayer),
+              matching: find.byType(BackdropFilter),
+            ),
+            findsOneWidget,
+          );
+        }
+        expect(find.byKey(const ValueKey('now_playing_stage')), findsNothing);
+        expect(audioService.nowPlayingVisible, isFalse);
+        expect(tester.takeException(), isNull);
+        expect(
+          identical(
+            tester.element(workspaceBoundaryFinder),
+            initialWorkspaceElement,
           ),
           isTrue,
         );

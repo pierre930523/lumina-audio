@@ -260,6 +260,8 @@ void main() {
         expect(find.text('The Dark Side of the Moon'), findsOneWidget);
         expect(find.byKey(const Key('album_override_badge')), findsNothing);
 
+        await tester.tap(find.byKey(const Key('btn_album_more_options')));
+        await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('btn_edit_album_metadata')));
         await tester.pumpAndSettle();
 
@@ -279,6 +281,8 @@ void main() {
         expect(find.byKey(const Key('album_override_badge')), findsOneWidget);
 
         // Clear overrides via dialog.
+        await tester.tap(find.byKey(const Key('btn_album_more_options')));
+        await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('btn_edit_album_metadata')));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('btn_clear_album_metadata')));

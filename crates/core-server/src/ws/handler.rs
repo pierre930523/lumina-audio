@@ -1,11 +1,12 @@
 use crate::error::ServerError;
-use crate::state::{signal_path_to_payload, AppState};
-use crate::ws::messages::{WsErrorResponse, WsMessage};
+use crate::state::{AppState, signal_path_to_payload};
+use crate::ws::messages::{PlaybackStatePayload, WsMessage};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
+use axum::http::header::AUTHORIZATION;
 use axum::response::IntoResponse;
+use core_types::{LuminaError, LuminaErrorCode, PlaybackCommand};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -57,52 +58,42 @@ pub async fn ws_handler(
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, send_snapshot)))
 }
 
+async fn send_full_sync(state: &Arc<AppState>, direct_tx: &mpsc::Sender<WsMessage>) {
+    let snapshot = state.build_protocol_snapshot().await;
+    let pb_payload = PlaybackStatePayload::from(snapshot.playback.clone());
+    let sp_payload = snapshot
+        .signal_path
+        .as_ref()
+        .map(signal_path_to_payload)
+        .unwrap_or_default();
+
+    let _ = direct_tx
+        .send(WsMessage::Snapshot { payload: snapshot })
+        .await;
+    let _ = direct_tx
+        .send(WsMessage::PlaybackStateChanged {
+            payload: pb_payload,
+        })
+        .await;
+    let _ = direct_tx
+        .send(WsMessage::SignalPathUpdated {
+            payload: sp_payload,
+        })
+        .await;
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, send_snapshot: bool) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.broadcast_tx.subscribe();
-    let (direct_tx, mut direct_rx) = mpsc::channel::<WsMessage>(16);
+    let (direct_tx, mut direct_rx) = mpsc::channel::<WsMessage>(32);
 
     info!("New WebSocket client connected");
 
     if send_snapshot {
-        let mut pb = state.playback_state.read().await.clone();
-        if let Some(ref player) = state.player {
-            let dd = player.dual_deck_status();
-            pb.swap_generation = dd.swap_generation;
-            pb.playback_epoch = state.current_playback_epoch();
-            if state.is_loading_pending() {
-                pb.status = "loading".to_string();
-                pb.position_ms = 0;
-            } else {
-                pb.status = match player.state_code() {
-                    2 => "playing".to_string(),
-                    3 => "paused".to_string(),
-                    5 => "loading".to_string(),
-                    8 => "ended".to_string(),
-                    4 => "error".to_string(),
-                    _ => "stopped".to_string(),
-                };
-                pb.position_ms = player.position_ms();
-                pb.duration_ms = player.duration_ms();
-                if let Some(ref active_track) = dd.active_track {
-                    if !active_track.track_id.is_empty() {
-                        pb.track_id = Some(active_track.track_id.clone());
-                    }
-                    pb.track = Some(active_track.clone());
-                }
-            }
-        } else {
-            pb.playback_epoch = state.current_playback_epoch();
-        }
-        let _ = direct_tx
-            .send(WsMessage::PlaybackStateChanged { payload: pb })
-            .await;
-        let sp = state.signal_path.read().await.clone();
-        let _ = direct_tx
-            .send(WsMessage::SignalPathUpdated { payload: sp })
-            .await;
+        send_full_sync(&state, &direct_tx).await;
     }
 
+    let send_state = state.clone();
     let mut send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -113,13 +104,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, send_snapshot: b
                         break;
                     }
                 }
-                Ok(msg) = rx.recv() => {
-                    if let Ok(text) = serde_json::to_string(&msg)
-                        && sender.send(Message::Text(text.into())).await.is_err()
-                    {
-                        break;
+                res = rx.recv() => match res {
+                    Ok(msg) => {
+                        if let Ok(text) = serde_json::to_string(&msg)
+                            && sender.send(Message::Text(text.into())).await.is_err()
+                        {
+                            break;
+                        }
                     }
-                }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            "WebSocket client lagged by {skipped} broadcast messages; sending resync Snapshot"
+                        );
+                        let snapshot = send_state.build_protocol_snapshot().await;
+                        if let Ok(text) = serde_json::to_string(&WsMessage::Snapshot {
+                            payload: snapshot,
+                        }) && sender.send(Message::Text(text.into())).await.is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
                 else => break,
             }
         }
@@ -133,21 +140,43 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, send_snapshot: b
                 Message::Text(text) => match serde_json::from_str::<serde_json::Value>(&text) {
                     Ok(val) => {
                         debug!("Received WS command: {:?}", val);
-                        if let Some(action) = val.get("action").and_then(|a| a.as_str()) {
+                        if val.get("command").is_some() {
+                            match serde_json::from_value::<PlaybackCommand>(val) {
+                                Ok(cmd) => {
+                                    if let Err(err) =
+                                        state_clone.dispatch_playback_command(cmd).await
+                                    {
+                                        let _ = direct_tx_cmd
+                                            .send(WsMessage::Error {
+                                                payload: err.to_lumina_error(),
+                                            })
+                                            .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = direct_tx_cmd
+                                        .send(WsMessage::Error {
+                                            payload: LuminaError::new(
+                                                LuminaErrorCode::InvalidCommand,
+                                                "Invalid PlaybackCommand payload",
+                                            )
+                                            .with_details(e.to_string()),
+                                        })
+                                        .await;
+                                }
+                            }
+                        } else if let Some(action) = val.get("action").and_then(|a| a.as_str()) {
                             handle_client_action(action, &val, &state_clone, &direct_tx_cmd).await;
                         }
                     }
-                    Err(_) => {
-                        let err_resp = WsErrorResponse::new("Invalid JSON text frame");
-                        if let Ok(err_text) = serde_json::to_string(&err_resp) {
-                            let _ = state_clone.broadcast_tx.send(WsMessage::StateChanged {
-                                extra: serde_json::json!({
-                                    "status": "error",
-                                    "error": "Invalid JSON text frame"
-                                }),
-                            });
-                            debug!("Invalid JSON WS frame: {}", err_text);
-                        }
+                    Err(e) => {
+                        let err = LuminaError::new(
+                            LuminaErrorCode::InvalidCommand,
+                            "Invalid JSON text frame",
+                        )
+                        .with_details(e.to_string());
+                        let _ = direct_tx_cmd.send(WsMessage::Error { payload: err }).await;
+                        debug!("Invalid JSON WS frame unicast error to sender");
                     }
                 },
                 Message::Close(_) => break,
@@ -172,146 +201,51 @@ async fn handle_client_action(
 ) {
     match action {
         "state.sync" => {
-            let mut pb = state.playback_state.read().await.clone();
-            if let Some(ref player) = state.player {
-                let dd = player.dual_deck_status();
-                pb.swap_generation = dd.swap_generation;
-                pb.playback_epoch = state.current_playback_epoch();
-                if state.is_loading_pending() {
-                    pb.status = "loading".to_string();
-                    pb.position_ms = 0;
-                } else {
-                    pb.status = match player.state_code() {
-                        2 => "playing".to_string(),
-                        3 => "paused".to_string(),
-                        5 => "loading".to_string(),
-                        8 => "ended".to_string(),
-                        4 => "error".to_string(),
-                        _ => "stopped".to_string(),
-                    };
-                    pb.position_ms = player.position_ms();
-                    pb.duration_ms = player.duration_ms();
-                    if let Some(ref active_track) = dd.active_track {
-                        if !active_track.track_id.is_empty() {
-                            pb.track_id = Some(active_track.track_id.clone());
-                        }
-                        pb.track = Some(active_track.clone());
-                    }
-                }
-            } else {
-                pb.playback_epoch = state.current_playback_epoch();
-            }
-            let _ = direct_tx
-                .send(WsMessage::PlaybackStateChanged { payload: pb })
-                .await;
-            let sp = state.signal_path.read().await.clone();
-            let _ = direct_tx
-                .send(WsMessage::SignalPathUpdated { payload: sp })
-                .await;
+            send_full_sync(state, direct_tx).await;
         }
         "playback.play" => {
-            if let Some(ref player) = state.player
-                && player.state_code() == 3
-            {
-                player.resume();
-            }
-            let payload = {
-                let mut st = state.playback_state.write().await;
-                st.status = "playing".to_string();
-                st.playback_epoch = state.current_playback_epoch();
-                st.clone()
-            };
             let _ = state
-                .broadcast_tx
-                .send(WsMessage::PlaybackStateChanged { payload });
+                .dispatch_playback_command(PlaybackCommand::Resume)
+                .await;
         }
         "playback.pause" => {
-            if let Some(ref player) = state.player {
-                player.pause();
-            }
-            let payload = {
-                let mut st = state.playback_state.write().await;
-                st.status = "paused".to_string();
-                if let Some(ref player) = state.player {
-                    st.position_ms = player.position_ms();
-                }
-                st.playback_epoch = state.current_playback_epoch();
-                st.clone()
-            };
             let _ = state
-                .broadcast_tx
-                .send(WsMessage::PlaybackStateChanged { payload });
+                .dispatch_playback_command(PlaybackCommand::Pause)
+                .await;
         }
         "playback.stop" => {
-            let next_gen = state
-                .play_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            state
-                .loaded_generation
-                .store(next_gen, std::sync::atomic::Ordering::SeqCst);
-            state.cancel_active_play_token();
-            let _ = state.play_cmd_tx.send_replace(None);
-            let new_epoch = state.advance_playback_epoch(None);
-            if let Some(ref player) = state.player {
-                player.stop();
-            }
-            let eff_epoch = state.sync_playback_epoch_from_player(new_epoch);
-            let payload = {
-                let mut st = state.playback_state.write().await;
-                st.status = "stopped".to_string();
-                st.position_ms = 0;
-                st.track = None;
-                st.playback_epoch = eff_epoch;
-                if let Some(ref player) = state.player {
-                    st.swap_generation = player.swap_generation();
-                }
-                st.clone()
-            };
-            let _ = state
-                .broadcast_tx
-                .send(WsMessage::PlaybackStateChanged { payload });
+            let _ = state.dispatch_playback_command(PlaybackCommand::Stop).await;
         }
         "playback.seek" => {
             if let Some(pos_ms) = val.get("position_ms").and_then(|v| v.as_u64()) {
-                if let Some(ref player) = state.player {
-                    player.seek_ms(pos_ms);
-                }
-                let payload = {
-                    let mut st = state.playback_state.write().await;
-                    st.position_ms = pos_ms;
-                    st.playback_epoch = state.current_playback_epoch();
-                    st.clone()
-                };
                 let _ = state
-                    .broadcast_tx
-                    .send(WsMessage::PlaybackStateChanged { payload });
+                    .dispatch_playback_command(PlaybackCommand::Seek {
+                        position_ms: pos_ms,
+                    })
+                    .await;
             }
         }
         "playback.volume" => {
             if let Some(vol) = val.get("volume").and_then(|v| v.as_f64()) {
-                let clamped = vol.clamp(0.0, 1.0) as f32;
-                if let Some(ref player) = state.player {
-                    player.set_volume(clamped);
-                }
-                let mut v_lock = state.volume.write().await;
-                *v_lock = clamped;
-                let _ = state.broadcast_tx.send(WsMessage::StateChanged {
-                    extra: serde_json::json!({ "volume": clamped }),
-                });
+                let _ = state
+                    .dispatch_playback_command(PlaybackCommand::SetVolume { volume: vol as f32 })
+                    .await;
             }
         }
         "dsp.bypass" => {
             if let Some(bypass) = val.get("bypass").and_then(|v| v.as_bool()) {
                 if let Some(ref player) = state.player {
                     player.set_dsp_bypass(bypass);
-                    let sp_payload = signal_path_to_payload(&player.current_signal_path());
+                    let sp_raw = player.current_signal_path();
+                    let sp_payload = signal_path_to_payload(&sp_raw);
+                    *state.signal_path_raw.write().await = sp_raw;
                     *state.signal_path.write().await = sp_payload.clone();
                     let _ = state.broadcast_tx.send(WsMessage::SignalPathUpdated {
                         payload: sp_payload,
                     });
                 }
                 state.dsp_config.write().await.bypass = bypass;
+                state.broadcast_playback_state().await;
             }
         }
         _ => {}

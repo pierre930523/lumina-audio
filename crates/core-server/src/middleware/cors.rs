@@ -1,6 +1,6 @@
 use axum::extract::DefaultBodyLimit;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::Method;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use tower_http::cors::{Any, CorsLayer};
 
 pub const MAX_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024; // 10MB

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:material_ui/material_ui.dart';
+import '../theme/lumina_glass_theme.dart';
 import '../theme/lumina_tokens.dart';
 
 class TrackProgressBar extends StatefulWidget {
@@ -137,6 +138,21 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
 
   @override
   Widget build(BuildContext context) {
+    final glass = LuminaGlassTheme.of(context);
+    final isDark = glass.isDark;
+    final activeColor =
+        isDark ? LuminaTokens.glassTextPrimary : glass.textPrimary;
+    final inactiveColor = isDark
+        ? LuminaTokens.glassTrackUnplayed
+        : glass.textPrimary.withValues(alpha: 0.22);
+    final secondaryColor =
+        isDark ? LuminaTokens.glassTextSecondary : glass.textSecondary;
+    final tertiaryColor =
+        isDark ? LuminaTokens.glassTextTertiary : glass.textTertiary;
+    final glowColor = isDark ? Colors.white : glass.accent;
+    final hoverBg = isDark ? LuminaTokens.glassRowHoverBg : glass.pillBg;
+    final focusColor = isDark ? LuminaTokens.focusRing : glass.accent;
+
     final maxMs = widget.duration.inMilliseconds > 0
         ? widget.duration.inMilliseconds.toDouble()
         : 1.0;
@@ -169,14 +185,14 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
               thumbShape: _GlowingDotThumbShape(
                 radius: isActive ? 5.5 : 3.5,
                 isActive: isActive,
+                dotColor: activeColor,
+                glowColor: glowColor,
               ),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
-              overlayColor: LuminaTokens.glassTextPrimary.withValues(
-                alpha: 0.14,
-              ),
-              activeTrackColor: LuminaTokens.glassTextPrimary,
-              inactiveTrackColor: LuminaTokens.glassTrackUnplayed,
-              thumbColor: LuminaTokens.glassTextPrimary,
+              overlayColor: activeColor.withValues(alpha: 0.14),
+              activeTrackColor: activeColor,
+              inactiveTrackColor: inactiveColor,
+              thumbColor: activeColor,
             ),
             child: Semantics(
               label: '播放進度條',
@@ -209,9 +225,7 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
           TrackProgressBar.formatDuration(displayPosition),
           key: const Key('progress_position_text'),
           style: TextStyle(
-            color: _isDragging
-                ? LuminaTokens.glassTextPrimary
-                : LuminaTokens.glassTextTertiary,
+            color: _isDragging ? activeColor : tertiaryColor,
             fontSize: 11,
             fontWeight: _isDragging ? FontWeight.w600 : FontWeight.normal,
             fontFeatures: const [ui.FontFeature.tabularFigures()],
@@ -231,8 +245,8 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
             child: InkWell(
               borderRadius: BorderRadius.circular(LuminaTokens.space2xs),
               mouseCursor: SystemMouseCursors.click,
-              hoverColor: LuminaTokens.glassRowHoverBg,
-              focusColor: LuminaTokens.focusRing.withValues(alpha: 0.25),
+              hoverColor: hoverBg,
+              focusColor: focusColor.withValues(alpha: 0.25),
               onTap: _toggleRemaining,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
@@ -242,9 +256,7 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
                       : TrackProgressBar.formatDuration(widget.duration),
                   key: const Key('progress_duration_text'),
                   style: TextStyle(
-                    color: _showRemaining
-                        ? LuminaTokens.glassTextSecondary
-                        : LuminaTokens.glassTextTertiary,
+                    color: _showRemaining ? secondaryColor : tertiaryColor,
                     fontSize: 11,
                     fontFeatures: const [ui.FontFeature.tabularFigures()],
                   ),
@@ -261,10 +273,14 @@ class _TrackProgressBarState extends State<TrackProgressBar> {
 class _GlowingDotThumbShape extends SliderComponentShape {
   final double radius;
   final bool isActive;
+  final Color dotColor;
+  final Color glowColor;
 
   const _GlowingDotThumbShape({
     required this.radius,
     required this.isActive,
+    required this.dotColor,
+    required this.glowColor,
   });
 
   @override
@@ -288,7 +304,7 @@ class _GlowingDotThumbShape extends SliderComponentShape {
   }) {
     final canvas = context.canvas;
     final glowPaint = Paint()
-      ..color = Colors.white.withValues(alpha: isActive ? 0.48 : 0.24)
+      ..color = glowColor.withValues(alpha: isActive ? 0.42 : 0.20)
       ..maskFilter = MaskFilter.blur(
         BlurStyle.normal,
         isActive ? 5.0 : 2.5,
@@ -296,7 +312,7 @@ class _GlowingDotThumbShape extends SliderComponentShape {
     canvas.drawCircle(center, radius + (isActive ? 2.0 : 1.0), glowPaint);
 
     final dotPaint = Paint()
-      ..color = LuminaTokens.glassTextPrimary
+      ..color = dotColor
       ..style = PaintingStyle.fill;
     canvas.drawCircle(center, radius, dotPaint);
   }

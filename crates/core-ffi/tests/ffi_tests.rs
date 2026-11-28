@@ -286,8 +286,13 @@ fn test_ffi_m7c_and_phase4_exports_roundtrip() {
     unsafe { lumina_string_free(act_ptr) };
     assert!(act_str.contains(&p2_id));
 
-    let upd_c = CString::new(r##"{"name":"NightModeV2","avatar_color":"#10B981","is_default":false}"##).unwrap();
-    assert_eq!(profiles::lumina_profile_update(p2_c.as_ptr(), upd_c.as_ptr()), 0);
+    let upd_c =
+        CString::new(r##"{"name":"NightModeV2","avatar_color":"#10B981","is_default":false}"##)
+            .unwrap();
+    assert_eq!(
+        profiles::lumina_profile_update(p2_c.as_ptr(), upd_c.as_ptr()),
+        0
+    );
     assert_eq!(profiles::lumina_profile_delete(p2_c.as_ptr()), 0);
 
     let list_ptr = profiles::lumina_profile_list();
@@ -306,7 +311,8 @@ fn test_ffi_m7c_and_phase4_exports_roundtrip() {
     assert_eq!(playback::lumina_audio_select_device(dev_id.as_ptr(), 1), 0);
 
     // 3. DSP Config & AutoEQ import
-    let autoeq_c = CString::new("Preamp: -4.2 dB\nFilter 1: ON PK Fc 250 Hz Gain 2.5 dB Q 1.2\n").unwrap();
+    let autoeq_c =
+        CString::new("Preamp: -4.2 dB\nFilter 1: ON PK Fc 250 Hz Gain 2.5 dB Q 1.2\n").unwrap();
     let bands_ptr = signal_path::lumina_dsp_import_autoeq(autoeq_c.as_ptr());
     assert!(!bands_ptr.is_null());
     let bands_str = unsafe { CStr::from_ptr(bands_ptr).to_str().unwrap().to_string() };
@@ -471,9 +477,10 @@ fn test_ffi_invalid_file_path_returns_error_and_last_error() {
         unsafe { lumina_string_free(prev) };
     }
 
-    let bad_json =
-        CString::new(r#"{"id":"bad-1","title":"Missing","file_path":"/definitely/missing/audio_12345.wav"}"#)
-            .unwrap();
+    let bad_json = CString::new(
+        r#"{"id":"bad-1","title":"Missing","file_path":"/definitely/missing/audio_12345.wav"}"#,
+    )
+    .unwrap();
     let rc1 = playback::lumina_playback_play(bad_json.as_ptr());
     assert_eq!(rc1, error::LUMINA_ERR_AUDIO_BACKEND);
     let err1 = lumina_last_error_message();
@@ -561,8 +568,14 @@ fn test_ffi_phase10_strict_mode_output_info_and_device_caps() {
     unsafe { lumina_string_free(info_ptr) };
     let info_val: serde_json::Value = serde_json::from_str(&info_str).unwrap();
     assert_eq!(info_val["output"]["strict_mode"], serde_json::json!(true));
-    assert_eq!(info_val["verification"]["sample_hash_match"], serde_json::json!(true));
-    assert_eq!(info_val["verification"]["status"], serde_json::json!("PCM UNMODIFIED"));
+    assert_eq!(
+        info_val["verification"]["sample_hash_match"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        info_val["verification"]["status"],
+        serde_json::json!("PCM UNMODIFIED")
+    );
 
     // Exit Strict Mode -> restores previous SW volume (0.25)
     assert_eq!(playback::lumina_audio_set_strict_mode(0), 0);
@@ -649,17 +662,16 @@ fn test_ffi_contract2_artwork_and_rescan() {
     let cover_file = tmp_dir.join("cover.jpg");
     // Minimal valid JPEG header bytes
     let dummy_jpg = [
-        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01,
-        0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06,
-        0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D,
-        0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D,
-        0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28,
-        0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
-        0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01,
-        0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
-        0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
-        0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xDA, 0x00, 0x08, 0x01,
-        0x01, 0x00, 0x00, 0x3F, 0x00, 0xBF, 0x00, 0xFF, 0xD9,
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00,
+        0x48, 0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06,
+        0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B,
+        0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+        0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31,
+        0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF,
+        0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00,
+        0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xBF, 0x00, 0xFF, 0xD9,
     ];
     std::fs::write(&cover_file, dummy_jpg).unwrap();
 
@@ -702,11 +714,11 @@ fn test_ffi_contract2_artwork_and_rescan() {
     let manual_cover = tmp_dir.join("manual_cover.png");
     // Minimal 1x1 PNG bytes
     let dummy_png = [
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
     std::fs::write(&manual_cover, dummy_png).unwrap();
     let c_manual = CString::new(manual_cover.to_string_lossy().to_string()).unwrap();
@@ -990,8 +1002,8 @@ fn test_ffi_http_headers_and_403_surfacing_sync_and_async() {
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
@@ -1256,8 +1268,8 @@ fn test_ffi_source_spec_epoch_and_external_backend_rejection() {
     use core_types::{StreamKey, StreamSourceSpec};
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     lumina_shutdown();
@@ -1343,7 +1355,8 @@ fn test_ffi_source_spec_epoch_and_external_backend_rejection() {
                         .lines()
                         .find(|l| l.to_ascii_lowercase().starts_with("range:"))
                         && let Some(spec) = range_line.split_once(':').map(|(_, v)| v.trim())
-                        && let Some((s, e)) = spec.strip_prefix("bytes=").and_then(|r| r.split_once('-'))
+                        && let Some((s, e)) =
+                            spec.strip_prefix("bytes=").and_then(|r| r.split_once('-'))
                     {
                         let start = s.parse::<usize>().unwrap_or(0).min(total_len - 1);
                         let end = e
@@ -1555,10 +1568,7 @@ fn test_phase2_l1_cache_and_sidecar_ffi() {
     let _ = lumina_shutdown();
     assert_eq!(lumina_init_headless(), 0);
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_ffi_l1_test_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_l1_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let db_path = tmp_dir.join("l1_ffi.db");
     let c_db_path = CString::new(db_path.to_str().unwrap()).unwrap();
@@ -1642,8 +1652,8 @@ fn test_phase2_l1_cache_and_sidecar_ffi() {
 fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -1660,10 +1670,7 @@ fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
     };
 
     // Build a valid 48 kHz WAV in memory and serve both 200/206 and 401 endpoints
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_ffi_phase3_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_phase3_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let wav_tmp = tmp_dir.join("stream.wav");
     write_test_wav(&wav_tmp, 48_000, 2, 48_000 * 3);
@@ -1804,7 +1811,10 @@ fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
         thread::sleep(Duration::from_millis(20));
     }
     let playing_st = read_state_json();
-    assert_eq!(playing_st["state_code"], 2, "Expected Playing: {playing_st}");
+    assert_eq!(
+        playing_st["state_code"], 2,
+        "Expected Playing: {playing_st}"
+    );
     assert!(playing_st.get("last_error_code").is_some());
     assert!(playing_st.get("last_error_provider").is_some());
     assert!(playing_st["last_error_code"].is_null());
@@ -1814,7 +1824,10 @@ fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
     let c_ytm_pid = CString::new("youtube_music").unwrap();
     assert_eq!(lumina_streaming_cancel_provider(c_ytm_pid.as_ptr()), 0);
     let cancelled_st = read_state_json();
-    assert_eq!(cancelled_st["state_code"], 4, "Expected Error: {cancelled_st}");
+    assert_eq!(
+        cancelled_st["state_code"], 4,
+        "Expected Error: {cancelled_st}"
+    );
     assert_eq!(cancelled_st["last_error_code"], "AUTH_REQUIRED");
     assert_eq!(cancelled_st["last_error_provider"], "youtube_music");
 
@@ -1881,7 +1894,11 @@ fn test_phase3_ffi_error_codes_provider_cancel_and_clean_shutdown() {
     let loaded_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
     unsafe { lumina_string_free(ptr) };
     let rows: Vec<serde_json::Value> = serde_json::from_str(&loaded_str).unwrap();
-    assert_eq!(rows.len(), 1, "Pending L1 write must be flushed on shutdown: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "Pending L1 write must be flushed on shutdown: {rows:?}"
+    );
     assert_eq!(rows[0]["track_id"], "persist-shutdown-1");
 
     assert_eq!(lumina_shutdown(), 0);
@@ -1899,10 +1916,7 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
     let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let _ = lumina_shutdown();
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_ffi_phase4_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_ffi_phase4_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let l2_root = tmp_dir.join("l2_custom");
     let c_l2_root = CString::new(l2_root.to_str().unwrap()).unwrap();
@@ -1936,10 +1950,7 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
     assert_eq!(total_bytes, 0);
 
     // 3. Explicit lumina_l2_cache_init reconfigures root_dir & watermarks cleanly.
-    assert_eq!(
-        lumina_l2_cache_init(c_l2_root.as_ptr(), 2000, 1000),
-        0
-    );
+    assert_eq!(lumina_l2_cache_init(c_l2_root.as_ptr(), 2000, 1000), 0);
     let eng = engine::get_engine();
     let mgr = eng
         .l2_cache_manager
@@ -1956,7 +1967,11 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
     assert_eq!(total_bytes, 900);
 
     // Lookup queues pending access; lumina_l2_cache_flush_access flushes in one transaction.
-    let hit = eng.runtime.block_on(mgr.lookup_direct_head(&key1)).unwrap().unwrap();
+    let hit = eng
+        .runtime
+        .block_on(mgr.lookup_direct_head(&key1))
+        .unwrap()
+        .unwrap();
     drop(hit);
     assert_eq!(lumina_l2_cache_flush_access(), 0);
     assert_eq!(lumina_l2_cache_run_orphan_sweep(), 0);
@@ -1968,7 +1983,10 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
         .unwrap();
     assert_eq!(lumina_l2_cache_evict_now(), 0);
     assert_eq!(lumina_l2_cache_total_bytes(&mut total_bytes), 0);
-    assert!(total_bytes <= 1000, "Expected total_bytes <= 1000, got {total_bytes}");
+    assert!(
+        total_bytes <= 1000,
+        "Expected total_bytes <= 1000, got {total_bytes}"
+    );
 
     // 4. Dual-Deck FFI: play Active track, prepare Standby track, and skip_to_standby().
     let wav1 = tmp_dir.join("active_deck.wav");
@@ -2045,7 +2063,10 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
     })
     .to_string();
     let c_standby2 = CString::new(standby2_json).unwrap();
-    assert_eq!(lumina_playback_prepare_standby_async(c_standby2.as_ptr(), 10), 0);
+    assert_eq!(
+        lumina_playback_prepare_standby_async(c_standby2.as_ptr(), 10),
+        0
+    );
 
     let mut standby_ready = false;
     for _ in 0..80 {
@@ -2068,7 +2089,12 @@ fn test_phase4_ffi_l2_cache_and_dual_deck_standby_skip() {
     let st_after_skip = read_state_json();
     assert_eq!(st_after_skip["active_deck"], "deck_b");
     assert_eq!(st_after_skip["deck_b_state"], "PLAYING");
-    assert!(st_after_skip["manual_zero_latency_switches"].as_u64().unwrap_or(0) >= 1);
+    assert!(
+        st_after_skip["manual_zero_latency_switches"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
 
     assert_eq!(lumina_shutdown(), 0);
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -2124,10 +2150,8 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
     let _g = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let _ = lumina_shutdown();
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_ffi_async_l2_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("lumina_ffi_async_l2_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let wav1_path = tmp_dir.join("l2_source.wav");
     let wav2_path = tmp_dir.join("v2_refreshed.wav");
@@ -2181,13 +2205,16 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
                     let _method = parts.next().unwrap_or("GET");
                     let path = parts.next().unwrap_or("/");
                     if path == "/expired-403.wav" {
-                        let _ = stream.write_all(
-                            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
-                        );
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
                         let _ = stream.flush();
                         continue;
                     }
-                    let payload = if path == "/refreshed-v2.wav" { &w2 } else { &w1 };
+                    let payload = if path == "/refreshed-v2.wav" {
+                        &w2
+                    } else {
+                        &w1
+                    };
                     let total_len = payload.len();
                     let range_hdr = req
                         .lines()
@@ -2305,7 +2332,11 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(settled_l2, "L2 async play should settle into Playing: {}", read_state_json());
+    assert!(
+        settled_l2,
+        "L2 async play should settle into Playing: {}",
+        read_state_json()
+    );
 
     // Wait briefly for HybridByteStream background overlap verification request.
     let expected_overlap_prefix = format!("bytes={}-", cached_prefix_len - 64);
@@ -2331,7 +2362,10 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
     // 2. lumina_playback_play_async must commit the adopted StreamSourceSpec after initial 403 StreamFormatChanged.
     let v2_url = format!("http://{addr}/refreshed-v2.wav");
     *ADOPTED_TEST_URL.lock().unwrap() = Some((v2_url.clone(), wav2_bytes.len() as u64));
-    assert_eq!(lumina_stream_set_refresh_callback(Some(refresh_to_v2_cb)), 0);
+    assert_eq!(
+        lumina_stream_set_refresh_callback(Some(refresh_to_v2_cb)),
+        0
+    );
 
     let expired_spec = StreamSourceSpec::DirectRange {
         key: StreamKey::new("youtube_music", "ffi-adopted-v2", "default"),
@@ -2382,8 +2416,15 @@ fn test_ffi_play_async_uses_l2_head_cache_and_commits_adopted_refresh_spec() {
         .active_source_spec()
         .expect("active_source_spec must be committed");
     match committed_spec {
-        StreamSourceSpec::DirectRange { url, content_length, .. } => {
-            assert_eq!(url, v2_url, "must commit adopted refreshed URL, not stale pre-refresh URL");
+        StreamSourceSpec::DirectRange {
+            url,
+            content_length,
+            ..
+        } => {
+            assert_eq!(
+                url, v2_url,
+                "must commit adopted refreshed URL, not stale pre-refresh URL"
+            );
             assert_eq!(content_length, Some(wav2_bytes.len() as u64));
         }
         other => panic!("Expected DirectRange adopted spec, got {other:?}"),
@@ -2404,10 +2445,8 @@ fn test_ffi_dual_deck_metadata_and_get_state_json_after_skip_and_eof() {
     let _ = lumina_shutdown();
     assert_eq!(lumina_init_headless(), 0);
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_ffi_deck_meta_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("lumina_ffi_deck_meta_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let wav1 = tmp_dir.join("meta_1.wav");
     let wav2 = tmp_dir.join("meta_2.wav");
@@ -2475,7 +2514,10 @@ fn test_ffi_dual_deck_metadata_and_get_state_json_after_skip_and_eof() {
     })
     .to_string();
     let c_sb2 = CString::new(standby2).unwrap();
-    assert_eq!(lumina_playback_prepare_standby_async(c_sb2.as_ptr(), 100), 0);
+    assert_eq!(
+        lumina_playback_prepare_standby_async(c_sb2.as_ptr(), 100),
+        0
+    );
 
     let mut sb2_ready = false;
     for _ in 0..80 {
@@ -2518,7 +2560,10 @@ fn test_ffi_dual_deck_metadata_and_get_state_json_after_skip_and_eof() {
     })
     .to_string();
     let c_sb3 = CString::new(standby3).unwrap();
-    assert_eq!(lumina_playback_prepare_standby_async(c_sb3.as_ptr(), 100), 0);
+    assert_eq!(
+        lumina_playback_prepare_standby_async(c_sb3.as_ptr(), 100),
+        0
+    );
 
     let mut swapped_eof = false;
     for _ in 0..150 {
@@ -2562,8 +2607,8 @@ fn test_ffi_rapid_30_skips_latest_wins_non_blocking_and_epoch_monotonic() {
     use core_types::{StreamKey, StreamSourceSpec};
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     let _guard = FFI_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
@@ -2594,58 +2639,111 @@ fn test_ffi_rapid_30_skips_latest_wins_non_blocking_and_epoch_monotonic() {
     let http_hits_bg = Arc::clone(&http_hits);
     let wav_bg = Arc::clone(&wav_96_bytes);
     let srv_handle = std::thread::spawn(move || {
-        let mut held = Vec::new();
+        let mut workers = Vec::new();
         while !stop_bg.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-                    let mut req_buf = [0u8; 2048];
-                    let n = stream.read(&mut req_buf).unwrap_or(0);
-                    let req_str = String::from_utf8_lossy(&req_buf[..n]);
-                    http_hits_bg.fetch_add(1, Ordering::SeqCst);
-                    if req_str.contains("/stalled") {
-                        held.push(stream);
-                    } else if req_str.contains("/ok.wav") {
-                        let body = &wav_bg[..];
-                        let total = body.len();
-                        let (status, slice, range_hdr) =
-                            if let Some(line) = req_str.lines().find(|l| {
-                                l.to_ascii_lowercase().starts_with("range: bytes=")
-                            }) {
-                                let spec = line
-                                    .split_once('=')
-                                    .map(|(_, r)| r.trim())
-                                    .unwrap_or("0-");
-                                let (s_str, e_str) = spec.split_once('-').unwrap_or(("0", ""));
-                                let start: usize = s_str.parse().unwrap_or(0).min(total - 1);
-                                let end: usize = if e_str.is_empty() {
-                                    total - 1
-                                } else {
-                                    e_str.parse().unwrap_or(total - 1).min(total - 1)
-                                };
-                                (
-                                    "206 Partial Content",
-                                    &body[start..=end],
-                                    format!("Content-Range: bytes {start}-{end}/{total}\r\n"),
-                                )
-                            } else {
-                                ("200 OK", body, String::new())
+                    let stop_conn = Arc::clone(&stop_bg);
+                    let hits_conn = Arc::clone(&http_hits_bg);
+                    let wav_conn = Arc::clone(&wav_bg);
+                    workers.push(std::thread::spawn(move || {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+                        let mut req_buf = Vec::with_capacity(2048);
+                        let mut chunk = [0u8; 1024];
+                        'conn: while !stop_conn.load(Ordering::Relaxed) {
+                            let mut header_end = None;
+                            while !stop_conn.load(Ordering::Relaxed) {
+                                if let Some(pos) = req_buf.windows(4).position(|w| w == b"\r\n\r\n")
+                                {
+                                    header_end = Some(pos + 4);
+                                    break;
+                                }
+                                match stream.read(&mut chunk) {
+                                    Ok(0) => break 'conn,
+                                    Ok(n) => req_buf.extend_from_slice(&chunk[..n]),
+                                    Err(ref e)
+                                        if matches!(
+                                            e.kind(),
+                                            std::io::ErrorKind::WouldBlock
+                                                | std::io::ErrorKind::TimedOut
+                                        ) =>
+                                    {
+                                        continue;
+                                    }
+                                    Err(_) => break 'conn,
+                                }
+                            }
+                            let Some(end_idx) = header_end else {
+                                break 'conn;
                             };
-                        let hdr = format!(
-                            "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\n{range_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
-                            slice.len()
-                        );
-                        let _ = stream.write_all(hdr.as_bytes());
-                        let _ = stream.write_all(slice);
-                        let _ = stream.flush();
-                    }
+                            let req_bytes: Vec<u8> = req_buf.drain(..end_idx).collect();
+                            let req_str = String::from_utf8_lossy(&req_bytes);
+                            hits_conn.fetch_add(1, Ordering::SeqCst);
+                            if req_str.contains("/stalled") {
+                                while !stop_conn.load(Ordering::Relaxed) {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                break 'conn;
+                            } else if req_str.contains("/ok.wav") {
+                                let is_head = req_str.starts_with("HEAD ");
+                                let wants_close = req_str
+                                    .to_ascii_lowercase()
+                                    .contains("connection: close");
+                                let body = &wav_conn[..];
+                                let total = body.len();
+                                let (status, slice, range_hdr) = if let Some(line) = req_str
+                                    .lines()
+                                    .find(|l| l.to_ascii_lowercase().starts_with("range: bytes="))
+                                {
+                                    let spec = line
+                                        .split_once('=')
+                                        .map(|(_, r)| r.trim())
+                                        .unwrap_or("0-");
+                                    let (s_str, e_str) = spec.split_once('-').unwrap_or(("0", ""));
+                                    let start: usize = s_str.parse().unwrap_or(0).min(total - 1);
+                                    let end: usize = if e_str.is_empty() {
+                                        total - 1
+                                    } else {
+                                        e_str.parse().unwrap_or(total - 1).min(total - 1)
+                                    };
+                                    (
+                                        "206 Partial Content",
+                                        &body[start..=end],
+                                        format!("Content-Range: bytes {start}-{end}/{total}\r\n"),
+                                    )
+                                } else {
+                                    ("200 OK", body, String::new())
+                                };
+                                let conn_hdr = if wants_close { "close" } else { "keep-alive" };
+                                let hdr = format!(
+                                    "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\n{range_hdr}Content-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n",
+                                    slice.len()
+                                );
+                                if stream.write_all(hdr.as_bytes()).is_err()
+                                    || (!is_head && stream.write_all(slice).is_err())
+                                    || stream.flush().is_err()
+                                {
+                                    break 'conn;
+                                }
+                            } else {
+                                let _ = stream.write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                );
+                                let _ = stream.flush();
+                                break 'conn;
+                            }
+                        }
+                    }));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break,
             }
+        }
+        for worker in workers {
+            let _ = worker.join();
         }
     });
 
@@ -2761,7 +2859,10 @@ fn test_ffi_rapid_30_skips_latest_wins_non_blocking_and_epoch_monotonic() {
             )
             .unwrap();
             let t_sb = Instant::now();
-            assert_eq!(lumina_playback_prepare_standby_async(sb_payload.as_ptr(), i), 0);
+            assert_eq!(
+                lumina_playback_prepare_standby_async(sb_payload.as_ptr(), i),
+                0
+            );
             assert!(
                 t_sb.elapsed().as_millis() < 25,
                 "prepare_standby_async must be non-blocking"
@@ -2843,7 +2944,10 @@ fn test_ffi_rapid_30_skips_latest_wins_non_blocking_and_epoch_monotonic() {
         .to_string(),
     )
     .unwrap();
-    assert_eq!(lumina_playback_play_async(epochless_stalled.as_ptr(), 31), 0);
+    assert_eq!(
+        lumina_playback_play_async(epochless_stalled.as_ptr(), 31),
+        0
+    );
     let loading_31 = read_state_json();
     assert_eq!(loading_31["state_code"], 5);
     assert_eq!(loading_31["current_track_id"], "rapid-track-31");
@@ -2974,13 +3078,69 @@ fn test_ffi_ingestion_layer_watch_scan_skipped_overrides_ingest_and_providers() 
     let list_val: serde_json::Value = serde_json::from_str(&list_str).unwrap();
     assert_eq!(list_val.as_array().unwrap().len(), 1);
 
-    // 3. Async scan start -> emits ScanProgressEvent through FFI callback
+    // 3. Async scan start -> emits ScanProgressEvent through FFI callback with matching scan_id
     let start_ptr = lumina_library_scan_start(c_root.as_ptr(), 0);
     assert!(!start_ptr.is_null());
     let start_str = unsafe { CStr::from_ptr(start_ptr).to_str().unwrap().to_string() };
     unsafe { lumina_string_free(start_ptr) };
     let start_val: serde_json::Value = serde_json::from_str(&start_str).unwrap();
-    assert!(start_val["scan_id"].as_str().is_some_and(|s| !s.is_empty()));
+    let expected_scan_id = start_val["scan_id"].as_str().unwrap().to_string();
+    assert!(!expected_scan_id.is_empty());
+
+    // Wait until Completed arrives for the exact correlated scan_id
+    let corr_deadline = Instant::now() + Duration::from_secs(10);
+    let mut scan_completed_with_id = false;
+    while Instant::now() < corr_deadline {
+        if let Some(m) = CAPTURED_EVENTS.get()
+            && let Ok(evs) = m.lock()
+            && evs.iter().any(|e| {
+                e["scan_id"].as_str() == Some(expected_scan_id.as_str())
+                    && e["state"].as_str() == Some("completed")
+            })
+        {
+            scan_completed_with_id = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        scan_completed_with_id,
+        "lumina_library_scan_start scan_id must correlate with ScanProgressEvent.scan_id"
+    );
+
+    // 3b. Async tag rescan start -> non-blocking return with correlated Completed event
+    let rescan_start_ptr = lumina_library_rescan_start(c_root.as_ptr(), 1);
+    assert!(!rescan_start_ptr.is_null());
+    let rescan_start_str = unsafe {
+        CStr::from_ptr(rescan_start_ptr)
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    unsafe { lumina_string_free(rescan_start_ptr) };
+    let rescan_start_val: serde_json::Value = serde_json::from_str(&rescan_start_str).unwrap();
+    let expected_rescan_id = rescan_start_val["scan_id"].as_str().unwrap().to_string();
+    assert!(!expected_rescan_id.is_empty());
+
+    let rescan_deadline = Instant::now() + Duration::from_secs(10);
+    let mut rescan_completed_with_id = false;
+    while Instant::now() < rescan_deadline {
+        if let Some(m) = CAPTURED_EVENTS.get()
+            && let Ok(evs) = m.lock()
+            && evs.iter().any(|e| {
+                e["scan_id"].as_str() == Some(expected_rescan_id.as_str())
+                    && e["state"].as_str() == Some("completed")
+            })
+        {
+            rescan_completed_with_id = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        rescan_completed_with_id,
+        "lumina_library_rescan_start must emit correlated Completed ScanProgressEvent"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut saw_completed = false;

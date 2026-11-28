@@ -45,7 +45,9 @@ impl BiquadCoefficients {
         q_factor: f64,
     ) -> Result<Self, DspError> {
         if sample_rate_hz <= 0.0 {
-            return Err(DspError::InvalidFilterParameters("Sample rate must be > 0".into()));
+            return Err(DspError::InvalidFilterParameters(
+                "Sample rate must be > 0".into(),
+            ));
         }
 
         let nyquist = sample_rate_hz * 0.5;
@@ -103,7 +105,9 @@ impl BiquadCoefficients {
         };
 
         if a0.abs() < 1e-12 {
-            return Err(DspError::InvalidFilterParameters("Singular filter denominator a0".into()));
+            return Err(DspError::InvalidFilterParameters(
+                "Singular filter denominator a0".into(),
+            ));
         }
 
         let inv_a0 = 1.0 / a0;
@@ -130,9 +134,7 @@ impl BiquadCoefficients {
     /// 2. 1 + a1 + a2 > 0
     /// 3. 1 - a1 + a2 > 0
     pub fn is_stable(&self) -> bool {
-        self.a2.abs() < 1.0
-            && (1.0 + self.a1 + self.a2) > 0.0
-            && (1.0 - self.a1 + self.a2) > 0.0
+        self.a2.abs() < 1.0 && (1.0 + self.a1 + self.a2) > 0.0 && (1.0 - self.a1 + self.a2) > 0.0
     }
 
     /// Evaluates the DTFT frequency response magnitude in dB at `eval_freq_hz`.

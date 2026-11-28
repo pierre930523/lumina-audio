@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Result};
-use quick_xml::events::Event;
+use anyhow::{Result, anyhow};
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{Instant, timeout_at};
 use url::Url;
 
 pub const DEFAULT_SSDP_ADDR: &str = "239.255.255.250:1900";
@@ -345,9 +345,8 @@ impl DlnaController {
 
     pub async fn seek_seconds(&self, control_url: &str, position_secs: u64) -> Result<()> {
         let target = format_hms(position_secs);
-        let inner = format!(
-            "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{target}</Target>"
-        );
+        let inner =
+            format!("<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{target}</Target>");
         self.soap_call(control_url, AV_TRANSPORT_TYPE, "Seek", &inner)
             .await?;
         Ok(())
@@ -381,7 +380,10 @@ impl DlnaController {
                 "<InstanceID>0</InstanceID>",
             )
             .await?;
-        Ok(extract_soap_tag(&xml, "CurrentTransportState").unwrap_or_else(|| "UNKNOWN".to_string()))
+        Ok(
+            extract_soap_tag(&xml, "CurrentTransportState")
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+        )
     }
 
     pub async fn set_volume(&self, rendering_url: &str, volume_0_100: u8) -> Result<()> {

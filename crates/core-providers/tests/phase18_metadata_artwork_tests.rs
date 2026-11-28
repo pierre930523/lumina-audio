@@ -3,12 +3,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use core_db::open_test_database;
+use core_providers::LibrarySyncService;
 use core_providers::local::artwork::ArtworkManager;
 use core_providers::local::dsd_meta::{parse_dff, parse_dsf};
 use core_providers::local::metadata::derive_title_and_track_from_filename;
 use core_providers::local::riff_meta::parse_wav;
 use core_providers::local::scanner::{find_folder_cover_in_files, normalize_path};
-use core_providers::LibrarySyncService;
 use core_types::{ArtworkSourceKind, AudioCodec};
 use image::{ImageBuffer, Rgb};
 use tempfile::tempdir;
@@ -194,10 +194,7 @@ fn create_wav_fixture(
     // Fix RIFF size
     let riff_size = total_len - 8;
     file.sync_all().unwrap();
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
     std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(4)).unwrap();
     f.write_all(&riff_size.to_le_bytes()).unwrap();
 }
@@ -247,10 +244,12 @@ fn create_dff_fixture(path: &Path, title: &str, artist: &str, id3: Option<&[u8]>
     let mut file = File::create(path).unwrap();
 
     // FRM8 header (12 bytes)
-    file.write_all(b"FRM8\x00\x00\x00\x00\x00\x00\x00\x00DSD ").unwrap();
+    file.write_all(b"FRM8\x00\x00\x00\x00\x00\x00\x00\x00DSD ")
+        .unwrap();
 
     // FVER chunk
-    file.write_all(b"FVER\x00\x00\x00\x00\x00\x00\x00\x04\x01\x05\x00\x00").unwrap();
+    file.write_all(b"FVER\x00\x00\x00\x00\x00\x00\x00\x04\x01\x05\x00\x00")
+        .unwrap();
 
     // PROP chunk
     let mut prop = Vec::new();
@@ -294,13 +293,15 @@ fn create_dff_fixture(path: &Path, title: &str, artist: &str, id3: Option<&[u8]>
     // DSD chunk
     let dsd_data = vec![0x69; 4096];
     file.write_all(b"DSD ").unwrap();
-    file.write_all(&(dsd_data.len() as u64).to_be_bytes()).unwrap();
+    file.write_all(&(dsd_data.len() as u64).to_be_bytes())
+        .unwrap();
     file.write_all(&dsd_data).unwrap();
 
     // ID3 chunk
     if let Some(id3_data) = id3 {
         file.write_all(b"ID3 ").unwrap();
-        file.write_all(&(id3_data.len() as u64).to_be_bytes()).unwrap();
+        file.write_all(&(id3_data.len() as u64).to_be_bytes())
+            .unwrap();
         file.write_all(id3_data).unwrap();
         if id3_data.len() % 2 == 1 {
             file.write_all(&[0]).unwrap();
@@ -342,14 +343,9 @@ async fn test_artwork_priority_chain() {
     create_test_image(&music_dir.join("folder.jpg"), 400, 400, (50, 50, 200));
 
     // 1. Embedded front cover beats cover.jpg
-    let res = ArtworkManager::resolve_artwork(
-        &pool,
-        &track_path.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res = ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(res.found);
     assert_eq!(res.source_kind, ArtworkSourceKind::Embedded);
 
@@ -362,14 +358,9 @@ async fn test_artwork_priority_chain() {
     let plain_wav = sub1.join("plain.wav");
     create_wav_fixture(&plain_wav, 44100, 2, 16, None, None);
 
-    let res1 = ArtworkManager::resolve_artwork(
-        &pool,
-        &plain_wav.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res1 = ArtworkManager::resolve_artwork(&pool, &plain_wav.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(res1.found);
     assert_eq!(res1.source_kind, ArtworkSourceKind::Cover);
 
@@ -381,14 +372,9 @@ async fn test_artwork_priority_chain() {
     let plain_wav2 = sub2.join("plain2.wav");
     create_wav_fixture(&plain_wav2, 44100, 2, 16, None, None);
 
-    let res2 = ArtworkManager::resolve_artwork(
-        &pool,
-        &plain_wav2.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res2 = ArtworkManager::resolve_artwork(&pool, &plain_wav2.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(res2.found);
     assert_eq!(res2.source_kind, ArtworkSourceKind::Folder);
 
@@ -399,14 +385,9 @@ async fn test_artwork_priority_chain() {
     let plain_wav3 = sub3.join("plain3.wav");
     create_wav_fixture(&plain_wav3, 44100, 2, 16, None, None);
 
-    let res3 = ArtworkManager::resolve_artwork(
-        &pool,
-        &plain_wav3.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res3 = ArtworkManager::resolve_artwork(&pool, &plain_wav3.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(res3.found);
     assert_eq!(res3.source_kind, ArtworkSourceKind::Front);
 
@@ -416,14 +397,9 @@ async fn test_artwork_priority_chain() {
     let plain_wav4 = sub4.join("plain4.wav");
     create_wav_fixture(&plain_wav4, 44100, 2, 16, None, None);
 
-    let res4 = ArtworkManager::resolve_artwork(
-        &pool,
-        &plain_wav4.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res4 = ArtworkManager::resolve_artwork(&pool, &plain_wav4.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(!res4.found);
     assert_eq!(res4.source_kind, ArtworkSourceKind::Placeholder);
 }
@@ -441,14 +417,10 @@ async fn test_artwork_user_override_lifecycle() {
     create_test_image(&user_img, 600, 600, (255, 100, 100));
 
     // Initially resolves to cover.jpg
-    let initial = ArtworkManager::resolve_artwork(
-        &pool,
-        &track_path.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let initial =
+        ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
+            .await
+            .unwrap();
     assert!(initial.found);
     assert_eq!(initial.source_kind, ArtworkSourceKind::Cover);
 
@@ -458,14 +430,9 @@ async fn test_artwork_user_override_lifecycle() {
         .await
         .unwrap();
 
-    let over = ArtworkManager::resolve_artwork(
-        &pool,
-        &track_path.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let over = ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
+        .await
+        .unwrap();
     assert!(over.found);
     assert_eq!(over.source_kind, ArtworkSourceKind::User);
 
@@ -474,14 +441,10 @@ async fn test_artwork_user_override_lifecycle() {
         .await
         .unwrap();
 
-    let restored = ArtworkManager::resolve_artwork(
-        &pool,
-        &track_path.to_string_lossy(),
-        0,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let restored =
+        ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
+            .await
+            .unwrap();
     assert!(restored.found);
     assert_eq!(restored.source_kind, ArtworkSourceKind::Cover);
 }
@@ -498,14 +461,10 @@ async fn test_artwork_oversized_downscaling() {
     create_test_image(&big_img, 2400, 1800, (10, 10, 200));
 
     // Resolve with max_dim = 512
-    let res = ArtworkManager::resolve_artwork(
-        &pool,
-        &track_path.to_string_lossy(),
-        512,
-        &cache_dir,
-    )
-    .await
-    .unwrap();
+    let res =
+        ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 512, &cache_dir)
+            .await
+            .unwrap();
 
     assert!(res.found);
     assert!(res.width.unwrap() <= 512);
@@ -654,52 +613,36 @@ async fn test_incremental_and_forced_tag_rescan() {
     );
 
     // Initial rescan
-    let rep1 = LibrarySyncService::rescan_tags(
-        &pool,
-        Some(&music_dir.to_string_lossy()),
-        false,
-    )
-    .await
-    .unwrap();
+    let rep1 = LibrarySyncService::rescan_tags(&pool, Some(&music_dir.to_string_lossy()), false)
+        .await
+        .unwrap();
 
     assert_eq!(rep1.scanned, 1);
     assert_eq!(rep1.updated, 1);
     assert_eq!(rep1.pruned, 0);
 
     // Second rescan without force -> unchanged_cached
-    let rep2 = LibrarySyncService::rescan_tags(
-        &pool,
-        Some(&music_dir.to_string_lossy()),
-        false,
-    )
-    .await
-    .unwrap();
+    let rep2 = LibrarySyncService::rescan_tags(&pool, Some(&music_dir.to_string_lossy()), false)
+        .await
+        .unwrap();
 
     assert_eq!(rep2.scanned, 1);
     assert_eq!(rep2.updated, 0);
     assert_eq!(rep2.unchanged_cached, 1);
 
     // Third rescan with force = true -> updated = 1
-    let rep3 = LibrarySyncService::rescan_tags(
-        &pool,
-        Some(&music_dir.to_string_lossy()),
-        true,
-    )
-    .await
-    .unwrap();
+    let rep3 = LibrarySyncService::rescan_tags(&pool, Some(&music_dir.to_string_lossy()), true)
+        .await
+        .unwrap();
 
     assert_eq!(rep3.scanned, 1);
     assert_eq!(rep3.updated, 1);
 
     // Delete track and rescan -> pruned = 1
     fs::remove_file(&track1).unwrap();
-    let rep4 = LibrarySyncService::rescan_tags(
-        &pool,
-        Some(&music_dir.to_string_lossy()),
-        false,
-    )
-    .await
-    .unwrap();
+    let rep4 = LibrarySyncService::rescan_tags(&pool, Some(&music_dir.to_string_lossy()), false)
+        .await
+        .unwrap();
 
     assert_eq!(rep4.scanned, 0);
     assert_eq!(rep4.pruned, 1);
@@ -890,7 +833,10 @@ async fn test_single_track_album_and_track1_only_artwork_resolution() {
         let res = ArtworkManager::resolve_artwork(&pool, &target, 0, &cache_dir)
             .await
             .unwrap();
-        assert!(res.found, "single-track album query {target} must find Track 1 artwork");
+        assert!(
+            res.found,
+            "single-track album query {target} must find Track 1 artwork"
+        );
         assert_eq!(res.source_kind, ArtworkSourceKind::Embedded);
         assert_eq!(res.width, Some(1024));
         assert_eq!(res.height, Some(1024));
@@ -910,7 +856,11 @@ async fn test_corrupt_artwork_rejected_at_max_dim_zero() {
     create_wav_fixture(&track_path, 44100, 2, 16, None, None);
 
     // Corrupt JPEG with valid FF D8 FF magic header followed by garbage bytes
-    fs::write(tmp.path().join("cover.jpg"), [0xFF, 0xD8, 0xFF, 0x00, 0x01, 0x02]).unwrap();
+    fs::write(
+        tmp.path().join("cover.jpg"),
+        [0xFF, 0xD8, 0xFF, 0x00, 0x01, 0x02],
+    )
+    .unwrap();
 
     let res = ArtworkManager::resolve_artwork(&pool, &track_path.to_string_lossy(), 0, &cache_dir)
         .await
@@ -1014,7 +964,10 @@ async fn test_same_directory_distinct_albums_do_not_collide_and_multidisc_stays_
 
     let a23 = db_albums.iter().find(|a| a.title == "Album23").unwrap();
     let a24 = db_albums.iter().find(|a| a.title == "Album24").unwrap();
-    let dbl = db_albums.iter().find(|a| a.title == "Double Album").unwrap();
+    let dbl = db_albums
+        .iter()
+        .find(|a| a.title == "Double Album")
+        .unwrap();
     assert_eq!(a23.release_year, Some(1998));
     assert_eq!(a24.release_year, Some(2023));
 

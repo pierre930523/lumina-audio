@@ -1,4 +1,6 @@
 import 'audio_format.dart';
+import 'protocol/lumina_error.dart';
+import 'protocol/protocol_models.dart';
 import 'recommendation_models.dart';
 
 enum PlaybackStatus {
@@ -60,6 +62,9 @@ class TrackInfo {
   final String? isrc;
   final String? qualityLabel;
   final String? artistId;
+  final int preference;
+  final String? albumGroupId;
+  final String? externalAlbumId;
 
   const TrackInfo({
     required this.id,
@@ -83,7 +88,119 @@ class TrackInfo {
     this.isrc,
     this.qualityLabel,
     this.artistId,
+    this.preference = 0,
+    this.albumGroupId,
+    this.externalAlbumId,
   });
+
+  factory TrackInfo.fromJson(Map<String, dynamic> json) {
+    final rawBitrateKbps = (json['bitrate_kbps'] as num?)?.toInt();
+    final rawBitrateBps =
+        (json['bitrate_bps'] as num?)?.toInt() ??
+        (json['bitrate'] as num?)?.toInt();
+    final resolvedBitrateKbps =
+        (rawBitrateKbps != null && rawBitrateKbps > 0)
+            ? rawBitrateKbps
+            : (rawBitrateBps != null && rawBitrateBps > 0
+                  ? (rawBitrateBps > 10000
+                        ? (rawBitrateBps / 1000.0).round()
+                        : rawBitrateBps)
+                  : null);
+    final rawProvider =
+        json['provider_name']?.toString().trim() ??
+        json['provider_id']?.toString().trim() ??
+        '';
+    final providerName = switch (rawProvider.toLowerCase()) {
+      '' || 'local' => 'Local Library',
+      'qobuz' => 'Qobuz',
+      'tidal' => 'Tidal',
+      'deezer' => 'Deezer',
+      'youtube_music' || 'ytm' => 'YouTube Music',
+      'apple_music' || 'apple' => 'Apple Music',
+      _ => rawProvider,
+    };
+    return TrackInfo(
+      id:
+          json['id']?.toString() ??
+          json['track_id']?.toString() ??
+          json['external_track_id']?.toString() ??
+          '',
+      title: json['title']?.toString() ?? '未知曲目',
+      artist:
+          json['artist_name']?.toString() ??
+          json['artist']?.toString() ??
+          '未知藝術家',
+      album: json['album']?.toString() ?? json['album_title']?.toString() ?? '未知專輯',
+      duration: Duration(
+        milliseconds: (json['duration_ms'] as num?)?.toInt() ?? 0,
+      ),
+      albumArtUrl: json['album_art_url']?.toString(),
+      format: AudioFormat(
+        codec: AudioCodec.fromString(json['codec']?.toString()),
+        sampleRateHz: (json['sample_rate_hz'] as num?)?.toInt() ?? 44100,
+        bitDepth: (json['bit_depth'] as num?)?.toInt() ?? 16,
+        channels: (json['channels'] as num?)?.toInt() ?? 2,
+        isDsd: json['is_dsd'] == true || json['is_dsd'] == 1,
+        bitrateKbps: resolvedBitrateKbps,
+      ),
+      providerName: providerName,
+      filePath:
+          json['file_path']?.toString() ?? json['external_track_id']?.toString(),
+      albumArtist: json['album_artist']?.toString(),
+      genre: json['genre']?.toString(),
+      year:
+          (json['year'] as num?)?.toInt() ??
+          (json['release_year'] as num?)?.toInt(),
+      trackNumber: (json['track_number'] as num?)?.toInt(),
+      discNumber: (json['disc_number'] as num?)?.toInt(),
+      composer: json['composer']?.toString(),
+      coverUrl:
+          json['cover_url']?.toString() ?? json['artwork_url']?.toString(),
+      artworkCacheKey: json['artwork_cache_key']?.toString(),
+      hasLyrics: json['has_lyrics'] == true || json['has_lyrics'] == 1,
+      isrc: json['isrc']?.toString(),
+      qualityLabel: json['quality_label']?.toString(),
+      artistId: json['artist_id']?.toString(),
+      preference: (json['preference'] as num?)?.toInt() ?? 0,
+      albumGroupId:
+          json['album_group_id']?.toString() ??
+          json['alb_id']?.toString() ??
+          json['album_id']?.toString(),
+      externalAlbumId: json['external_album_id']?.toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'id': id,
+    'title': title,
+    'artist': artist,
+    'album': album,
+    'duration_ms': duration.inMilliseconds,
+    if (albumArtUrl != null) 'album_art_url': albumArtUrl,
+    'codec': format.codec.name,
+    'sample_rate_hz': format.sampleRateHz,
+    'bit_depth': format.bitDepth,
+    'channels': format.channels,
+    'is_dsd': format.isDsd,
+    if (format.bitrateKbps != null) 'bitrate_kbps': format.bitrateKbps,
+    'provider_name': providerName,
+    if (filePath != null) 'file_path': filePath,
+    if (albumArtist != null) 'album_artist': albumArtist,
+    if (genre != null) 'genre': genre,
+    if (year != null) 'year': year,
+    if (trackNumber != null) 'track_number': trackNumber,
+    if (discNumber != null) 'disc_number': discNumber,
+    if (composer != null) 'composer': composer,
+    if (coverUrl != null) 'cover_url': coverUrl,
+    if (artworkCacheKey != null) 'artwork_cache_key': artworkCacheKey,
+    'has_lyrics': hasLyrics,
+    if (isrc != null) 'isrc': isrc,
+    if (qualityLabel != null) 'quality_label': qualityLabel,
+    if (artistId != null) 'artist_id': artistId,
+    'preference': preference,
+    if (albumGroupId != null) 'album_group_id': albumGroupId,
+    if (externalAlbumId != null) 'external_album_id': externalAlbumId,
+  };
 
   String? get artworkUrl =>
       (coverUrl != null && coverUrl!.trim().isNotEmpty)
@@ -129,6 +246,9 @@ class TrackInfo {
     String? isrc,
     String? qualityLabel,
     String? artistId,
+    int? preference,
+    String? albumGroupId,
+    String? externalAlbumId,
   }) {
     return TrackInfo(
       id: id ?? this.id,
@@ -152,6 +272,9 @@ class TrackInfo {
       isrc: isrc ?? this.isrc,
       qualityLabel: qualityLabel ?? this.qualityLabel,
       artistId: artistId ?? this.artistId,
+      preference: preference ?? this.preference,
+      albumGroupId: albumGroupId ?? this.albumGroupId,
+      externalAlbumId: externalAlbumId ?? this.externalAlbumId,
     );
   }
 }
@@ -169,6 +292,13 @@ class PlaybackState {
   final String clockSource;
   final int swapGeneration;
   final int playbackEpoch;
+  final int timestampMs;
+  final RepeatMode repeatMode;
+  final bool shuffle;
+  final AudioQualityInfo? audioQuality;
+  final String? activeDeviceId;
+  final String? activeZoneId;
+  final LuminaError? error;
 
   const PlaybackState({
     required this.status,
@@ -183,7 +313,32 @@ class PlaybackState {
     this.clockSource = 'system',
     this.swapGeneration = 0,
     this.playbackEpoch = 0,
+    this.timestampMs = 0,
+    this.repeatMode = RepeatMode.off,
+    this.shuffle = false,
+    this.audioQuality,
+    this.activeDeviceId,
+    this.activeZoneId,
+    this.error,
   });
+
+  factory PlaybackState.fromProtocol(
+    ProtocolPlaybackState protocol, {
+    TrackInfo? fallbackTrack,
+  }) =>
+      protocol.toLegacy(fallbackTrack: fallbackTrack);
+
+  ProtocolPlaybackState toProtocol({
+    int? timestampMs,
+    bool dspBypassed = true,
+    bool strictBitPerfect = false,
+  }) =>
+      ProtocolPlaybackState.fromLegacy(
+        this,
+        timestampMs: timestampMs,
+        dspBypassed: dspBypassed,
+        strictBitPerfect: strictBitPerfect,
+      );
 
   static int parsePlaybackEpoch(Map<String, dynamic> json) {
     final p1 = (json['playback_epoch'] as num?)?.toInt() ?? 0;
@@ -211,7 +366,20 @@ class PlaybackState {
     String? clockSource,
     int? swapGeneration,
     int? playbackEpoch,
+    int? timestampMs,
+    RepeatMode? repeatMode,
+    bool? shuffle,
+    AudioQualityInfo? audioQuality,
+    bool clearAudioQuality = false,
+    String? activeDeviceId,
+    bool clearActiveDeviceId = false,
+    String? activeZoneId,
+    bool clearActiveZoneId = false,
+    LuminaError? error,
+    bool clearError = false,
   }) {
+    final resolvedError =
+        (clearError || clearLastError) ? null : (error ?? this.error);
     return PlaybackState(
       status: status ?? this.status,
       track: track ?? this.track,
@@ -220,11 +388,23 @@ class PlaybackState {
       isMuted: isMuted ?? this.isMuted,
       seekEpoch: seekEpoch ?? this.seekEpoch,
       isSeeking: isSeeking ?? this.isSeeking,
-      lastError: clearLastError ? null : (lastError ?? this.lastError),
+      lastError: clearLastError
+          ? null
+          : (lastError ?? resolvedError?.message ?? this.lastError),
       deviceLost: deviceLost ?? this.deviceLost,
       clockSource: clockSource ?? this.clockSource,
       swapGeneration: swapGeneration ?? this.swapGeneration,
       playbackEpoch: playbackEpoch ?? this.playbackEpoch,
+      timestampMs: timestampMs ?? this.timestampMs,
+      repeatMode: repeatMode ?? this.repeatMode,
+      shuffle: shuffle ?? this.shuffle,
+      audioQuality:
+          clearAudioQuality ? null : (audioQuality ?? this.audioQuality),
+      activeDeviceId:
+          clearActiveDeviceId ? null : (activeDeviceId ?? this.activeDeviceId),
+      activeZoneId:
+          clearActiveZoneId ? null : (activeZoneId ?? this.activeZoneId),
+      error: resolvedError,
     );
   }
 
@@ -243,7 +423,14 @@ class PlaybackState {
         other.deviceLost == deviceLost &&
         other.clockSource == clockSource &&
         other.swapGeneration == swapGeneration &&
-        other.playbackEpoch == playbackEpoch;
+        other.playbackEpoch == playbackEpoch &&
+        other.timestampMs == timestampMs &&
+        other.repeatMode == repeatMode &&
+        other.shuffle == shuffle &&
+        other.audioQuality == audioQuality &&
+        other.activeDeviceId == activeDeviceId &&
+        other.activeZoneId == activeZoneId &&
+        other.error == error;
   }
 
   @override
@@ -260,5 +447,12 @@ class PlaybackState {
     clockSource,
     swapGeneration,
     playbackEpoch,
+    timestampMs,
+    repeatMode,
+    shuffle,
+    audioQuality,
+    activeDeviceId,
+    activeZoneId,
+    error,
   );
 }

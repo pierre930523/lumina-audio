@@ -1,5 +1,8 @@
+pub mod ape_meta;
 pub mod artwork;
+pub mod cleanup;
 pub mod dsd_meta;
+pub mod encoding;
 pub mod fingerprint;
 pub mod ignore;
 pub mod lyrics;
@@ -9,26 +12,29 @@ pub mod pipeline;
 pub mod playlist;
 pub mod riff_meta;
 pub mod scanner;
+pub mod tag_debug;
+pub mod track_ops;
 pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use core_types::{
     CanonicalAlbum, ProviderKind, StreamKey, StreamProviderCapabilities, StreamSourceSpec,
     TrackSource,
 };
-use tokio::sync::{mpsc::Sender, RwLock};
+use tokio::sync::{RwLock, mpsc::Sender};
 
-use crate::error::ProviderError;
-use crate::traits::{
-    validate_stream_key, MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem,
-    StreamResolver, SyncProgress, SyncResult, SyncResultSummary,
+pub use self::artwork::{
+    ArtworkManager, ArtworkTarget, DiscoveredEmbeddedAsset, DiscoveredFileAsset,
+    classify_asset_role, extract_embedded_asset_descriptors, index_assets_for_album_version,
+    read_album_asset_bytes, resolve_safe_asset_file_path, scan_album_dir_assets,
 };
-pub use self::artwork::{ArtworkManager, ArtworkTarget};
+pub use self::cleanup::{execute_library_cleanup, is_root_accessible, preview_library_cleanup};
+pub use self::encoding::DetectedEncoding;
 pub use self::fingerprint::compute_content_fingerprint;
 pub use self::ignore::{
     classify_unsupported_container, is_playlist_sidecar, should_ignore_name, should_ignore_path,
@@ -38,22 +44,35 @@ pub use self::lyrics::{
     LyricsTarget,
 };
 pub use self::mapper::{
-    extract_edition_label, normalize_album_base_title, AlbumMapper, AlbumSyncMetadata,
-    VersionSyncMetadata,
+    AlbumKey, AlbumMapper, AlbumSyncMetadata, VersionSyncMetadata, compute_album_key,
+    effective_album_dir, extract_edition_label, normalize_album_base_title,
+    strip_disc_suffix_from_album,
 };
 pub use self::metadata::{
-    derive_album_and_artist_from_dir, derive_title_and_track_from_filename, detect_garbled_tags,
-    extract_disc_number_from_dir_name, split_artists, ExtractOptions, ExtractedMetadata,
-    MetadataExtractor,
+    ExtractOptions, ExtractedMetadata, MetadataExtractor, derive_album_and_artist_from_dir,
+    derive_title_and_track_from_filename, detect_garbled_tags, extract_disc_number_from_dir_name,
+    split_artists,
 };
 pub use self::pipeline::{IngestionConfig, IngestionPipeline};
-pub use self::playlist::{parse_m3u_content, parse_m3u_file, ParsedPlaylist, ParsedPlaylistEntry};
+pub use self::playlist::{ParsedPlaylist, ParsedPlaylistEntry, parse_m3u_content, parse_m3u_file};
 pub use self::scanner::{
-    find_folder_cover, find_folder_cover_in_files, is_scannable_audio, normalize_path,
-    DetailedScanOutput, DirectoryScanner, ScanSkippedCandidate, COVER_ART_FILENAMES,
-    SCANNABLE_AUDIO_EXTENSIONS,
+    COVER_ART_FILENAMES, DetailedScanOutput, DirectoryScanner, SCANNABLE_AUDIO_EXTENSIONS,
+    ScanSkippedCandidate, find_folder_cover, find_folder_cover_in_files, is_scannable_audio,
+    normalize_path,
+};
+pub use self::tag_debug::{
+    ParsedMetadataSummary, RawTagField, TagBlockInspection, TagInspectionReport,
+    format_tag_inspection_report, inspect_audio_tags,
+};
+pub use self::track_ops::{
+    delete_single_track, move_file_to_os_trash, reidentify_single_track, rescan_single_track,
 };
 pub use self::watcher::StorageWatcherManager;
+use crate::error::ProviderError;
+use crate::traits::{
+    MusicProvider, ProviderCapabilities, ResolvedStream, ScanErrorItem, StreamResolver,
+    SyncProgress, SyncResult, SyncResultSummary, validate_stream_key,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalProviderConfig {
@@ -113,7 +132,11 @@ impl MusicProvider for LocalProvider {
         true
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<CanonicalAlbum>, ProviderError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<CanonicalAlbum>, ProviderError> {
         let q = query.trim().to_ascii_lowercase();
         if q.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -142,11 +165,10 @@ impl MusicProvider for LocalProvider {
             )));
         }
 
-        Ok(ResolvedStream::local_file(
-            &track.external_track_id,
-            track.format.clone(),
+        Ok(
+            ResolvedStream::local_file(&track.external_track_id, track.format.clone())
+                .with_replay_gain_from_track(track),
         )
-        .with_replay_gain_from_track(track))
     }
 
     async fn sync_library(&self) -> Result<SyncResult, ProviderError> {
@@ -158,68 +180,92 @@ impl MusicProvider for LocalProvider {
         progress_tx: Option<Sender<SyncProgress>>,
     ) -> Result<SyncResult, ProviderError> {
         let start_time = Instant::now();
+        let root_paths = self.config.root_paths.clone();
+        let follow_symlinks = self.config.follow_symlinks;
+        let progress_tx_blocking = progress_tx.clone();
 
-        let mut scanner = DirectoryScanner::new(self.config.follow_symlinks);
-        let mut audio_files = Vec::new();
-
-        for root in &self.config.root_paths {
-            let found = scanner.scan_directory(root);
-            audio_files.extend(found);
-        }
-
-        let total_files = audio_files.len();
-
-        if let Some(ref tx) = progress_tx {
-            let _ = tx
-                .send(SyncProgress::Started {
-                    provider: ProviderKind::Local,
-                    total_files: Some(total_files),
-                })
-                .await;
-        }
-
-        let mut valid_items = Vec::new();
-        let mut errors = Vec::new();
-
-        for (idx, file_path) in audio_files.into_iter().enumerate() {
-            let path_str = file_path.to_string_lossy().to_string();
-
-            match MetadataExtractor::extract(&file_path) {
-                Ok(meta) => {
-                    valid_items.push((file_path, meta));
-                    if let Some(ref tx) = progress_tx {
-                        let _ = tx
-                            .send(SyncProgress::FileScanned {
-                                path: path_str,
-                                current: idx + 1,
-                                total: Some(total_files),
-                            })
-                            .await;
-                    }
+        let (total_files, successful_count, failed_count, errors, albums, tracks, album_meta) =
+            tokio::task::spawn_blocking(move || -> Result<_, ProviderError> {
+                let mut scanner = DirectoryScanner::new(follow_symlinks);
+                let mut audio_files = Vec::new();
+                for root in &root_paths {
+                    audio_files.extend(scanner.scan_directory(root));
                 }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    errors.push(ScanErrorItem {
-                        path: path_str.clone(),
-                        error: err_str.clone(),
+
+                let total_files = audio_files.len();
+                if let Some(ref tx) = progress_tx_blocking {
+                    let _ = tx.blocking_send(SyncProgress::Started {
+                        provider: ProviderKind::Local,
+                        total_files: Some(total_files),
                     });
-                    if let Some(ref tx) = progress_tx {
-                        let _ = tx
-                            .send(SyncProgress::Error {
-                                path: path_str,
-                                reason: err_str,
-                            })
-                            .await;
+                }
+
+                let mut valid_items = Vec::with_capacity(total_files);
+                let mut errors = Vec::new();
+                let throttle = Duration::from_millis(200);
+                let mut last_emit: Option<Instant> = None;
+
+                for (idx, file_path) in audio_files.into_iter().enumerate() {
+                    let path_str = file_path.to_string_lossy().to_string();
+
+                    match MetadataExtractor::extract_with_options(
+                        &file_path,
+                        ExtractOptions {
+                            include_pictures: false,
+                        },
+                    ) {
+                        Ok(meta) => {
+                            valid_items.push((file_path, meta));
+                            if let Some(ref tx) = progress_tx_blocking {
+                                let now = Instant::now();
+                                let is_last = idx + 1 == total_files;
+                                let should_emit = is_last
+                                    || last_emit
+                                        .is_none_or(|prev| now.duration_since(prev) >= throttle);
+                                if should_emit {
+                                    let _ = tx.blocking_send(SyncProgress::FileScanned {
+                                        path: path_str,
+                                        current: idx + 1,
+                                        total: Some(total_files),
+                                    });
+                                    last_emit = Some(now);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            errors.push(ScanErrorItem {
+                                path: path_str.clone(),
+                                error: err_str.clone(),
+                            });
+                            if let Some(ref tx) = progress_tx_blocking {
+                                let _ = tx.blocking_send(SyncProgress::Error {
+                                    path: path_str,
+                                    reason: err_str,
+                                });
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        let successful_count = valid_items.len();
-        let failed_count = errors.len();
+                let successful_count = valid_items.len();
+                let failed_count = errors.len();
 
-        let (albums, tracks, album_meta) =
-            AlbumMapper::map_scanned_items_with_metadata(valid_items, ProviderKind::Local)?;
+                let (albums, tracks, album_meta) =
+                    AlbumMapper::map_scanned_items_with_metadata(valid_items, ProviderKind::Local)?;
+
+                Ok((
+                    total_files,
+                    successful_count,
+                    failed_count,
+                    errors,
+                    albums,
+                    tracks,
+                    album_meta,
+                ))
+            })
+            .await
+            .map_err(|e| ProviderError::ScanError(format!("Local sync worker panicked: {e}")))??;
 
         // Update in-memory cache
         {

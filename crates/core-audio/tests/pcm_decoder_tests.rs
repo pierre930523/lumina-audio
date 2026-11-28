@@ -315,8 +315,9 @@ fn build_flac_verbatim_indexed(
     out.extend_from_slice(&(block_frames as u16).to_be_bytes());
     out.extend_from_slice(&[0, 0, 0]); // min_frame_size unknown
     out.extend_from_slice(&[0, 0, 0]); // max_frame_size unknown
-    let packed_hi: u32 =
-        (sample_rate << 12) | (((channels as u32 - 1) & 7) << 9) | (((bits_per_sample as u32 - 1) & 31) << 4);
+    let packed_hi: u32 = (sample_rate << 12)
+        | (((channels as u32 - 1) & 7) << 9)
+        | (((bits_per_sample as u32 - 1) & 31) << 4);
     let packed_total: u64 = ((packed_hi as u64) << 32) | (total_frames & 0x0F_FFFF_FFFF);
     out.extend_from_slice(&packed_total.to_be_bytes());
     out.extend_from_slice(&[0u8; 16]); // MD5
@@ -567,7 +568,11 @@ fn build_m4a_alac_indexed(
         bw.write_bits(0, 2); // shift = 0
         bw.write_bits(1, 1); // is_uncompressed = 1
 
-        let mask = if bit_depth == 16 { 0xFFFFu32 } else { 0x00FF_FFFFu32 };
+        let mask = if bit_depth == 16 {
+            0xFFFFu32
+        } else {
+            0x00FF_FFFFu32
+        };
         for f in 0..frame_length {
             let global_f = pkt_idx * frame_length + f;
             let (l, r) = if bit_depth == 16 {
@@ -595,7 +600,8 @@ fn build_m4a_alac_indexed(
     magic_cookie.push(channels);
     magic_cookie.extend_from_slice(&255u16.to_be_bytes()); // max_run
     magic_cookie.extend_from_slice(&packet_bytes.to_be_bytes()); // max_frame_bytes
-    magic_cookie.extend_from_slice(&(sample_rate * (channels as u32) * (bit_depth as u32)).to_be_bytes());
+    magic_cookie
+        .extend_from_slice(&(sample_rate * (channels as u32) * (bit_depth as u32)).to_be_bytes());
     magic_cookie.extend_from_slice(&sample_rate.to_be_bytes());
     let inner_alac = mp4_full_box(b"alac", 0, 0, &magic_cookie);
 
@@ -789,7 +795,11 @@ fn assert_exact_lossless_seek_matrix(
     total_frames: usize,
     is_24bit: bool,
 ) {
-    assert_eq!(dec.total_frames(), Some(total_frames as u64), "{label}: total_frames");
+    assert_eq!(
+        dec.total_frames(),
+        Some(total_frames as u64),
+        "{label}: total_frames"
+    );
     let dur = dec.duration().expect("duration should be Some");
     let dur_ms = dur.as_millis() as u64;
 
@@ -808,7 +818,9 @@ fn assert_exact_lossless_seek_matrix(
         let seek_ms = if pct == 0 {
             0
         } else {
-            ((dur_ms * pct) / 100).saturating_add(3).min(dur_ms.saturating_sub(5))
+            ((dur_ms * pct) / 100)
+                .saturating_add(3)
+                .min(dur_ms.saturating_sub(5))
         };
         let target_time = Duration::from_millis(seek_ms);
         let outcome = dec
@@ -936,7 +948,11 @@ fn test_flac_16bit_and_24bit_with_and_without_seektable_and_try_new() {
 
             let tag = format!(
                 "flac{bits}-{}",
-                if with_seektable { "seektable" } else { "noseektable" }
+                if with_seektable {
+                    "seektable"
+                } else {
+                    "noseektable"
+                }
             );
 
             let mut dec_bytes = SymphoniaDecoder::from_bytes(flac_bytes.clone(), Some("flac"))
@@ -992,7 +1008,9 @@ fn assert_mp3_seek_matrix(label: &str, dec: &mut SymphoniaDecoder, expected_tota
         let seek_ms = if pct == 0 {
             0
         } else {
-            ((dur_ms * pct) / 100).saturating_add(7).min(dur_ms.saturating_sub(10))
+            ((dur_ms * pct) / 100)
+                .saturating_add(7)
+                .min(dur_ms.saturating_sub(10))
         };
         let outcome = dec
             .seek_with_outcome(Duration::from_millis(seek_ms))
@@ -1032,7 +1050,8 @@ fn assert_mp3_seek_matrix(label: &str, dec: &mut SymphoniaDecoder, expected_tota
         dec.seek(eof_time).expect("MP3 EOF seek failed");
         assert!(dec.next_chunk().unwrap().is_none());
     }
-    dec.seek(Duration::from_millis(530)).expect("MP3 backward seek after EOF failed");
+    dec.seek(Duration::from_millis(530))
+        .expect("MP3 backward seek after EOF failed");
     let frame_530 = ((530u128 * sr as u128) / 1000) as usize;
     let mut after_eof_frames = 0usize;
     while let Some(chunk) = dec.next_chunk().unwrap() {
@@ -1131,11 +1150,23 @@ fn test_m4a_alac_16bit_and_24bit_seek_matrix() {
             .unwrap_or_else(|e| panic!("{tag} from_bytes failed: {e}"));
         assert_eq!(dec_b.format().codec, AudioCodec::Alac);
         assert_eq!(dec_b.unified_format().valid_bits, bit_depth);
-        assert_exact_lossless_seek_matrix(&format!("{tag}-bytes"), &mut dec_b, sr, total_frames, is_24bit);
+        assert_exact_lossless_seek_matrix(
+            &format!("{tag}-bytes"),
+            &mut dec_b,
+            sr,
+            total_frames,
+            is_24bit,
+        );
 
         let f = TempAudioFile::new(&tag, "m4a", &m4a_bytes);
         let mut dec_f = SymphoniaDecoder::from_file(&f.path)
             .unwrap_or_else(|e| panic!("{tag} from_file failed: {e}"));
-        assert_exact_lossless_seek_matrix(&format!("{tag}-file"), &mut dec_f, sr, total_frames, is_24bit);
+        assert_exact_lossless_seek_matrix(
+            &format!("{tag}-file"),
+            &mut dec_f,
+            sr,
+            total_frames,
+            is_24bit,
+        );
     }
 }

@@ -34,7 +34,9 @@ pub enum ProfileError {
     #[error("Cannot delete the last remaining profile")]
     CannotDeleteLastProfile,
 
-    #[error("Cannot unset default on the only default profile (designate another default profile first)")]
+    #[error(
+        "Cannot unset default on the only default profile (designate another default profile first)"
+    )]
     CannotUnsetDefaultProfile,
 
     #[error("Profile not found: '{0}'")]

@@ -4,6 +4,7 @@ import '../../services/audio_service.dart';
 import '../../services/media_sources_controller.dart';
 import '../media/media_source_widgets.dart';
 import '../theme/lumina_tokens.dart';
+import '../theme/smooth_scroll.dart';
 
 // ─── Radio View ───────────────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ class RadioView extends StatefulWidget {
 }
 
 class _RadioViewState extends State<RadioView> {
+  final GlideScrollController _scrollController = GlideScrollController();
   final List<_RadioStation> _stations = [
     _RadioStation(
       id: 'radio-001',
@@ -50,6 +52,12 @@ class _RadioViewState extends State<RadioView> {
   void initState() {
     super.initState();
     MediaSourcesController.instance.load();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -100,46 +108,50 @@ class _RadioViewState extends State<RadioView> {
                 MediaSourceKind.radio,
               );
               final totalCount = custom.length + _stations.length;
-              return ListView.builder(
-                key: const Key('radio_list_view'),
-                padding: const EdgeInsets.only(
-                  bottom: LuminaTokens.bottomScrollClearance,
-                ),
-                itemCount: totalCount,
-                itemBuilder: (context, index) {
-                  if (index < custom.length) {
-                    final e = custom[index];
-                    return CustomSourceTile(
-                      key: Key('custom_${e.id}'),
-                      entry: e,
-                      icon: Icons.radio_rounded,
-                      audioService: widget.audioService,
-                    );
-                  }
-                  final s = _stations[index - custom.length];
-                  return _RadioTile(
-                    key: Key('radio_tile_${s.id}'),
-                    station: s,
-                    isPlaying: _playingId == s.id,
-                    onPlay: () {
-                      setState(() => _playingId = s.id);
-                      playMediaSource(
-                        context,
-                        widget.audioService,
-                        MediaSourceEntry(
-                          id: s.id,
-                          kind: MediaSourceKind.radio,
-                          title: s.name,
-                          url: s.streamUrl,
-                        ),
+              return SmoothScrollWrapper(
+                controller: _scrollController,
+                child: ListView.builder(
+                  key: const Key('radio_list_view'),
+                  controller: _scrollController,
+                  padding: const EdgeInsets.only(
+                    bottom: LuminaTokens.bottomScrollClearance,
+                  ),
+                  itemCount: totalCount,
+                  itemBuilder: (context, index) {
+                    if (index < custom.length) {
+                      final e = custom[index];
+                      return CustomSourceTile(
+                        key: Key('custom_${e.id}'),
+                        entry: e,
+                        icon: Icons.radio_rounded,
+                        audioService: widget.audioService,
                       );
-                    },
-                    onStop: () {
-                      setState(() => _playingId = null);
-                      widget.audioService.stop();
-                    },
-                  );
-                },
+                    }
+                    final s = _stations[index - custom.length];
+                    return _RadioTile(
+                      key: Key('radio_tile_${s.id}'),
+                      station: s,
+                      isPlaying: _playingId == s.id,
+                      onPlay: () {
+                        setState(() => _playingId = s.id);
+                        playMediaSource(
+                          context,
+                          widget.audioService,
+                          MediaSourceEntry(
+                            id: s.id,
+                            kind: MediaSourceKind.radio,
+                            title: s.name,
+                            url: s.streamUrl,
+                          ),
+                        );
+                      },
+                      onStop: () {
+                        setState(() => _playingId = null);
+                        widget.audioService.stop();
+                      },
+                    );
+                  },
+                ),
               );
             },
           ),

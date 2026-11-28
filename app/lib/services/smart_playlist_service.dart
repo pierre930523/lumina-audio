@@ -1,106 +1,125 @@
-import 'dart:convert';
-import 'dart:io';
+import 'package:flutter/foundation.dart';
 
-import 'package:material_ui/material_ui.dart';
+import '../models/studio/step4_models.dart';
+import 'audio_service.dart';
 
-import '../models/smart_playlist.dart';
-
+/// Reactive controller managing DB-backed [SmartPlaylistItem]s via [AudioService].
 class SmartPlaylistService extends ChangeNotifier {
-  final List<SmartPlaylist> _playlists = List<SmartPlaylist>.from(
-    SmartPlaylist.builtInPresets,
+  final AudioService audioService;
+  final List<SmartPlaylistItem> _playlists = <SmartPlaylistItem>[];
+  bool _loading = false;
+  bool _loadedOnce = false;
+  bool _disposed = false;
+
+  SmartPlaylistService(this.audioService);
+
+  List<SmartPlaylistItem> get playlists => List.unmodifiable(_playlists);
+
+  List<SmartPlaylistItem> get pinnedPlaylists => List.unmodifiable(
+    _playlists.where((p) => p.isPinned),
   );
 
-  List<SmartPlaylist> get playlists => List.unmodifiable(_playlists);
-
-  File _storageFile() {
-    final localAppData = Platform.environment['LOCALAPPDATA'];
-    if (localAppData != null && localAppData.isNotEmpty) {
-      return File(
-        '$localAppData${Platform.pathSeparator}LuminaAudio${Platform.pathSeparator}smart_playlists.json',
-      );
-    }
-    return File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}lumina_smart_playlists.json',
-    );
-  }
+  bool get loading => _loading;
+  bool get loadedOnce => _loadedOnce;
 
   Future<void> load() async {
-    if (Platform.environment.containsKey('FLUTTER_TEST')) {
-      return;
-    }
+    if (_disposed) return;
+    _loading = true;
     try {
-      final file = _storageFile();
-      if (!await file.exists()) return;
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! List) return;
-      final custom = decoded
-          .whereType<Map<String, dynamic>>()
-          .map(SmartPlaylist.fromJson)
-          .where((p) => !p.isBuiltIn && p.id.isNotEmpty)
-          .toList();
+      final items = await audioService.listSmartPlaylists();
+      if (_disposed) return;
       _playlists
         ..clear()
-        ..addAll(SmartPlaylist.builtInPresets)
-        ..addAll(custom);
-      notifyListeners();
+        ..addAll(items);
+      _loadedOnce = true;
     } catch (_) {
-      // Keep default built-in presets cleanly if unreadable.
+      // Keep existing state resilient on transient backend failures.
+    } finally {
+      _loading = false;
+      if (!_disposed) {
+        notifyListeners();
+      }
     }
   }
 
-  Future<void> _save() async {
-    if (Platform.environment.containsKey('FLUTTER_TEST')) {
-      return;
-    }
-    try {
-      final file = _storageFile();
-      await file.parent.create(recursive: true);
-      final customOnly = _playlists.where((p) => !p.isBuiltIn).toList();
-      await file.writeAsString(
-        jsonEncode(customOnly.map((p) => p.toJson()).toList()),
-      );
-    } catch (_) {
-      // Ignore write failure without interrupting UI state.
-    }
-  }
-
-  SmartPlaylist createPlaylist({
+  Future<SmartPlaylistItem?> createPlaylist({
     required String name,
     String description = '',
-    bool losslessOnly = false,
-    bool dsdOnly = false,
-    int minSampleRateHz = 0,
-    int minBitDepth = 0,
-    String keyword = '',
-  }) {
-    final created = SmartPlaylist(
-      id: 'sp-custom-${DateTime.now().microsecondsSinceEpoch}',
+    required String focusQueryJson,
+    bool excludeBanned = true,
+    int? limitCount,
+    bool isPinned = true,
+  }) async {
+    final created = await audioService.createSmartPlaylist(
       name: name.trim(),
       description: description.trim(),
-      isBuiltIn: false,
-      losslessOnly: losslessOnly,
-      dsdOnly: dsdOnly,
-      minSampleRateHz: minSampleRateHz,
-      minBitDepth: minBitDepth,
-      keyword: keyword.trim(),
+      focusQueryJson: focusQueryJson,
+      excludeBanned: excludeBanned,
+      limitCount: limitCount,
+      isPinned: isPinned,
     );
-    _playlists.add(created);
-    notifyListeners();
-    _save();
+    if (created != null && !_disposed) {
+      await load();
+    }
     return created;
   }
 
-  void updatePlaylist(SmartPlaylist updated) {
-    final idx = _playlists.indexWhere((p) => p.id == updated.id);
-    if (idx < 0) return;
-    _playlists[idx] = updated;
-    notifyListeners();
-    _save();
+  Future<SmartPlaylistItem?> updatePlaylist(
+    String id, {
+    String? name,
+    String? description,
+    String? focusQueryJson,
+    bool? excludeBanned,
+    int? limitCount,
+    bool clearLimitCount = false,
+    bool? isPinned,
+    int? sortOrder,
+  }) async {
+    final updated = await audioService.updateSmartPlaylist(
+      id,
+      name: name?.trim(),
+      description: description?.trim(),
+      focusQueryJson: focusQueryJson,
+      excludeBanned: excludeBanned,
+      limitCount: limitCount,
+      clearLimitCount: clearLimitCount,
+      isPinned: isPinned,
+      sortOrder: sortOrder,
+    );
+    if (updated != null && !_disposed) {
+      await load();
+    }
+    return updated;
   }
 
-  void deletePlaylist(String id) {
-    _playlists.removeWhere((p) => p.id == id && !p.isBuiltIn);
-    notifyListeners();
-    _save();
+  Future<SmartPlaylistItem?> togglePin(SmartPlaylistItem item) {
+    return updatePlaylist(item.id, isPinned: !item.isPinned);
+  }
+
+  Future<SmartPlaylistItem?> duplicatePlaylist(String id) async {
+    final dup = await audioService.duplicateSmartPlaylist(id);
+    if (dup != null && !_disposed) {
+      await load();
+    }
+    return dup;
+  }
+
+  Future<bool> deletePlaylist(String id) async {
+    final ok = await audioService.deleteSmartPlaylist(id);
+    if (ok && !_disposed) {
+      _playlists.removeWhere((p) => p.id == id);
+      notifyListeners();
+    }
+    return ok;
+  }
+
+  Future<SmartPlaylistEvaluation?> evaluatePlaylist(String id) {
+    return audioService.evaluateSmartPlaylist(id);
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 }

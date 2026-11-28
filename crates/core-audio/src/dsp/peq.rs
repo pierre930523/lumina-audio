@@ -33,7 +33,11 @@ pub struct ParametricEq {
 }
 
 impl ParametricEq {
-    pub fn new(sample_rate_hz: f64, channels: usize, bands: Vec<ParametricBand>) -> Result<Self, DspError> {
+    pub fn new(
+        sample_rate_hz: f64,
+        channels: usize,
+        bands: Vec<ParametricBand>,
+    ) -> Result<Self, DspError> {
         let mut peq = Self {
             sample_rate_hz,
             channels: channels.max(1),
@@ -47,7 +51,11 @@ impl ParametricEq {
     pub fn set_bands(&mut self, bands: Vec<ParametricBand>) -> Result<(), DspError> {
         let mut filters = Vec::with_capacity(bands.len());
         for band in &bands {
-            if band.enabled && (band.gain_db.abs() > 1e-4 || band.filter_type == FilterType::LowPass || band.filter_type == FilterType::HighPass) {
+            if band.enabled
+                && (band.gain_db.abs() > 1e-4
+                    || band.filter_type == FilterType::LowPass
+                    || band.filter_type == FilterType::HighPass)
+            {
                 let coeffs = BiquadCoefficients::compute(
                     band.filter_type,
                     self.sample_rate_hz,
@@ -102,7 +110,9 @@ impl ParametricEq {
     pub fn frequency_response_db(&self, eval_freq_hz: f64) -> f64 {
         let mut total_gain = 0.0;
         for filter in self.filters.iter().flatten() {
-            total_gain += filter.coeffs.frequency_response_db(eval_freq_hz, self.sample_rate_hz);
+            total_gain += filter
+                .coeffs
+                .frequency_response_db(eval_freq_hz, self.sample_rate_hz);
         }
         total_gain
     }

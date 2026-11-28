@@ -1,8 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/models/playback_state.dart';
 import 'package:lumina_app/services/media_sources_controller.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/albums/album_detail_page.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -14,7 +16,13 @@ Future<void> _pump(
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
-  await tester.pumpWidget(LuminaApp(audioService: svc));
+  final scaleCtrl = UiScaleController(
+    initialHomeLayoutPreset: HomeLayoutPreset.classic,
+  );
+  addTearDown(scaleCtrl.dispose);
+  await tester.pumpWidget(
+    LuminaApp(audioService: svc, uiScaleController: scaleCtrl),
+  );
   await tester.pumpAndSettle();
 }
 
@@ -124,8 +132,18 @@ void main() {
     await _pump(tester, svc, size: const Size(390, 844));
     expect(find.byKey(const Key('nav_tab_artists')), findsOneWidget);
     final strip = find.byType(ListView).first;
-    for (final k in ['nav_tab_audiobooks', 'nav_tab_podcasts', 'nav_tab_radio']) {
-      await tester.drag(strip, const Offset(-180, 0));
+    for (final k in [
+      'nav_tab_tags',
+      'nav_tab_folders',
+      'nav_tab_audiobooks',
+      'nav_tab_podcasts',
+      'nav_tab_radio',
+    ]) {
+      await tester.dragUntilVisible(
+        find.byKey(Key(k)),
+        strip,
+        const Offset(-160, 0),
+      );
       await tester.pumpAndSettle();
       expect(find.byKey(Key(k)), findsOneWidget);
     }

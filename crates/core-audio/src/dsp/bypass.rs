@@ -85,7 +85,10 @@ impl DspPipeline {
     }
 
     pub fn is_crossfeed_enabled(&self) -> bool {
-        self.crossfeed.as_ref().map(|c| c.is_enabled()).unwrap_or(false)
+        self.crossfeed
+            .as_ref()
+            .map(|c| c.is_enabled())
+            .unwrap_or(false)
     }
 
     pub fn set_replay_gain(&mut self, config: ReplayGainConfig) {

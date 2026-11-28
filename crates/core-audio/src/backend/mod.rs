@@ -1,6 +1,10 @@
 pub mod asio;
 #[cfg(target_os = "windows")]
 pub mod asio_win;
+pub mod coreaudio;
+pub mod cpal_shared;
+pub mod device_fsm;
+pub mod device_manager;
 #[cfg(target_os = "windows")]
 pub mod device_watcher_win;
 pub mod mock;
@@ -8,11 +12,26 @@ pub mod wasapi;
 #[cfg(target_os = "windows")]
 pub mod wasapi_win;
 
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
-pub use core_types::AudioDeviceDescription;
-use core_types::{AudioFormat, OutputBackendKind};
+use crate::buffer::Consumer;
 use crate::error::BackendError;
+use crate::pipeline::rt_telemetry::RtTelemetry;
+use crate::verification::WireSampleFormat;
+pub use core_types::AudioDeviceDescription;
+use core_types::{AudioDeviceCapabilities, AudioFormat, OutputBackendKind};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+pub use coreaudio::{CoreAudioBackend, enumerate_coreaudio_devices};
+pub use cpal_shared::{
+    CPAL_RT_CHUNK_SAMPLES, enumerate_cpal_devices, rank_sample_format, render_cpal_output_chunked,
+    select_best_config_index,
+};
+pub use device_fsm::{DEFAULT_POST_RELEASE_GUARD_DELAY, OutputDeviceFsm, OutputDeviceState};
+pub use device_manager::{
+    AudioDeviceManager, AudioFormatManager, DeviceExtraMeta, NegotiatedFormat,
+};
+pub use mock::MockAudioBackend;
 
 /// Platform-agnostic hardware endpoint and OS power lifecycle events.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +150,10 @@ impl DeviceEventDebouncer {
             due.push(DeviceEvent::DeviceAdded(id));
         }
 
-        if self.pending_default.as_ref().is_some_and(|(_, dl)| now >= *dl)
+        if self
+            .pending_default
+            .as_ref()
+            .is_some_and(|(_, dl)| now >= *dl)
             && let Some((id, _)) = self.pending_default.take()
         {
             due.push(DeviceEvent::DefaultRenderChanged(id));
@@ -252,4 +274,49 @@ pub trait AudioOutputBackend: Send + Sync {
 
     /// Total count of audio buffer underruns/underflows experienced.
     fn underflow_count(&self) -> u64;
+}
+
+/// Configuration for opening or reconfiguring a pull-based hard real-time [`PullAudioBackend`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullStreamConfig {
+    pub device_id: Option<String>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub wire_format: WireSampleFormat,
+    pub buffer_frames: u32,
+    pub strict_bit_perfect: bool,
+}
+
+/// Unified pull-based hardware audio output contract enforcing [`OutputDeviceState`] lifecycle,
+/// SPSC ring-buffer consumption, and lock-free [`RtTelemetry`].
+pub trait PullAudioBackend: Send {
+    /// Friendly backend name.
+    fn name(&self) -> &str;
+
+    /// Current explicit hardware lifecycle FSM state.
+    fn state(&self) -> OutputDeviceState;
+
+    /// Hardware capabilities of the active or target device.
+    fn capabilities(&self) -> AudioDeviceCapabilities;
+
+    /// Lock-free real-time telemetry handle shared with the audio render callback.
+    fn telemetry(&self) -> Arc<RtTelemetry>;
+
+    /// Opens and starts the pull-based audio stream consuming from `consumer`.
+    fn open_stream(
+        &mut self,
+        config: PullStreamConfig,
+        consumer: Consumer<u8>,
+    ) -> Result<(), BackendError>;
+
+    /// Executes the strict exclusive-mode reconfigure sequence:
+    /// mute/stop -> drop handle -> post-release guard delay -> query & reopen.
+    fn reconfigure(
+        &mut self,
+        config: PullStreamConfig,
+        consumer: Consumer<u8>,
+    ) -> Result<(), BackendError>;
+
+    /// Stops playback, releases the exclusive hardware handle, and waits the guard delay.
+    fn stop_and_release(&mut self) -> Result<(), BackendError>;
 }

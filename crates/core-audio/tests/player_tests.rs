@@ -15,7 +15,12 @@ fn temp_wav_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("lumina_{name}_{ts}.wav"))
 }
 
-fn write_synthetic_wav_file(path: &std::path::Path, sample_rate: u32, channels: u16, num_frames: u32) {
+fn write_synthetic_wav_file(
+    path: &std::path::Path,
+    sample_rate: u32,
+    channels: u16,
+    num_frames: u32,
+) {
     let mut buf = Vec::new();
     let bytes_per_sample = 2u16;
     let block_align = channels * bytes_per_sample;

@@ -4,10 +4,15 @@ use core_types::SkipReason;
 
 const IGNORED_SYSTEM_NAMES: &[&str] = &[
     "@eadir",
+    "@tmp",
+    "@recycle",
+    "__macosx",
     "#recycle",
+    "#snapshot",
     "$recycle.bin",
     "system volume information",
     "thumbs.db",
+    "ehthumbs.db",
     "desktop.ini",
     ".trashes",
     ".spotlight-v100",

@@ -186,10 +186,11 @@ impl ProfileRepository {
         let mut tx = ImmediateTx::begin(pool).await?;
 
         let res: Result<()> = async {
-            let row: Option<(i32,)> = sqlx::query_as("SELECT is_default FROM profiles WHERE id = ?")
-                .bind(id)
-                .fetch_optional(tx.conn())
-                .await?;
+            let row: Option<(i32,)> =
+                sqlx::query_as("SELECT is_default FROM profiles WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(tx.conn())
+                    .await?;
 
             let is_default = match row {
                 Some((is_def,)) => is_def == 1,

@@ -28,9 +28,9 @@ fn read_http_request(stream: &mut TcpStream) -> String {
 }
 
 use core_audio::{
-    infer_extension_from_magic, parse_m3u_entries, parse_pls_entries, rank_sample_format,
-    select_best_config_index, AudioDecoder, AudioPlayer, BackendError, CoreAudioError,
-    PlaybackLifecycleState, StreamSource, SymphoniaDecoder, SynthAudioDecoder,
+    AudioDecoder, AudioPlayer, BackendError, CoreAudioError, PlaybackLifecycleState, StreamSource,
+    SymphoniaDecoder, SynthAudioDecoder, infer_extension_from_magic, parse_m3u_entries,
+    parse_pls_entries, rank_sample_format, select_best_config_index,
 };
 use core_types::{OutputBackendKind, SignalQuality};
 use cpal::SampleFormat;
@@ -191,12 +191,18 @@ fn test_synth_decoder_and_headless_pipeline_produces_nonzero_output() {
     assert!(f64s.iter().all(|s| s.abs() < 1.0));
 
     decoder.seek(Duration::from_millis(2_500)).unwrap();
-    let chunk2 = decoder.next_chunk().unwrap().expect("post-seek synth chunk");
+    let chunk2 = decoder
+        .next_chunk()
+        .unwrap()
+        .expect("post-seek synth chunk");
     assert!(!chunk2.is_empty());
 
     let player = AudioPlayer::new_headless();
     player
-        .play_stream(StreamSource::synth("trk-001", "Time", 5_000), "Qobuz Hi-Res")
+        .play_stream(
+            StreamSource::synth("trk-001", "Time", 5_000),
+            "Qobuz Hi-Res",
+        )
         .expect("play synth stream");
     assert_eq!(player.state_code(), PlaybackLifecycleState::Playing as i32);
     assert_eq!(player.duration_ms(), 5_000);
@@ -211,9 +217,15 @@ fn test_synth_decoder_and_headless_pipeline_produces_nonzero_output() {
     player.seek_ms(2_000);
     assert!(player.position_ms() >= 2_000);
 
-    assert_eq!(player.current_signal_path().overall, SignalQuality::Enhanced);
+    assert_eq!(
+        player.current_signal_path().overall,
+        SignalQuality::Enhanced
+    );
     player.toggle_dsp_bypass();
-    assert_eq!(player.current_signal_path().overall, SignalQuality::Lossless);
+    assert_eq!(
+        player.current_signal_path().overall,
+        SignalQuality::Lossless
+    );
 
     player.pause();
     assert_eq!(player.state_code(), PlaybackLifecycleState::Paused as i32);
@@ -262,7 +274,10 @@ fn test_non_headless_wasapi_playback_not_virtual_and_nonzero() {
 
     // 1. Play synthesized demo track on real Windows WASAPI device
     player
-        .play_stream(StreamSource::synth("trk-001", "Time", 5_000), "Lumina Demo Synth")
+        .play_stream(
+            StreamSource::synth("trk-001", "Time", 5_000),
+            "Lumina Demo Synth",
+        )
         .expect("non-headless synth playback should succeed on WASAPI");
 
     for _ in 0..40 {
@@ -320,7 +335,10 @@ fn test_live_select_output_device_reroute_preserves_state_and_position() {
             .select_output_device(Some(&real_devices[0].id), Some(real_devices[0].backend))
             .unwrap();
         player
-            .play_stream(StreamSource::synth("trk-001", "Time", 10_000), "Reroute Test")
+            .play_stream(
+                StreamSource::synth("trk-001", "Time", 10_000),
+                "Reroute Test",
+            )
             .unwrap();
         thread::sleep(Duration::from_millis(120));
         let pos_before = player.position_ms();
@@ -340,14 +358,20 @@ fn test_live_select_output_device_reroute_preserves_state_and_position() {
             .select_output_device(Some(&real_devices[0].id), Some(real_devices[0].backend))
             .expect("live reroute while paused should succeed");
         assert_eq!(player.state_code(), PlaybackLifecycleState::Paused as i32);
-        assert_eq!(player.active_meta().unwrap().device_name, real_devices[0].name);
+        assert_eq!(
+            player.active_meta().unwrap().device_name,
+            real_devices[0].name
+        );
 
         player.stop();
     } else {
         // Fallback headless reroute verification on single/zero-device machines
         let hplayer = AudioPlayer::new_headless();
         hplayer
-            .play_stream(StreamSource::synth("trk-001", "Time", 10_000), "Reroute Headless")
+            .play_stream(
+                StreamSource::synth("trk-001", "Time", 10_000),
+                "Reroute Headless",
+            )
             .unwrap();
         thread::sleep(Duration::from_millis(80));
         let pos_before = hplayer.position_ms();
@@ -370,8 +394,8 @@ fn test_live_select_output_device_reroute_preserves_state_and_position() {
 fn test_decode_error_sets_error_state_and_last_error() {
     // Serve a valid WAV header + partial audio with a larger Content-Length, then drop the socket
     // only AFTER play_stream() succeeds so decode_loop encounters the mid-stream truncation error.
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let wav = build_wav_bytes(48_000, 2, 48_000);
     let initial_slice = wav[..44 + 16_384].to_vec();
@@ -446,11 +470,20 @@ fn test_decode_error_sets_error_state_and_last_error() {
 #[test]
 fn test_infer_extension_from_magic_adts_aac_vs_mp3() {
     // ADTS AAC frames (layer bits == 00)
-    assert_eq!(infer_extension_from_magic(&[0xFF, 0xF1, 0x50, 0x80]), Some("aac"));
-    assert_eq!(infer_extension_from_magic(&[0xFF, 0xF9, 0x50, 0x80]), Some("aac"));
+    assert_eq!(
+        infer_extension_from_magic(&[0xFF, 0xF1, 0x50, 0x80]),
+        Some("aac")
+    );
+    assert_eq!(
+        infer_extension_from_magic(&[0xFF, 0xF9, 0x50, 0x80]),
+        Some("aac")
+    );
 
     // MPEG Audio Layer III frames (layer bits != 00) and ID3v2 tags
-    assert_eq!(infer_extension_from_magic(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
+    assert_eq!(
+        infer_extension_from_magic(&[0xFF, 0xFB, 0x90, 0x00]),
+        Some("mp3")
+    );
     assert_eq!(infer_extension_from_magic(b"ID3\x04\x00\x00"), Some("mp3"));
 }
 
@@ -462,7 +495,9 @@ async fn test_playlist_parsing_and_http_resolution_plays_audio() {
     let m3u_entries = parse_m3u_entries("#EXTM3U\n#EXTINF:-1,Radio\nhttp://example.com/live.aac\n");
     assert_eq!(m3u_entries, vec!["http://example.com/live.aac"]);
 
-    let pls_entries = parse_pls_entries("[playlist]\nNumberOfEntries=1\nFile1=http://example.com/live.mp3\nTitle1=Live\n");
+    let pls_entries = parse_pls_entries(
+        "[playlist]\nNumberOfEntries=1\nFile1=http://example.com/live.mp3\nTitle1=Live\n",
+    );
     assert_eq!(pls_entries, vec!["http://example.com/live.mp3"]);
 
     let wav_bytes = std::sync::Arc::new(build_wav_bytes(48_000, 2, 48_000));
@@ -487,7 +522,9 @@ async fn test_playlist_parsing_and_http_resolution_plays_audio() {
                             return;
                         }
                         total_read += n;
-                        if let Some(end_pos) = buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n") {
+                        if let Some(end_pos) =
+                            buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n")
+                        {
                             total_read = end_pos + 4;
                             break;
                         }
@@ -502,7 +539,8 @@ async fn test_playlist_parsing_and_http_resolution_plays_audio() {
                     let path = parts.get(1).copied().unwrap_or("/");
 
                     if path == "/radio.pls" {
-                        let body = format!("[playlist]\nFile1=http://{addr}/sub.m3u\nNumberOfEntries=1\n");
+                        let body =
+                            format!("[playlist]\nFile1=http://{addr}/sub.m3u\nNumberOfEntries=1\n");
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: audio/x-scpls\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -608,7 +646,12 @@ async fn test_http_headers_sent_on_probe_redirects_and_range_requests_and_ipv4()
     let wav_bytes = Arc::new(build_wav_bytes(48_000, 2, 70_000));
     let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let observed = Arc::new(StdMutex::new(Vec::<(String, String, HashMap<String, String>, bool)>::new()));
+    let observed = Arc::new(StdMutex::new(Vec::<(
+        String,
+        String,
+        HashMap<String, String>,
+        bool,
+    )>::new()));
     let observed_srv = Arc::clone(&observed);
 
     let server_handle = tokio::spawn(async move {
@@ -677,7 +720,10 @@ async fn test_http_headers_sent_on_probe_redirects_and_range_requests_and_ipv4()
                             let end = if e_str.is_empty() {
                                 total_len - 1
                             } else {
-                                e_str.parse::<usize>().unwrap_or(total_len - 1).min(total_len - 1)
+                                e_str
+                                    .parse::<usize>()
+                                    .unwrap_or(total_len - 1)
+                                    .min(total_len - 1)
                             };
                             let slice = &wav_bytes[start..=end];
                             let resp = format!(
@@ -713,8 +759,14 @@ async fn test_http_headers_sent_on_probe_redirects_and_range_requests_and_ipv4()
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string(),
     );
     headers.insert("Accept-Language".to_string(), "en-US,en;q=0.5".to_string());
-    headers.insert("Referer".to_string(), "https://music.youtube.com/".to_string());
-    headers.insert("Cookie".to_string(), "VISITOR_INFO1_LIVE=abc123".to_string());
+    headers.insert(
+        "Referer".to_string(),
+        "https://music.youtube.com/".to_string(),
+    );
+    headers.insert(
+        "Cookie".to_string(),
+        "VISITOR_INFO1_LIVE=abc123".to_string(),
+    );
 
     let url = format!("http://{addr}/start.wav");
     let mut media = core_audio::HttpRangeMediaSource::open(&url, &headers)
@@ -1093,8 +1145,8 @@ fn test_symphonia_decoder_preserves_http_403_from_media_source_probe_and_seek() 
 async fn test_head_sends_connection_close_and_recovers_from_dropped_pooled_socket() {
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
@@ -1204,7 +1256,10 @@ async fn test_head_sends_connection_close_and_recovers_from_dropped_pooled_socke
     media.seek(SeekFrom::Start(140_000)).unwrap();
     let mut chunk1 = [0u8; 16];
     media.read_exact(&mut chunk1).unwrap();
-    assert_eq!(&chunk1, &build_wav_bytes(48_000, 2, 70_000)[140_000..140_016]);
+    assert_eq!(
+        &chunk1,
+        &build_wav_bytes(48_000, 2, 70_000)[140_000..140_016]
+    );
 
     let recorded_head = head_conn_hdrs.lock().unwrap().clone();
     assert!(!recorded_head.is_empty());
@@ -1436,7 +1491,9 @@ async fn test_sequential_http_backward_seek_stays_playing_not_error() {
         .expect("Sequential source open");
     assert!(!media.is_seekable());
     let mut prefix = vec![0u8; 300 * 1024];
-    media.read_exact(&mut prefix).expect("Read past 256 KiB history");
+    media
+        .read_exact(&mut prefix)
+        .expect("Read past 256 KiB history");
     let back_err = media.seek(SeekFrom::Start(270 * 1024)).unwrap_err();
     assert_eq!(back_err.kind(), ErrorKind::Unsupported);
     let end_err = media.seek(SeekFrom::End(0)).unwrap_err();

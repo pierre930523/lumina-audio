@@ -1,24 +1,24 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use windows::core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
     E_NOINTERFACE, E_POINTER, PROPERTYKEY, S_FALSE, S_OK, WAIT_OBJECT_0,
 };
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
-    IMMNotificationClient_Vtbl, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+    DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IMMDeviceEnumerator,
+    IMMNotificationClient, IMMNotificationClient_Vtbl, MMDeviceEnumerator, eConsole, eRender,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Power::{
-    PowerUnregisterSuspendResumeNotification, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, HPOWERNOTIFY,
+    DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, HPOWERNOTIFY, PowerUnregisterSuspendResumeNotification,
 };
-use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
+use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface, PCWSTR};
 
 use crate::backend::wasapi_win::Win32Event;
 use crate::backend::{DeviceEvent, DeviceEventDebouncer};
@@ -92,7 +92,10 @@ impl ComNotificationClient {
         OnPropertyValueChanged: Self::on_property_value_changed,
     };
 
-    fn into_interface(tx: mpsc::Sender<DeviceEvent>, wake: Arc<Win32Event>) -> IMMNotificationClient {
+    fn into_interface(
+        tx: mpsc::Sender<DeviceEvent>,
+        wake: Arc<Win32Event>,
+    ) -> IMMNotificationClient {
         let raw = Box::into_raw(Box::new(Self {
             vtbl: &Self::VTBL,
             ref_count: AtomicU32::new(1),
@@ -136,7 +139,9 @@ impl ComNotificationClient {
 
     unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
         let obj = unsafe { &*(this as *const Self) };
-        obj.ref_count.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+        obj.ref_count
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
     }
 
     unsafe extern "system" fn release(this: *mut c_void) -> u32 {
@@ -169,10 +174,7 @@ impl ComNotificationClient {
         S_OK
     }
 
-    unsafe extern "system" fn on_device_added(
-        this: *mut c_void,
-        pwstrdeviceid: PCWSTR,
-    ) -> HRESULT {
+    unsafe extern "system" fn on_device_added(this: *mut c_void, pwstrdeviceid: PCWSTR) -> HRESULT {
         let obj = unsafe { &*(this as *const Self) };
         if let Some(id) = pcwstr_to_nonempty_string(pwstrdeviceid) {
             obj.emit(DeviceEvent::DeviceAdded(id));
@@ -259,9 +261,7 @@ unsafe fn register_suspend_resume_callback(
     if rc == 0 && !raw.is_null() {
         Some(HPOWERNOTIFY(raw as isize))
     } else {
-        tracing::warn!(
-            "PowerRegisterSuspendResumeNotification failed with Win32 error {rc}"
-        );
+        tracing::warn!("PowerRegisterSuspendResumeNotification failed with Win32 error {rc}");
         None
     }
 }

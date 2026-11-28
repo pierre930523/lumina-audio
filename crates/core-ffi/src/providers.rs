@@ -1,12 +1,12 @@
-use crate::engine::{get_engine, EngineState};
+use crate::engine::{EngineState, get_engine};
 use crate::error::{
-    catch_unwind_ffi, set_last_error, string_to_c_char, LUMINA_ERR_GENERAL,
-    LUMINA_ERR_NULL_POINTER, LUMINA_OK,
+    LUMINA_ERR_GENERAL, LUMINA_ERR_NULL_POINTER, LUMINA_OK, catch_unwind_ffi, set_last_error,
+    string_to_c_char,
 };
-use core_db::{open_test_database, SqlitePool};
+use core_db::{SqlitePool, open_test_database};
 use core_providers::{
-    parse_remote_share_uri, DeezerConfig, LibrarySyncService, LocalProviderConfig,
-    ProviderRegistry, QobuzConfig, SmbConfig, TidalConfig, WebDavConfig,
+    DeezerConfig, LibrarySyncService, LocalProviderConfig, ProviderRegistry, QobuzConfig,
+    SmbConfig, TidalConfig, WebDavConfig, parse_remote_share_uri,
 };
 use core_types::{ProviderKind, QobuzAuthMode};
 use serde::Deserialize;
@@ -95,21 +95,21 @@ pub extern "C" fn lumina_provider_configure(
                 }
                 ProviderKind::Qobuz => {
                     let req: QobuzCfgJson = serde_json::from_str(cfg_str)?;
-                    let auth = if let Some(tok) = req.user_auth_token.filter(|s| !s.trim().is_empty()) {
-                        QobuzAuthMode::token(tok, req.app_id, req.app_secret)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                    } else if let (Some(u), Some(p)) = (req.username, req.password) {
-                        QobuzAuthMode::credentials(u, p, req.app_id, req.app_secret)
-                            .map_err(|e| anyhow::anyhow!(e.to_string()))?
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Qobuz config requires user_auth_token or username+password"
-                        ));
-                    };
+                    let auth =
+                        if let Some(tok) = req.user_auth_token.filter(|s| !s.trim().is_empty()) {
+                            QobuzAuthMode::token(tok, req.app_id, req.app_secret)
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                        } else if let (Some(u), Some(p)) = (req.username, req.password) {
+                            QobuzAuthMode::credentials(u, p, req.app_id, req.app_secret)
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "Qobuz config requires user_auth_token or username+password"
+                            ));
+                        };
                     let mut cfg = QobuzConfig {
                         auth,
-                        base_url: core_providers::qobuz::config::DEFAULT_QOBUZ_BASE_URL
-                            .to_string(),
+                        base_url: core_providers::qobuz::config::DEFAULT_QOBUZ_BASE_URL.to_string(),
                         default_format_id: None,
                     };
                     if let Some(base) = req.base_url.filter(|s| !s.trim().is_empty()) {
@@ -231,9 +231,11 @@ pub extern "C" fn lumina_provider_tidal_pkce_start() -> *mut c_char {
         "lumina_provider_tidal_pkce_start",
         || {
             let engine = get_engine();
-            let session = engine
-                .runtime
-                .block_on(engine.provider_manager.start_tidal_pkce(TidalConfig::default()));
+            let session = engine.runtime.block_on(
+                engine
+                    .provider_manager
+                    .start_tidal_pkce(TidalConfig::default()),
+            );
             let json_str = serde_json::to_string(&session)?;
             Ok(string_to_c_char(&json_str))
         },

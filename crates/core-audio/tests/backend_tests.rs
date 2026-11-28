@@ -1,6 +1,6 @@
 use core_audio::backend::{
-    asio::AsioBackend, mock::MockBackend, wasapi::WasapiBackend, AudioOutputBackend, BackendConfig,
-    BackendState,
+    AudioOutputBackend, BackendConfig, BackendState, asio::AsioBackend, mock::MockBackend,
+    wasapi::WasapiBackend,
 };
 use core_types::{AudioCodec, AudioFormat, OutputBackendKind};
 
@@ -121,24 +121,24 @@ mod windows_backend_tests {
     use std::time::{Duration, Instant};
 
     use core_audio::backend::asio_win::{
-        asio_silence_byte, fill_asio_buffer_silence, AsioCallbackSignals, AsioRenderCore,
-        AsioSamples, AsioTimeStamp, ASIO_OK, ASIO_ST_DSD_INT8_LSB8, ASIO_ST_INT32_LSB,
-        K_ASIO_BUFFER_SIZE_CHANGE, K_ASIO_ENGINE_VERSION, K_ASIO_LATENCIES_CHANGED,
-        K_ASIO_RESET_REQUEST, K_ASIO_RESYNC_REQUEST, K_ASIO_SELECTOR_SUPPORTED,
-        K_ASIO_SUPPORTS_TIME_CODE, K_ASIO_SUPPORTS_TIME_INFO,
+        ASIO_OK, ASIO_ST_DSD_INT8_LSB8, ASIO_ST_INT32_LSB, AsioCallbackSignals, AsioRenderCore,
+        AsioSamples, AsioTimeStamp, K_ASIO_BUFFER_SIZE_CHANGE, K_ASIO_ENGINE_VERSION,
+        K_ASIO_LATENCIES_CHANGED, K_ASIO_RESET_REQUEST, K_ASIO_RESYNC_REQUEST,
+        K_ASIO_SELECTOR_SUPPORTED, K_ASIO_SUPPORTS_TIME_CODE, K_ASIO_SUPPORTS_TIME_INFO,
+        asio_silence_byte, fill_asio_buffer_silence,
     };
     use core_audio::backend::wasapi_win::{
-        fill_wasapi_wire_silence, probe_wasapi_endpoints, run_wasapi_render_loop,
         WasapiClockState, WasapiExclusiveOpenSpec, WasapiExclusiveSession, WasapiRenderControl,
-        WasapiStreamOps, Win32Event,
+        WasapiStreamOps, Win32Event, fill_wasapi_wire_silence, probe_wasapi_endpoints,
+        run_wasapi_render_loop,
     };
     use core_audio::buffer::SpscRingBuffer;
     use core_audio::verification::{AudioVerificationEngine, VerificationConfig, WireSampleFormat};
     use core_types::{
         AudioFormat, ChannelLayout, DeviceTransportKind, OutputMode, UnifiedAudioFormat,
     };
-    use windows::core::HRESULT;
     use windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED;
+    use windows::core::HRESULT;
 
     fn make_test_verification() -> AudioVerificationEngine {
         AudioVerificationEngine::new(VerificationConfig {
@@ -185,7 +185,11 @@ mod windows_backend_tests {
     }
 
     impl FakeWasapiOps {
-        fn new(buf_event: Arc<Win32Event>, buffer_bytes: usize, state: Arc<Mutex<FakeWasapiState>>) -> Self {
+        fn new(
+            buf_event: Arc<Win32Event>,
+            buffer_bytes: usize,
+            state: Arc<Mutex<FakeWasapiState>>,
+        ) -> Self {
             Self {
                 buf_event,
                 buffer_bytes,
@@ -259,7 +263,8 @@ mod windows_backend_tests {
                 return Err(hr);
             }
             if num_frames_written > 0 {
-                st.rendered_buffers.push(self.staging[..self.buffer_bytes].to_vec());
+                st.rendered_buffers
+                    .push(self.staging[..self.buffer_bytes].to_vec());
             }
             Ok(())
         }
@@ -418,7 +423,10 @@ mod windows_backend_tests {
             assert_eq!(st.start_calls, 2);
             // The post-flush primed buffer (last rendered) must contain ONLY 0x22 (no 0x11!).
             let last = st.rendered_buffers.last().unwrap();
-            assert!(last.iter().all(|&b| b == 0x22), "Stale pre-seek bytes leaked into primed buffer");
+            assert!(
+                last.iter().all(|&b| b == 0x22),
+                "Stale pre-seek bytes leaked into primed buffer"
+            );
         }
         assert_eq!(ctrl.clock_snapshot().unwrap().clock_epoch, 1);
         assert_eq!(ctrl.clock_snapshot().unwrap().position, 0);
@@ -426,7 +434,9 @@ mod windows_backend_tests {
         // Now test seek while PAUSED: pause -> push stale 0x44 -> flush -> stays stopped -> push 0x33 -> resume.
         ctrl.set_paused(true);
         let t_pause = Instant::now();
-        while fake_state.lock().unwrap().stop_calls < 2 && t_pause.elapsed() < Duration::from_millis(500) {
+        while fake_state.lock().unwrap().stop_calls < 2
+            && t_pause.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
         prod.push_slice(&[0x44u8; 128 * 2]);
@@ -441,13 +451,18 @@ mod windows_backend_tests {
         prod.push_slice(&[0x33u8; 128]);
         ctrl.set_paused(false);
         let t_res = Instant::now();
-        while fake_state.lock().unwrap().start_calls < 3 && t_res.elapsed() < Duration::from_millis(500) {
+        while fake_state.lock().unwrap().start_calls < 3
+            && t_res.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
         {
             let st = fake_state.lock().unwrap();
             let last = st.rendered_buffers.last().unwrap();
-            assert!(last.iter().all(|&b| b == 0x33), "Paused-seek resume leaked stale bytes");
+            assert!(
+                last.iter().all(|&b| b == 0x33),
+                "Paused-seek resume leaked stale bytes"
+            );
         }
 
         ctrl.stopped.store(true, Ordering::SeqCst);
@@ -460,7 +475,12 @@ mod windows_backend_tests {
         // 1. Direct fill_wasapi_wire_silence checks
         let mut dsd_buf = [0u8; 16];
         let mut phase = false;
-        fill_wasapi_wire_silence(&mut dsd_buf, WireSampleFormat::NativeDsd { channels: 2 }, 2, &mut phase);
+        fill_wasapi_wire_silence(
+            &mut dsd_buf,
+            WireSampleFormat::NativeDsd { channels: 2 },
+            2,
+            &mut phase,
+        );
         assert!(dsd_buf.iter().all(|&b| b == 0x69));
 
         // 2 frames stereo DoP = 2 * 2 * 4 = 16 bytes
@@ -477,8 +497,14 @@ mod windows_backend_tests {
         );
         // Frame 0: L=[0x00, 0x69, 0x69, 0x05], R=[0x00, 0x69, 0x69, 0x05]
         // Frame 1: L=[0x00, 0x69, 0x69, 0xFA], R=[0x00, 0x69, 0x69, 0xFA]
-        assert_eq!(&dop_buf[0..8], &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]);
-        assert_eq!(&dop_buf[8..16], &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]);
+        assert_eq!(
+            &dop_buf[0..8],
+            &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]
+        );
+        assert_eq!(
+            &dop_buf[8..16],
+            &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]
+        );
         assert!(!phase);
 
         // 2. Through run_wasapi_render_loop underrun/priming in DoP mode.
@@ -507,15 +533,23 @@ mod windows_backend_tests {
         });
 
         let t0 = Instant::now();
-        while fake_state.lock().unwrap().rendered_buffers.is_empty() && t0.elapsed() < Duration::from_millis(500) {
+        while fake_state.lock().unwrap().rendered_buffers.is_empty()
+            && t0.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
         {
             let st = fake_state.lock().unwrap();
             let primed = &st.rendered_buffers[0];
             assert_eq!(primed.len(), 32);
-            assert_eq!(&primed[0..8], &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]);
-            assert_eq!(&primed[8..16], &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]);
+            assert_eq!(
+                &primed[0..8],
+                &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]
+            );
+            assert_eq!(
+                &primed[8..16],
+                &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]
+            );
         }
 
         ctrl.stopped.store(true, Ordering::SeqCst);
@@ -548,7 +582,9 @@ mod windows_backend_tests {
         });
 
         let t0 = Instant::now();
-        while fake_state.lock().unwrap().start_calls < 1 && t0.elapsed() < Duration::from_millis(500) {
+        while fake_state.lock().unwrap().start_calls < 1
+            && t0.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
         buf_event.signal();
@@ -637,14 +673,19 @@ mod windows_backend_tests {
         });
 
         let t0 = Instant::now();
-        while fake_state.lock().unwrap().start_calls < 1 && t0.elapsed() < Duration::from_millis(500) {
+        while fake_state.lock().unwrap().start_calls < 1
+            && t0.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
 
         // Inject AUDCLNT_E_DEVICE_INVALIDATED on Reset so a concurrent flush() returns Err without hanging!
         fake_state.lock().unwrap().fail_reset_hr = Some(AUDCLNT_E_DEVICE_INVALIDATED);
         let flush_res = ctrl.flush();
-        assert!(flush_res.is_err(), "Flush must return Err on AUDCLNT_E_DEVICE_INVALIDATED");
+        assert!(
+            flush_res.is_err(),
+            "Flush must return Err on AUDCLNT_E_DEVICE_INVALIDATED"
+        );
         th.join().unwrap();
 
         assert!(ctrl.is_device_lost());
@@ -665,7 +706,9 @@ mod windows_backend_tests {
             run_wasapi_render_loop(&mut ops2, &spec2, 64, &mut cons2, &ver, &ctrl2_th);
         });
         let t1 = Instant::now();
-        while fake_state2.lock().unwrap().start_calls < 1 && t1.elapsed() < Duration::from_millis(500) {
+        while fake_state2.lock().unwrap().start_calls < 1
+            && t1.elapsed() < Duration::from_millis(500)
+        {
             thread::sleep(Duration::from_millis(2));
         }
         fake_state2.lock().unwrap().fail_get_buffer_hr = Some(AUDCLNT_E_DEVICE_INVALIDATED);
@@ -732,7 +775,10 @@ mod windows_backend_tests {
     #[test]
     fn test_asio_silence_fill_pcm_dsd_and_dop() {
         assert_eq!(asio_silence_byte(WireSampleFormat::Int16Le), 0x00);
-        assert_eq!(asio_silence_byte(WireSampleFormat::NativeDsd { channels: 2 }), 0x69);
+        assert_eq!(
+            asio_silence_byte(WireSampleFormat::NativeDsd { channels: 2 }),
+            0x69
+        );
 
         let mut phase = false;
         let mut pcm = [0xAAu8; 16];
@@ -740,7 +786,12 @@ mod windows_backend_tests {
         assert!(pcm.iter().all(|&b| b == 0x00));
 
         let mut dsd = [0u8; 16];
-        fill_asio_buffer_silence(&mut dsd, WireSampleFormat::NativeDsd { channels: 2 }, 1, &mut phase);
+        fill_asio_buffer_silence(
+            &mut dsd,
+            WireSampleFormat::NativeDsd { channels: 2 },
+            1,
+            &mut phase,
+        );
         assert!(dsd.iter().all(|&b| b == 0x69));
 
         // 4 samples in 32-bit DoP planar channel buffer (16 bytes).
@@ -758,10 +809,8 @@ mod windows_backend_tests {
         assert_eq!(
             dop32,
             [
-                0x00, 0x69, 0x69, 0x05,
-                0x00, 0x69, 0x69, 0xFA,
-                0x00, 0x69, 0x69, 0x05,
-                0x00, 0x69, 0x69, 0xFA,
+                0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0x05, 0x00, 0x69,
+                0x69, 0xFA,
             ]
         );
         assert!(!phase);

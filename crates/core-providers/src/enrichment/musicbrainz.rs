@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::rate_limiter::{execute_with_backoff, RateLimiter};
+use super::rate_limiter::{RateLimiter, execute_with_backoff};
 use crate::error::ProviderError;
 use crate::http::endpoint_url;
 
@@ -53,6 +53,7 @@ pub struct MbArtistCredit {
 pub struct MbReleaseGroup {
     pub id: String,
     pub title: String,
+    pub score: Option<u8>,
     pub primary_type: Option<String>,
     pub first_release_date: Option<String>,
     pub artist_credit: Vec<MbArtistCredit>,
@@ -80,7 +81,10 @@ pub struct MbRelease {
     pub title: String,
     pub date: Option<String>,
     pub barcode: Option<String>,
+    pub track_count: Option<u32>,
+    pub media: Vec<MbMedium>,
     pub release_group: Option<MbReleaseGroup>,
+    pub artist_credit: Vec<MbArtistCredit>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -104,8 +108,17 @@ pub struct MbRelation {
 pub struct MbRecording {
     pub id: String,
     pub title: String,
+    pub length: Option<u64>,
+    pub score: Option<u8>,
+    pub artist_credit: Vec<MbArtistCredit>,
     pub relations: Vec<MbRelation>,
     pub releases: Vec<MbRelease>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+struct MbRecordingSearchResponse {
+    pub recordings: Vec<MbRecording>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -113,12 +126,14 @@ pub struct MbRecording {
 pub struct MbTrack {
     pub id: String,
     pub title: String,
+    pub length: Option<u64>,
     pub recording: Option<MbRecording>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct MbMedium {
+    pub track_count: Option<u32>,
     pub tracks: Vec<MbTrack>,
 }
 
@@ -172,8 +187,12 @@ impl MusicBrainzClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs.max(1)))
             .build()
-            .map_err(|e| ProviderError::InvalidConfig(format!("MusicBrainz HTTP client init failed: {e}")))?;
-        let limiter = Arc::new(RateLimiter::new(Duration::from_millis(config.min_interval_ms)));
+            .map_err(|e| {
+                ProviderError::InvalidConfig(format!("MusicBrainz HTTP client init failed: {e}"))
+            })?;
+        let limiter = Arc::new(RateLimiter::new(Duration::from_millis(
+            config.min_interval_ms,
+        )));
         Ok(Self {
             client,
             config,
@@ -222,7 +241,9 @@ impl MusicBrainzClient {
         }
 
         serde_json::from_str::<T>(&body).map_err(|e| {
-            ProviderError::Network(format!("Failed to decode MusicBrainz JSON for '{path}': {e}"))
+            ProviderError::Network(format!(
+                "Failed to decode MusicBrainz JSON for '{path}': {e}"
+            ))
         })
     }
 
@@ -240,10 +261,7 @@ impl MusicBrainzClient {
         let resp: MbReleaseGroupSearchResponse = self
             .get_json(
                 "release-group",
-                &[
-                    ("query", query_str),
-                    ("limit", limit.max(1).to_string()),
-                ],
+                &[("query", query_str), ("limit", limit.max(1).to_string())],
             )
             .await?;
         Ok(resp.release_groups)
@@ -292,6 +310,30 @@ impl MusicBrainzClient {
             &[("inc", "artists+artist-credits+releases".to_string())],
         )
         .await
+    }
+
+    pub async fn search_recordings(
+        &self,
+        title: &str,
+        artist: &str,
+        limit: usize,
+    ) -> Result<Vec<MbRecording>, ProviderError> {
+        let query_str = if artist.trim().is_empty() {
+            format!("recording:\"{}\"", escape_lucene(title.trim()))
+        } else {
+            format!(
+                "recording:\"{}\" AND artist:\"{}\"",
+                escape_lucene(title.trim()),
+                escape_lucene(artist.trim())
+            )
+        };
+        let resp: MbRecordingSearchResponse = self
+            .get_json(
+                "recording",
+                &[("query", query_str), ("limit", limit.max(1).to_string())],
+            )
+            .await?;
+        Ok(resp.recordings)
     }
 
     pub async fn lookup_artist(&self, artist_mbid: &str) -> Result<MbArtistDetail, ProviderError> {

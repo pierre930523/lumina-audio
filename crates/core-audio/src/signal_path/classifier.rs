@@ -1,5 +1,5 @@
-use core_types::{AudioFormat, OutputBackendKind, SignalPath, SignalPathNode, SignalQuality};
 use crate::dsp::DspPipeline;
+use core_types::{AudioFormat, OutputBackendKind, SignalPath, SignalPathNode, SignalQuality};
 
 /// Configuration for inspecting and generating a transparent Roon-style Signal Path.
 #[derive(Debug, Clone)]
@@ -23,7 +23,10 @@ impl SignalPathEngine {
     }
 
     /// Builds a full Signal Path with an optional custom description for the `64-bit DSP` node.
-    pub fn build_with_dsp_detail(ctx: &SignalPathContext<'_>, dsp_detail: Option<&str>) -> SignalPath {
+    pub fn build_with_dsp_detail(
+        ctx: &SignalPathContext<'_>,
+        dsp_detail: Option<&str>,
+    ) -> SignalPath {
         let mut nodes = Vec::new();
         let mut overall = SignalQuality::Lossless;
 
@@ -33,10 +36,7 @@ impl SignalPathEngine {
 
         let src_desc = format!(
             "{} ({}-bit / {} Hz{})",
-            label,
-            ctx.format.bit_depth,
-            ctx.format.sample_rate_hz,
-            dsd_str
+            label, ctx.format.bit_depth, ctx.format.sample_rate_hz, dsd_str
         );
 
         let source_quality = if ctx.format.codec.is_lossless() {

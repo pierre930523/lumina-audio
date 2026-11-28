@@ -2,11 +2,16 @@ import 'dart:ui' as ui;
 
 import 'package:material_ui/material_ui.dart';
 
+import '../theme/lumina_glass_theme.dart';
 import '../theme/lumina_tokens.dart';
 
-/// Translucent dark frosted-glass container that conditionally applies a
-/// clipped [BackdropFilter] only when [enableBackdropBlur] is true and
-/// [blurSigma] > 0.
+/// Translucent frosted-glass container that conditionally applies a clipped
+/// [BackdropFilter] only when [enableBackdropBlur] is true and blur sigma > 0.
+///
+/// By default uses explicit [color], [blurSigma], and [border] (preserving all
+/// dark-mode token assertions). Pass [useThemeSurface] or use
+/// [FrostedGlassContainer.themed] to source surface/border/blur from
+/// [LuminaGlassTheme.of].
 class FrostedGlassContainer extends StatelessWidget {
   final Widget child;
   final double blurSigma;
@@ -18,6 +23,10 @@ class FrostedGlassContainer extends StatelessWidget {
   final double? width;
   final double? height;
   final bool enableBackdropBlur;
+  final bool useThemeSurface;
+  final bool elevated;
+  final bool _hasCustomColor;
+  final bool _hasCustomBlur;
 
   const FrostedGlassContainer({
     super.key,
@@ -31,20 +40,54 @@ class FrostedGlassContainer extends StatelessWidget {
     this.width,
     this.height,
     this.enableBackdropBlur = true,
-  });
+    this.useThemeSurface = false,
+    this.elevated = false,
+  }) : _hasCustomColor = !useThemeSurface,
+       _hasCustomBlur = !useThemeSurface;
+
+  const FrostedGlassContainer.themed({
+    super.key,
+    required this.child,
+    double? blurSigma,
+    Color? color,
+    this.border,
+    this.borderRadius,
+    this.padding,
+    this.boxShadow,
+    this.width,
+    this.height,
+    this.enableBackdropBlur = true,
+    this.elevated = false,
+  }) : blurSigma = blurSigma ?? 20.0,
+       color = color ?? const Color(0x12FFFFFF),
+       useThemeSurface = true,
+       _hasCustomColor = color != null,
+       _hasCustomBlur = blurSigma != null;
 
   @override
   Widget build(BuildContext context) {
+    final LuminaGlassTheme? glass =
+        useThemeSurface ? LuminaGlassTheme.of(context) : null;
+    final Color effectiveColor = _hasCustomColor
+        ? color
+        : (elevated ? glass!.glassBgElevated : glass!.glassBg);
+    final double effectiveBlur = _hasCustomBlur
+        ? blurSigma
+        : (elevated ? glass!.glassBlur : glass!.glassCardBlur);
+    final BoxBorder? effectiveBorder = useThemeSurface
+        ? (border ?? Border.all(color: glass!.glassBorder, width: 1.0))
+        : border;
+
     final Widget paddedChild =
         padding != null ? Padding(padding: padding!, child: child) : child;
 
-    final bool useBlur = enableBackdropBlur && blurSigma > 0.0;
+    final bool useBlur = enableBackdropBlur && effectiveBlur > 0.0;
     final bool hasShadow = boxShadow != null && boxShadow!.isNotEmpty;
 
     Widget content = DecoratedBox(
       decoration: BoxDecoration(
-        color: color,
-        border: border,
+        color: effectiveColor,
+        border: effectiveBorder,
         borderRadius: borderRadius,
         boxShadow: useBlur ? null : boxShadow,
       ),
@@ -53,7 +96,10 @@ class FrostedGlassContainer extends StatelessWidget {
 
     if (useBlur) {
       final blurred = BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
+        filter: ui.ImageFilter.blur(
+          sigmaX: effectiveBlur,
+          sigmaY: effectiveBlur,
+        ),
         child: content,
       );
       content = borderRadius != null
@@ -116,32 +162,31 @@ class _FrostedGlassIconButtonState extends State<FrostedGlassIconButton> {
 
   @override
   Widget build(BuildContext context) {
+    final glass = LuminaGlassTheme.of(context);
+    final isDark = glass.isDark;
+    final focusColor = isDark ? LuminaTokens.focusRing : glass.accent;
     final bool enabled = widget.onTap != null;
     final Color effectiveBg;
     final Color effectiveBorder;
     final Color effectiveIconColor;
 
     if (!enabled) {
-      effectiveBg = LuminaTokens.glassPillBg.withValues(alpha: 0.04);
-      effectiveBorder = LuminaTokens.glassSidebarBorder;
-      effectiveIconColor = LuminaTokens.textDisabled;
+      effectiveBg = isDark
+          ? LuminaTokens.glassPillBg.withValues(alpha: 0.04)
+          : glass.pillBg.withValues(alpha: 0.45);
+      effectiveBorder = glass.sidebarBorder;
+      effectiveIconColor = glass.textDisabled;
     } else if (widget.selected) {
       effectiveBg = _hovered
-          ? LuminaTokens.glassPillHoverBg
-          : LuminaTokens.glassNavActiveBg;
-      effectiveBorder =
-          _focused ? LuminaTokens.focusRing : LuminaTokens.glassCoverRim;
-      effectiveIconColor = widget.iconColor ?? LuminaTokens.glassTextPrimary;
+          ? glass.pillHoverBg
+          : (isDark ? LuminaTokens.glassNavActiveBg : glass.glassBgActive);
+      effectiveBorder = _focused ? focusColor : glass.glassBorderStrong;
+      effectiveIconColor = widget.iconColor ?? glass.textPrimary;
     } else {
-      effectiveBg = _hovered
-          ? LuminaTokens.glassPillHoverBg
-          : LuminaTokens.glassPillBg;
-      effectiveBorder =
-          _focused ? LuminaTokens.focusRing : LuminaTokens.glassPillBorder;
+      effectiveBg = _hovered ? glass.pillHoverBg : glass.pillBg;
+      effectiveBorder = _focused ? focusColor : glass.pillBorder;
       effectiveIconColor = widget.iconColor ??
-          (_hovered
-              ? LuminaTokens.glassTextPrimary
-              : LuminaTokens.glassTextSecondary);
+          (_hovered ? glass.textPrimary : glass.textSecondary);
     }
 
     final radius = BorderRadius.circular(widget.borderRadius);

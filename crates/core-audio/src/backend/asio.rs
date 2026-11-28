@@ -1,8 +1,11 @@
-use std::time::Duration;
 use core_types::{AudioFormat, OutputBackendKind};
+use std::sync::Arc;
+use std::time::Duration;
 
+use super::device_fsm::DEFAULT_POST_RELEASE_GUARD_DELAY;
 use super::{AudioDeviceDescription, AudioOutputBackend, BackendConfig, BackendState};
 use crate::error::BackendError;
+use crate::pipeline::rt_telemetry::RtTelemetry;
 
 /// Steinberg ASIO Host Backend.
 /// Communicates directly with low-latency professional audio drivers, providing
@@ -14,6 +17,8 @@ pub struct AsioBackend {
     config: Option<BackendConfig>,
     frames_written: u64,
     underflows: u64,
+    telemetry: Arc<RtTelemetry>,
+    post_release_guard_delay: Duration,
 }
 
 impl Default for AsioBackend {
@@ -46,7 +51,21 @@ impl AsioBackend {
             config: None,
             frames_written: 0,
             underflows: 0,
+            telemetry: Arc::new(RtTelemetry::new()),
+            post_release_guard_delay: DEFAULT_POST_RELEASE_GUARD_DELAY,
         }
+    }
+
+    pub fn telemetry(&self) -> Arc<RtTelemetry> {
+        Arc::clone(&self.telemetry)
+    }
+
+    pub fn post_release_guard_delay(&self) -> Duration {
+        self.post_release_guard_delay
+    }
+
+    pub fn set_post_release_guard_delay(&mut self, delay: Duration) {
+        self.post_release_guard_delay = delay;
     }
 
     /// Returns the buffer stride in bytes per channel for 32-bit container frames.
@@ -167,7 +186,12 @@ impl AudioOutputBackend for AsioBackend {
         if self.state != BackendState::Playing {
             return Err(BackendError::InvalidState(format!("{:?}", self.state)));
         }
-        let ch = self.config.as_ref().map(|c| c.format.channels as usize).unwrap_or(2).max(1);
+        let ch = self
+            .config
+            .as_ref()
+            .map(|c| c.format.channels as usize)
+            .unwrap_or(2)
+            .max(1);
         let frame_count = frames.len() / ch;
         self.frames_written += frame_count as u64;
         Ok(frame_count)
@@ -177,7 +201,12 @@ impl AudioOutputBackend for AsioBackend {
         if self.state != BackendState::Playing {
             return Err(BackendError::InvalidState(format!("{:?}", self.state)));
         }
-        let ch = self.config.as_ref().map(|c| c.format.channels as usize).unwrap_or(2).max(1);
+        let ch = self
+            .config
+            .as_ref()
+            .map(|c| c.format.channels as usize)
+            .unwrap_or(2)
+            .max(1);
         let frame_count = frames.len() / ch;
         self.frames_written += frame_count as u64;
         Ok(frame_count)
@@ -196,7 +225,11 @@ impl AudioOutputBackend for AsioBackend {
 
     fn latency_duration(&self) -> Duration {
         let frames = self.latency_frames();
-        let rate = self.config.as_ref().map(|c| c.format.sample_rate_hz).unwrap_or(48000);
+        let rate = self
+            .config
+            .as_ref()
+            .map(|c| c.format.sample_rate_hz)
+            .unwrap_or(48000);
         if rate > 0 {
             Duration::from_secs_f64(frames as f64 / rate as f64)
         } else {

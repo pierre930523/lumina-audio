@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use core_audio::dsp::DspPipeline;
 use core_audio::{
-    parse_autoeq_profile_dto, parse_autoeq_txt, AudioPlayer, BackendError, CoreAudioError,
-    PlaybackLifecycleState, StreamSource,
+    AudioPlayer, BackendError, CoreAudioError, PlaybackLifecycleState, StreamSource,
+    parse_autoeq_profile_dto, parse_autoeq_txt,
 };
 use core_types::{
     CrossfeedConfig, DspPipelineConfig, OutputBackendKind, PeqBandConfig, PeqFilterKind,
@@ -123,7 +123,10 @@ async fn spawn_mock_audio_http_server(
                             return;
                         }
                         total_read += n;
-                        if let Some(end_pos) = req_buf[..total_read].windows(4).position(|w| w == b"\r\n\r\n") {
+                        if let Some(end_pos) = req_buf[..total_read]
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                        {
                             total_read = end_pos + 4;
                             break;
                         }
@@ -163,7 +166,8 @@ async fn spawn_mock_audio_http_server(
                     let total_len = payload.len();
                     match (mode, method) {
                         (MockServerMode::NonRange200Only, "HEAD") => {
-                            let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
+                            let resp =
+                                "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
                             if socket.write_all(resp.as_bytes()).await.is_err() {
                                 return;
                             }
@@ -191,11 +195,17 @@ async fn spawn_mock_audio_http_server(
                                 && let Some(spec) = r.strip_prefix("bytes=")
                                 && let Some((s_str, e_str)) = spec.split_once('-')
                             {
-                                let start = s_str.parse::<usize>().unwrap_or(0).min(total_len.saturating_sub(1));
+                                let start = s_str
+                                    .parse::<usize>()
+                                    .unwrap_or(0)
+                                    .min(total_len.saturating_sub(1));
                                 let end = if e_str.is_empty() {
                                     total_len.saturating_sub(1)
                                 } else {
-                                    e_str.parse::<usize>().unwrap_or(total_len - 1).min(total_len - 1)
+                                    e_str
+                                        .parse::<usize>()
+                                        .unwrap_or(total_len - 1)
+                                        .min(total_len - 1)
                                 };
                                 hits.fetch_add(1, Ordering::Relaxed);
                                 let slice = &payload[start..=end];
@@ -329,13 +339,8 @@ async fn test_f35_http_non_range_fallback_and_magic_detection() {
 async fn test_f35_http_dsf_range_stream_playback() {
     // 64 blocks * 4096 bytes * 8 bits / 2_822_400 Hz = ~0.74 seconds of DSD64
     let dsf = build_synthetic_dsf(64);
-    let (base_url, _hits, server_task) = spawn_mock_audio_http_server(
-        dsf,
-        "audio/dsf",
-        None,
-        MockServerMode::RangeWithAuth,
-    )
-    .await;
+    let (base_url, _hits, server_task) =
+        spawn_mock_audio_http_server(dsf, "audio/dsf", None, MockServerMode::RangeWithAuth).await;
 
     let player = AudioPlayer::new_headless();
     let stream = StreamSource::http(
@@ -347,7 +352,9 @@ async fn test_f35_http_dsf_range_stream_playback() {
     player
         .play_stream(stream, "WebDAV DSD64")
         .expect("DSF over HTTP range stream should open cleanly");
-    let meta = player.active_meta().expect("active_meta should be populated");
+    let meta = player
+        .active_meta()
+        .expect("active_meta should be populated");
     assert!(meta.format.is_dsd);
     assert_eq!(meta.format.sample_rate_hz, 2_822_400);
 
@@ -494,12 +501,8 @@ Filter 4: OFF PK Fc 500 Hz Gain -1.5 dB Q 2.0
     assert!(album_dsp_node.detail.contains("ReplayGain (-3.0 dB)"));
 
     // ReplayGain anti-clipping check (+6 dB on 0.8 peak -> clamped to 1.0/0.8 = +1.9 dB)
-    let boost_stream = StreamSource::local_file(&wav_path).with_replay_gain(
-        Some(6.0),
-        None,
-        Some(0.8),
-        None,
-    );
+    let boost_stream =
+        StreamSource::local_file(&wav_path).with_replay_gain(Some(6.0), None, Some(0.8), None);
     player.play_stream(boost_stream, "Clip Guard Test").unwrap();
     let mut track_boost_cfg = player.get_dsp_config();
     track_boost_cfg.replay_gain.mode = ReplayGainMode::Track;
@@ -516,7 +519,10 @@ Filter 4: OFF PK Fc 500 Hz Gain -1.5 dB Q 2.0
     // Bypass -> Lossless and syncs get_dsp_config().bypass
     assert!(player.toggle_dsp_bypass());
     assert!(player.get_dsp_config().bypass);
-    assert_eq!(player.current_signal_path().overall, SignalQuality::Lossless);
+    assert_eq!(
+        player.current_signal_path().overall,
+        SignalQuality::Lossless
+    );
 
     player.stop();
     player.shutdown();
@@ -528,7 +534,11 @@ fn test_f40_output_device_enumeration_and_selection() {
     let headless_player = AudioPlayer::new_headless();
     let headless_devices = headless_player.list_output_devices();
     assert!(!headless_devices.is_empty());
-    assert!(headless_devices.iter().any(|d| d.id == "virtual-exclusive-dac"));
+    assert!(
+        headless_devices
+            .iter()
+            .any(|d| d.id == "virtual-exclusive-dac")
+    );
 
     // Selecting virtual DAC succeeds
     headless_player

@@ -13,11 +13,17 @@ pub struct ImmediateTx {
 }
 
 impl ImmediateTx {
-    /// Acquires a connection from the pool and starts a `BEGIN IMMEDIATE` transaction.
-    pub async fn begin(pool: &SqlitePool) -> Result<Self> {
+    /// Acquires a connection from the pool and starts a `BEGIN IMMEDIATE` transaction,
+    /// returning raw `sqlx::Error` for low-level coordinators.
+    pub async fn begin_sqlx(pool: &SqlitePool) -> std::result::Result<Self, sqlx::Error> {
         let mut conn = pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
         Ok(Self { conn: Some(conn) })
+    }
+
+    /// Acquires a connection from the pool and starts a `BEGIN IMMEDIATE` transaction.
+    pub async fn begin(pool: &SqlitePool) -> Result<Self> {
+        Ok(Self::begin_sqlx(pool).await?)
     }
 
     /// Provides mutable access to the underlying connection for executing queries.

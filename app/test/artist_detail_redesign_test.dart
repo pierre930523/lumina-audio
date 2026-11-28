@@ -35,11 +35,14 @@ class _ArtistTestAudioService extends MockAudioService {
       customTracks.isNotEmpty ? customTracks : super.queue;
 
   @override
-  Future<List<CanonicalAlbumSummary>> getAlbums({int limit = 100}) async {
+  Future<List<CanonicalAlbumSummary>> getAlbums({
+    int limit = 100,
+    bool includeHidden = false,
+  }) async {
     if (customAlbums.isNotEmpty) {
       return customAlbums.take(limit).toList();
     }
-    return super.getAlbums(limit: limit);
+    return super.getAlbums(limit: limit, includeHidden: includeHidden);
   }
 
   @override

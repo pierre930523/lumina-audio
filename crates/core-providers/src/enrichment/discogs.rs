@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::rate_limiter::{execute_with_backoff, RateLimiter};
+use super::rate_limiter::{RateLimiter, execute_with_backoff};
 use crate::error::ProviderError;
 use crate::http::endpoint_url;
 
@@ -150,7 +150,9 @@ impl DiscogsClient {
             .map_err(|e| {
                 ProviderError::InvalidConfig(format!("Discogs HTTP client init failed: {e}"))
             })?;
-        let limiter = Arc::new(RateLimiter::new(Duration::from_millis(config.min_interval_ms)));
+        let limiter = Arc::new(RateLimiter::new(Duration::from_millis(
+            config.min_interval_ms,
+        )));
         Ok(Self {
             client,
             config,

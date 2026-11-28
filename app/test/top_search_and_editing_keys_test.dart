@@ -231,7 +231,7 @@ void main() {
         await tester.pumpAndSettle();
 
         // Navigate to Albums so nav history has a back entry.
-        await tester.tap(find.byKey(const Key('nav_tab_albums')));
+        await tester.tap(find.byKey(const Key('capsule_nav_albums')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('album_grid_view')), findsOneWidget);
 
@@ -283,7 +283,7 @@ void main() {
         // 4th Esc (Level 5): navigates back from Albums to Home.
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
-        expect(find.byKey(const Key('home_dashboard_view')), findsOneWidget);
+        expect(find.byKey(const Key('home_layout_aj')), findsOneWidget);
 
         // Re-open with Ctrl+F, clear text with X, then press Esc once:
         // when empty and focused, 1st Esc unfocuses AND collapses.
@@ -323,7 +323,7 @@ void main() {
 
         // Navigate to LibraryBrowserView, expand top search (empty), then tap
         // library_search_input -> focus moves away so top search collapses.
-        await tester.tap(find.byKey(const Key('nav_tab_library')));
+        await tester.tap(find.byKey(const Key('capsule_nav_library')));
         await tester.pumpAndSettle();
 
         await tester.tap(find.byKey(const Key('btn_top_search_toggle')));

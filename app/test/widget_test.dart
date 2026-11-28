@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lumina_app/main.dart';
+import 'package:lumina_app/models/home_layout_preset.dart';
 import 'package:lumina_app/services/mock_audio_service.dart';
+import 'package:lumina_app/services/ui_scale_controller.dart';
 import 'package:lumina_app/ui/home_screen.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -10,8 +12,14 @@ void main() {
   ) async {
     final service = MockAudioService();
     addTearDown(service.dispose);
+    final scaleCtrl = UiScaleController(
+      initialHomeLayoutPreset: HomeLayoutPreset.classic,
+    );
+    addTearDown(scaleCtrl.dispose);
 
-    await tester.pumpWidget(LuminaApp(audioService: service));
+    await tester.pumpWidget(
+      LuminaApp(audioService: service, uiScaleController: scaleCtrl),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Lumina Audio'), findsOneWidget);
@@ -114,7 +122,7 @@ void main() {
       '搖滾精選',
     );
     await tester.enterText(
-      find.byKey(const Key('input_smart_playlist_keyword')),
+      find.byKey(const Key('input_smart_playlist_description')),
       'Money',
     );
     await tester.pumpAndSettle();

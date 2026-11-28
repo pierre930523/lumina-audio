@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/pierre930523/lumina-audio/releases/latest">
-    <img src="https://img.shields.io/badge/release-v0.2.5-38BDF8.svg?style=for-the-badge&logo=github" alt="Latest Release" />
+    <img src="https://img.shields.io/badge/release-v0.2.6-38BDF8.svg?style=for-the-badge&logo=github" alt="Latest Release" />
   </a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6.svg?style=for-the-badge&logo=windows" alt="Platform" />
   <img src="https://img.shields.io/badge/installer-NSIS%20Modern%20UI-22C55E.svg?style=for-the-badge" alt="NSIS Installer" />
@@ -21,9 +21,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>⬇️ 下載最新 Windows NSIS 安裝包 (Lumina-Audio-Setup-v0.2.5.exe)</strong></a>
+  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>⬇️ 下載最新 Windows NSIS 安裝包 (Lumina-Audio-Setup-v0.2.6.exe)</strong></a>
   &nbsp;•&nbsp;
-  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>📦 免安裝攜帶版 (Lumina-Audio-v0.2.5-Windows-x64.zip)</strong></a>
+  <a href="https://github.com/pierre930523/lumina-audio/releases/latest"><strong>📦 免安裝攜帶版 (Lumina-Audio-v0.2.6-Windows-x64.zip)</strong></a>
   &nbsp;•&nbsp;
   <a href="#-核心特色與技術亮點-key-features">核心特色</a>
   &nbsp;•&nbsp;
@@ -92,7 +92,7 @@
 | **📂 第一層來源匯入層** | **OS 原生 `notify` + 750ms 防抖 / NAS 增量輪詢**、**離線磁碟保護**、**標籤無關內容指紋搬移重連**、**多碟合併 + `TocSignature`**、**`SkippedFiles` 隔離區**、**`.ttml` / `.m3u8` 附屬檔**、**非破壞性 `UserEdit` 覆寫** |
 | **🎛️ 64-bit 浮點 DSP** | **10-Band ISO PEQ**、**AutoEQ 設定檔匯入**、**Bauer Crossfeed**、**ReplayGain 2.0 + 防削波 Limiter**、**一鍵 Bypass** |
 | **🌐 五大串流與智慧接播** | **Qobuz**、**TIDAL**、**YouTube Music**（`libopus` 無失真解碼）、**Deezer**、**Apple Music**、**WebDAV / SMB**、**50 首去重無限接播與跨平台高音質路由**、**HTTP 451 區域封鎖分類** |
-| **⚡ 桌面互動與毛玻璃 UI** | 共享動態封面流體背景與 GLSL 毛玻璃元件、單一全域 **5 層 `Esc` 後退優先級**、100% 寬度頂部 `WindowDragBar` 拖曳與雙擊最大化 |
+| **⚡ 桌面互動與毛玻璃 UI** | 共享動態封面流體背景與 GLSL 毛玻璃元件（深／淺雙主題與 AI/AJ/Classic 首頁版型）、**Glide Inertia 滑行慣性滾動（`damping 9.5`／反向即時煞車／觸控板旁路／`> 1.8 px/ms` 卡片零留白）**、單一全域 **5 層 `Esc` 後退優先級**、100% 寬度頂部 `WindowDragBar` 拖曳與雙擊最大化 |
 | **📥 系統匣與斷點續播** | 原生 Win32 `NOTIFYICONDATAW` **最小化至系統匣背景播放**、重啟後 **毫秒級精準還原曲目與進度（Paused 待命不誤播）** |
 | **🖥️ 多螢幕與高 DPI** | Windows Per-Monitor V2 DPI 自適應（`100% ~ 200%` 系統縮放 + 軟體內建 `Ctrl + +/-/0` 無段縮放），HiDPI 原圖封面快取 |
 
@@ -143,7 +143,7 @@ lumina-audio/
 ├── Cargo.toml                       # Rust Workspace 設定 (Rust 2024 Edition)
 ├── crates/
 │   ├── core-types/                  # 純領域契約 (CanonicalTrack, SourceReference, SkippedFile, ScanProgressEvent, TocSignature)
-│   ├── core-db/                     # SQLite WAL + FTS5 (Migrations 0001..0006, IngestionRepository, KeyringStore)
+│   ├── core-db/                     # SQLite WAL + FTS5 (Migrations 0001..0013, Ingestion/Focus/Tags/AlbumGroups/Keyring)
 │   ├── core-providers/              # 第一層本機匯入管線 (Watcher/指紋/忽略/多碟TOC/TTML/M3U8) 與串流/SMB/WebDAV Provider
 │   ├── core-audio/                  # Symphonia/libopus/DSD 解碼、HTTP Range 串流、64-bit DSP、WASAPI/ASIO、FFT
 │   ├── core-server/                 # Axum HTTP REST + WS (含 /api/v1/library/* 匯入層端點與多房間音區)
@@ -153,10 +153,10 @@ lumina-audio/
 │   │   ├── models/                  # ingestion_models、recommendation_models、audio_quality_tier、playback_state
 │   │   ├── services/                # FFI/Server/Mock 四端對齊 AudioService、Autoplay 控制器、5 大串流 Provider
 │   │   ├── shaders/                 # GLSL Fragment Shaders (liquid_glass.frag, mesh_fluid_bg.frag)
-│   │   ├── ui/                      # 毛玻璃動態背景、主頁推薦、專輯詮釋資料編輯、音樂庫設定與隔離區 UI
+│   │   ├── ui/                      # 毛玻璃動態背景、主頁版型、Glide 慣性滾動引擎、專輯/曲庫/設定與隔離區 UI
 │   │   └── main.dart                # 應用程式與 Per-Monitor DPI 縮放入口
 │   ├── windows/runner/              # 原生 Win32 視窗、系統匣、DPAPI 加解密與 WebView2 COM 授權視窗
-│   └── test/                        # 695 項單元、Widget、匯入層、自動接播與回歸測試
+│   └── test/                        # 825 項單元、Widget、滾動物理、匯入層、自動接播與回歸測試
 ├── docs/assets/                     # README 介面架構與視覺預覽 SVG 圖檔
 └── installer/
     └── lumina_setup.nsi             # NSIS Modern UI 2 Windows 安裝包封裝腳本
@@ -170,7 +170,7 @@ lumina-audio/
 1. **Windows 10 / 11 (x64)**
 2. **Flutter SDK** `3.14.0+` 與 **Rust Toolchain** (`stable-x86_64-pc-windows-msvc`)
 3. **Visual Studio 2022**（「使用 C++ 的桌面開發」工作負載）
-4. **NSIS (Nullsoft Scriptable Install System)** `3.x`（用於打包 `Lumina-Audio-Setup-v0.2.5.exe`）
+4. **NSIS (Nullsoft Scriptable Install System)** `3.x`（用於打包 `Lumina-Audio-Setup-v0.2.6.exe`）
 
 ### 1. 編譯 Rust 核心與 Flutter Windows Release
 ```powershell
@@ -186,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 -SkipPrepareD
 # 確保輸出目錄存在並執行 makensis 編譯安裝包
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 makensis installer\lumina_setup.nsi
-# 產出：dist\Lumina-Audio-Setup-v0.2.5.exe
+# 產出：dist\Lumina-Audio-Setup-v0.2.6.exe
 ```
 
 ---
@@ -196,10 +196,10 @@ makensis installer\lumina_setup.nsi
 | 驗證項目 | 執行指令 | 驗證結果 |
 | :--- | :--- | :---: |
 | **Rust Workspace 靜態檢查** | `cargo clippy --workspace --all-targets --no-deps -- -D warnings` | **0 warnings** |
-| **Rust 核心與匯入層測試** | `cargo test --workspace --exclude core-ffi` & `cargo test -p core-ffi -- --test-threads=1` | **473 / 473 Passed (100%)** |
+| **Rust 核心與匯入層測試** | `cargo test -j 1 -p core-types -p core-db -p core-audio -p core-providers -p core-server -- --test-threads=1` & `cargo test -p core-ffi -- --test-threads=1` | **697 / 697 Passed (100%)** |
 | **Flutter 靜態分析** | `cd app; flutter analyze` | **0 issues** |
-| **Flutter 全域測試套件** | `cd app; flutter test` | **695 / 695 Passed (100%)** |
-| **Tier 1 引擎 E2E 驗收** | `.\run_e2e_tests.ps1 -Tier 1 -Suite engine` | **15 / 15 Passed (100%)** |
+| **Flutter 全域測試套件** | `cd app; flutter test -r expanded -j 1 --timeout 30s` | **825 / 825 Passed (100%)** |
+| **FFI 符號對齊檢查** | `python scripts/check_ffi_symbols.py` | **185 Lookups / 192 Exports OK** |
 | **Windows Release & NSIS 封裝** | `scripts\build_release.ps1 -SkipPrepareDeps` & `makensis installer\lumina_setup.nsi` | **Exit 0** |
 
 ---

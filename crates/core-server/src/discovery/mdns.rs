@@ -243,7 +243,10 @@ mod tests {
         let cfg = MdnsConfig::default();
         assert_eq!(cfg.service_type, "_lumina._tcp.local.");
         assert_eq!(cfg.port, 9888);
-        assert_eq!(cfg.txt_records.get("server_name").unwrap(), "Lumina-Desktop");
+        assert_eq!(
+            cfg.txt_records.get("server_name").unwrap(),
+            "Lumina-Desktop"
+        );
         assert_eq!(cfg.txt_records.get("version").unwrap(), "0.1.0");
         assert_eq!(cfg.txt_records.get("api_version").unwrap(), "1");
         assert_eq!(cfg.txt_records.get("pairing_required").unwrap(), "true");

@@ -1,6 +1,6 @@
+use core_types::ProviderKind;
 use std::collections::HashMap;
 use std::sync::Arc;
-use core_types::ProviderKind;
 use tokio::sync::RwLock;
 
 use crate::error::ProviderError;
@@ -41,10 +41,13 @@ impl ProviderRegistry {
         map.get(&kind).cloned()
     }
 
-    pub async fn require(&self, kind: ProviderKind) -> Result<Arc<dyn MusicProvider>, ProviderError> {
-        self.get(kind)
-            .await
-            .ok_or_else(|| ProviderError::InvalidConfig(format!("Provider '{kind}' not registered")))
+    pub async fn require(
+        &self,
+        kind: ProviderKind,
+    ) -> Result<Arc<dyn MusicProvider>, ProviderError> {
+        self.get(kind).await.ok_or_else(|| {
+            ProviderError::InvalidConfig(format!("Provider '{kind}' not registered"))
+        })
     }
 
     pub async fn is_registered(&self, kind: ProviderKind) -> bool {

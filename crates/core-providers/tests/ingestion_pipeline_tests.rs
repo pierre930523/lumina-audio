@@ -3,17 +3,15 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use core_db::{
-    open_test_database, IngestionRepository, LibraryRepository, ProfileRepository,
-};
+use core_db::{IngestionRepository, LibraryRepository, ProfileRepository, open_test_database};
 use core_providers::{
-    compute_content_fingerprint, extract_disc_number_from_dir_name, should_ignore_name,
-    split_artists, IngestionConfig, IngestionPipeline, LyricsFormat, LyricsManager, LyricsSource,
-    LyricsTarget, MetadataExtractor, StorageWatcherManager,
+    IngestionConfig, IngestionPipeline, LyricsFormat, LyricsManager, LyricsSource, LyricsTarget,
+    MetadataExtractor, StorageWatcherManager, compute_content_fingerprint,
+    extract_disc_number_from_dir_name, should_ignore_name, split_artists,
 };
 use core_types::{
-    AudioCodec, ExternalAlbumIngest, ExternalCatalogIngestBatch, ExternalTrackIngest, MetadataLayer,
-    Profile, ProviderKind, ScanLifecycleState, SkipReason, WatchMode,
+    AudioCodec, ExternalAlbumIngest, ExternalCatalogIngestBatch, ExternalTrackIngest,
+    MetadataLayer, Profile, ProviderKind, ScanLifecycleState, SkipReason, WatchMode,
 };
 use tempfile::tempdir;
 
@@ -35,7 +33,8 @@ fn write_synthetic_flac(path: &Path, comments: &[(&str, &str)], audio_payload: &
     let total_samples: u64 = 441_000;
     si[10] = (sr >> 12) as u8;
     si[11] = ((sr >> 4) & 0xFF) as u8;
-    si[12] = (((sr & 0x0F) << 4) as u8) | ((ch_minus_1 as u8) << 1) | (((bps_minus_1 >> 4) & 1) as u8);
+    si[12] =
+        (((sr & 0x0F) << 4) as u8) | ((ch_minus_1 as u8) << 1) | (((bps_minus_1 >> 4) & 1) as u8);
     si[13] = (((bps_minus_1 & 0x0F) << 4) as u8) | (((total_samples >> 32) & 0x0F) as u8);
     si[14] = ((total_samples >> 24) & 0xFF) as u8;
     si[15] = ((total_samples >> 16) & 0xFF) as u8;
@@ -148,10 +147,24 @@ async fn test_ignore_rules_quarantine_and_corrupt_file_resilience() {
     let skipped = IngestionRepository::list_skipped_files(&pool, false)
         .await
         .unwrap();
-    assert!(skipped.iter().any(|s| s.reason == SkipReason::UnsplitCueOrIso && s.file_path.ends_with(".cue")));
-    assert!(skipped.iter().any(|s| s.reason == SkipReason::UnsplitCueOrIso && s.file_path.ends_with(".iso")));
-    assert!(skipped.iter().any(|s| s.reason == SkipReason::UnsupportedFormat && s.file_path.ends_with(".ape")));
-    assert!(skipped.iter().any(|s| s.reason == SkipReason::CorruptHeader && s.file_path.ends_with("02 - corrupt.flac")));
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s.reason == SkipReason::UnsplitCueOrIso && s.file_path.ends_with(".cue"))
+    );
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s.reason == SkipReason::UnsplitCueOrIso && s.file_path.ends_with(".iso"))
+    );
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s.reason == SkipReason::UnsupportedFormat && s.file_path.ends_with(".ape"))
+    );
+    assert!(skipped.iter().any(
+        |s| s.reason == SkipReason::CorruptHeader && s.file_path.ends_with("02 - corrupt.flac")
+    ));
 }
 
 #[tokio::test]
@@ -239,7 +252,11 @@ async fn test_content_fingerprint_flac_tag_edit_and_move_rename_relink() {
         .await
         .unwrap()
         .expect("Original track_sources.id must survive move/rename + tag edit");
-    assert!(relinked.external_track_id.ends_with("01_blue_in_green_remaster.flac"));
+    assert!(
+        relinked
+            .external_track_id
+            .ends_with("01_blue_in_green_remaster.flac")
+    );
     assert_eq!(relinked.title, "Blue in Green (My Custom Title)");
 
     let history = LibraryRepository::get_recent_history(&pool, &profile.id, 10)
@@ -261,7 +278,11 @@ async fn test_offline_root_guard_never_prunes_tracks() {
     let root = dir.path().join("RemovableDrive");
     write_synthetic_flac(
         &root.join("Artist/Album/01.flac"),
-        &[("TITLE", "Safe Track"), ("ARTIST", "Safe Artist"), ("ALBUM", "Safe Album")],
+        &[
+            ("TITLE", "Safe Track"),
+            ("ARTIST", "Safe Artist"),
+            ("ALBUM", "Safe Album"),
+        ],
         &[9u8; 512],
     );
 
@@ -299,7 +320,9 @@ async fn test_multi_disc_collapse_disco_negative_toc_ttml_m3u_and_multi_artist()
     );
 
     // Multi-disc album without DISCNUMBER tags (inferred from CD1/CD2 subfolders)
-    let d1_track = dir.path().join("Pink Floyd/The Wall/CD1/01 - In the Flesh.flac");
+    let d1_track = dir
+        .path()
+        .join("Pink Floyd/The Wall/CD1/01 - In the Flesh.flac");
     let d2_track = dir.path().join("Pink Floyd/The Wall/CD2/01 - Hey You.flac");
     write_synthetic_flac(
         &d1_track,
@@ -324,7 +347,9 @@ async fn test_multi_disc_collapse_disco_negative_toc_ttml_m3u_and_multi_artist()
     );
 
     // "Disco Classics" album folder must NOT be stripped as a disc folder
-    let disco_track = dir.path().join("Bee Gees/Disco Classics/01 - Stayin Alive.flac");
+    let disco_track = dir
+        .path()
+        .join("Bee Gees/Disco Classics/01 - Stayin Alive.flac");
     write_synthetic_flac(&disco_track, &[], &[33u8; 512]);
 
     // Sibling .ttml lyrics sidecar
@@ -354,8 +379,15 @@ async fn test_multi_disc_collapse_disco_negative_toc_ttml_m3u_and_multi_artist()
     let albums = LibraryRepository::list_canonical_albums(&pool, 20, 0)
         .await
         .unwrap();
-    let wall = albums.iter().find(|a| a.title == "The Wall").expect("The Wall album");
-    assert_eq!(wall.versions.len(), 1, "CD1 & CD2 must collapse into ONE AlbumVersion");
+    let wall = albums
+        .iter()
+        .find(|a| a.title == "The Wall")
+        .expect("The Wall album");
+    assert_eq!(
+        wall.versions.len(),
+        1,
+        "CD1 & CD2 must collapse into ONE AlbumVersion"
+    );
 
     let wall_detail = LibraryRepository::get_album_detail(&pool, &wall.id)
         .await
@@ -367,25 +399,26 @@ async fn test_multi_disc_collapse_disco_negative_toc_ttml_m3u_and_multi_artist()
     assert_eq!(wall_tracks[1].disc_number, 2);
 
     // Verify TOC persisted on album_versions
-    let toc_row: (Option<String>, i64, Option<i64>) = sqlx::query_as(
-        "SELECT toc_signature, disc_count, track_count FROM album_versions WHERE id = ?",
-    )
-    .bind(&wall.versions[0].id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(toc_row.0.as_deref().unwrap_or("").starts_with("toc1:d2:n2:"));
+    let toc_row = IngestionRepository::get_album_version_toc_info(&pool, &wall.versions[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        toc_row
+            .0
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("toc1:d2:n2:")
+    );
     assert_eq!(toc_row.1, 2);
     assert_eq!(toc_row.2, Some(2));
 
     // Verify multi-artist Vorbis comments persisted on canonical_track
-    let ct_id: (Option<String>,) =
-        sqlx::query_as("SELECT canonical_track_id FROM track_sources WHERE id = ?")
-            .bind(&wall_tracks[0].id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let ct = IngestionRepository::get_canonical_track_with_sources(&pool, &ct_id.0.unwrap())
+    let ct_id = IngestionRepository::get_canonical_track_id_for_source(&pool, &wall_tracks[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    let ct = IngestionRepository::get_canonical_track_with_sources(&pool, &ct_id)
         .await
         .unwrap()
         .unwrap();
@@ -439,7 +472,8 @@ async fn test_watcher_debounce_and_nas_polling_and_external_catalog_ingest() {
     assert_eq!(watcher.list_roots().await.unwrap().len(), 1);
 
     write_synthetic_flac(
-        &dir.path().join("Daft Punk/Discovery/01 - One More Time.flac"),
+        &dir.path()
+            .join("Daft Punk/Discovery/01 - One More Time.flac"),
         &[
             ("TITLE", "One More Time"),
             ("ARTIST", "Daft Punk"),
@@ -505,7 +539,11 @@ async fn test_watcher_debounce_and_nas_polling_and_external_catalog_ingest() {
         .unwrap();
     write_synthetic_flac(
         &native_dir.path().join("Live/Album/01 - Watched.flac"),
-        &[("TITLE", "Watched Track"), ("ARTIST", "Watcher Artist"), ("ALBUM", "Watched Album")],
+        &[
+            ("TITLE", "Watched Track"),
+            ("ARTIST", "Watcher Artist"),
+            ("ALBUM", "Watched Album"),
+        ],
         &[55u8; 512],
     );
 
@@ -521,7 +559,251 @@ async fn test_watcher_debounce_and_nas_polling_and_external_catalog_ingest() {
             break;
         }
     }
-    assert!(found, "Native OS watcher should debounce and ingest newly created FLAC");
+    assert!(
+        found,
+        "Native OS watcher should debounce and ingest newly created FLAC"
+    );
 
     watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_move_relink_and_force_rescan_leave_zero_orphan_versions() {
+    let dir = tempdir().unwrap();
+    let pool = open_test_database().await.unwrap();
+    let payload: Vec<u8> = (0..2048).map(|i| (i % 233) as u8).collect();
+
+    // 1. Initial scan in OldDir
+    let old_path = dir.path().join("OldDir/01 - Track.flac");
+    write_synthetic_flac(
+        &old_path,
+        &[
+            ("TITLE", "Track One"),
+            ("ARTIST", "Orphan Test Artist"),
+            ("ALBUM", "Orphan Test Album"),
+            ("TRACKNUMBER", "1"),
+        ],
+        &payload,
+    );
+
+    let pipeline = IngestionPipeline::with_defaults(pool.clone());
+    let s1 = pipeline.scan_root(dir.path(), "local").await.unwrap();
+    assert_eq!(s1.added, 1);
+
+    // 2. Move file to NewDir -> rescan via IngestionPipeline -> old version MUST be pruned!
+    fs::remove_file(&old_path).unwrap();
+    let new_path = dir.path().join("NewDir/01 - Track.flac");
+    write_synthetic_flac(
+        &new_path,
+        &[
+            ("TITLE", "Track One"),
+            ("ARTIST", "Orphan Test Artist"),
+            ("ALBUM", "Orphan Test Album"),
+            ("TRACKNUMBER", "1"),
+        ],
+        &payload,
+    );
+
+    let s2 = pipeline.scan_root(dir.path(), "local").await.unwrap();
+    assert_eq!(s2.updated, 1);
+
+    let albums_after_move = LibraryRepository::list_canonical_albums(&pool, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(albums_after_move.len(), 1);
+    assert_eq!(
+        albums_after_move[0].versions.len(),
+        1,
+        "OldDir 0-track version must be pruned after move relink"
+    );
+
+    // 3. Rewrite album tag & force rescan_tags -> old album + old version MUST be pruned!
+    write_synthetic_flac(
+        &new_path,
+        &[
+            ("TITLE", "Track One"),
+            ("ARTIST", "Retagged Artist"),
+            ("ALBUM", "Retagged Album"),
+            ("TRACKNUMBER", "1"),
+        ],
+        &payload,
+    );
+
+    let rescan_rep = core_providers::LibrarySyncService::rescan_tags(
+        &pool,
+        Some(dir.path().to_str().unwrap()),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rescan_rep.updated, 1);
+
+    let albums_after_rescan = LibraryRepository::list_canonical_albums(&pool, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        albums_after_rescan.len(),
+        1,
+        "Old 0-track album must be pruned after force rescan_tags"
+    );
+    assert_eq!(albums_after_rescan[0].title, "Retagged Album");
+    assert_eq!(albums_after_rescan[0].versions.len(), 1);
+}
+
+#[tokio::test]
+async fn test_ingest_external_catalog_skips_zero_track_albums() {
+    let pool = open_test_database().await.unwrap();
+    let batch = ExternalCatalogIngestBatch {
+        provider: ProviderKind::Qobuz,
+        albums: vec![
+            ExternalAlbumIngest {
+                external_album_id: "qb-empty".to_string(),
+                title: "Ghost Empty Album".to_string(),
+                artist_name: "Ghost Artist".to_string(),
+                album_artist: None,
+                release_year: Some(2025),
+                upc: None,
+                edition_label: None,
+                cover_url: None,
+                disc_count: 1,
+                tracks: vec![],
+            },
+            ExternalAlbumIngest {
+                external_album_id: "qb-real".to_string(),
+                title: "Real Album".to_string(),
+                artist_name: "Real Artist".to_string(),
+                album_artist: None,
+                release_year: Some(2025),
+                upc: None,
+                edition_label: None,
+                cover_url: None,
+                disc_count: 1,
+                tracks: vec![ExternalTrackIngest {
+                    external_track_id: "qb-trk-1".to_string(),
+                    title: "Real Track".to_string(),
+                    artist_name: Some("Real Artist".to_string()),
+                    album_artist: None,
+                    disc_number: 1,
+                    track_number: 1,
+                    duration_ms: 210_000,
+                    isrc: None,
+                    genre: None,
+                    composer: None,
+                    codec: Some(AudioCodec::Flac),
+                    sample_rate_hz: Some(44_100),
+                    bit_depth: Some(16),
+                    bitrate_kbps: None,
+                }],
+            },
+        ],
+    };
+
+    let rep = IngestionPipeline::ingest_external_catalog(&pool, &batch)
+        .await
+        .unwrap();
+    assert_eq!(rep.albums_inserted, 1);
+    assert_eq!(rep.tracks_upserted, 1);
+
+    let albums = LibraryRepository::list_canonical_albums(&pool, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].title, "Real Album");
+}
+
+#[tokio::test]
+async fn test_pipeline_250_batch_throttles_progress_and_allows_concurrent_reads() {
+    let dir = tempdir().unwrap();
+    let db_file = dir.path().join("batch_bench.db");
+    let pool = core_db::open_database(&db_file).await.unwrap();
+
+    // Create 260 synthetic FLAC files across 13 albums (> 1 full 250-track batch)
+    let music_dir = dir.path().join("Music");
+    for i in 0..260usize {
+        let alb_idx = i / 20;
+        let trk_idx = (i % 20) + 1;
+        let p = music_dir
+            .join(format!("Artist{alb_idx:02}"))
+            .join(format!("Album{alb_idx:02}"))
+            .join(format!("{trk_idx:02} - Track {i:03}.flac"));
+        let mut payload = vec![(i % 251) as u8; 256];
+        payload[0] = (alb_idx as u8).wrapping_add(1);
+        payload[1] = trk_idx as u8;
+        write_synthetic_flac(
+            &p,
+            &[
+                ("TITLE", &format!("Track {i:03}")),
+                ("ARTIST", &format!("Artist {alb_idx:02}")),
+                ("ALBUM", &format!("Album {alb_idx:02}")),
+                ("TRACKNUMBER", &trk_idx.to_string()),
+            ],
+            &payload,
+        );
+    }
+
+    let pipeline = IngestionPipeline::with_defaults(pool.clone());
+    assert_eq!(IngestionConfig::default().batch_size, 200);
+    let mut rx = pipeline.subscribe_progress();
+    let expected_scan_id = "scan-batch-corr-001".to_string();
+
+    // Concurrent reader task simulating UI polling during scan
+    let read_pool = pool.clone();
+    let reader_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_done_flag = reader_done.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut reads = 0usize;
+        let mut max_read_ms = 0u128;
+        while !reader_done_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let t0 = std::time::Instant::now();
+            let _ = LibraryRepository::list_canonical_albums(&read_pool, 50, 0)
+                .await
+                .unwrap();
+            max_read_ms = max_read_ms.max(t0.elapsed().as_millis());
+            reads += 1;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (reads, max_read_ms)
+    });
+
+    let summary = pipeline
+        .scan_root_with_id(&music_dir, "local", Some(expected_scan_id.clone()))
+        .await
+        .unwrap();
+    reader_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (reads, max_read_ms) = reader_task.await.unwrap();
+
+    assert_eq!(summary.scan_id, expected_scan_id);
+    assert_eq!(summary.added, 260);
+    assert_eq!(summary.state, ScanLifecycleState::Completed);
+    assert!(
+        reads >= 1,
+        "Concurrent reader should have executed reads during scan"
+    );
+    assert!(
+        max_read_ms < 2000,
+        "Concurrent UI reads must stay non-blocking (max observed {max_read_ms}ms)"
+    );
+
+    // Collect emitted progress events and verify throttling & lifecycle preservation
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(events.iter().all(|e| e.scan_id == expected_scan_id));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.state == ScanLifecycleState::Discovering)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.state == ScanLifecycleState::Completed)
+    );
+    // With 200ms throttle, 260 fast local files should NOT fire 16+ unthrottled per-16-file events
+    assert!(
+        events.len() <= 20,
+        "Progress stream should be 200ms-throttled, got {} events",
+        events.len()
+    );
 }

@@ -1,14 +1,16 @@
 use core_db::credential::{CredentialStore, FallbackCredentialStore, MemoryCredentialStore};
 use core_db::error::{DbError, ProfileError};
+use core_db::repository::ingestion::IngestionRepository;
 use core_db::repository::library::{
-    deterministic_artist_id, normalize_match_key, Artist, ArtworkCacheEntry, LibraryRepository,
-    PairedClient,
+    Artist, ArtworkCacheEntry, LibraryRepository, PairedClient, deterministic_artist_id,
+    normalize_match_key,
 };
 use core_db::repository::profile::ProfileRepository;
 use core_db::search::{rebuild_search_index, search_library, sync_album_fts, sync_artist_fts};
 use core_db::{open_database, open_test_database};
 use core_types::{
-    AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, Profile, ProviderKind, TrackSource,
+    AlbumVersion, AudioCodec, AudioFormat, CanonicalAlbum, MetadataLayer, Profile, ProviderKind,
+    TrackSource,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -96,6 +98,7 @@ async fn test_wal_concurrency_stress_16_tasks_8_conns() {
                 musicbrainz_id: Some(format!("mb-id-{}", i)),
                 biography: Some("Concurrent artist test bio".into()),
                 image_path: None,
+                preference: 0,
             };
 
             // Concurrent insert
@@ -205,11 +208,15 @@ async fn test_profile_protection_invariants() {
     assert!(p2_refreshed.is_default);
 
     // 6. Now p1 is not default, deleting p1 succeeds
-    ProfileRepository::delete_profile(&pool, "p1").await.unwrap();
-    assert!(ProfileRepository::get_profile(&pool, "p1")
+    ProfileRepository::delete_profile(&pool, "p1")
         .await
-        .unwrap()
-        .is_none());
+        .unwrap();
+    assert!(
+        ProfileRepository::get_profile(&pool, "p1")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // 7. Deleting p2 (now the last remaining profile) fails with CannotDeleteLastProfile
     match ProfileRepository::delete_profile(&pool, "p2").await {
@@ -230,16 +237,25 @@ async fn test_library_repository_crud_cascade_and_batch() {
         musicbrainz_id: Some("mb-miles-123".into()),
         biography: Some("Jazz trumpeter and composer".into()),
         image_path: None,
+        preference: 0,
     };
     LibraryRepository::insert_artist(&pool, &artist)
         .await
         .unwrap();
 
-    let search_res = LibraryRepository::search_artists_by_name(&pool, "Miles")
+    // Before any present tracks exist, find_artist_by_id resolves directly while
+    // user-facing search_artists_by_name defensively filters out orphan artists.
+    let fetched_artist = LibraryRepository::find_artist_by_id(&pool, "art-miles")
         .await
-        .unwrap();
-    assert_eq!(search_res.len(), 1);
-    assert_eq!(search_res[0].id, "art-miles");
+        .unwrap()
+        .expect("artist should exist by id");
+    assert_eq!(fetched_artist.name, "Miles Davis");
+    assert!(
+        LibraryRepository::search_artists_by_name(&pool, "Miles")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // 2. Canonical Album & Version
     let format = AudioFormat::pcm(AudioCodec::Flac, 96000, 24, 2).unwrap();
@@ -249,9 +265,14 @@ async fn test_library_repository_crud_cascade_and_batch() {
         .unwrap();
     album.id = "alb-kob".into();
 
-    let version = AlbumVersion::new(&album.id, ProviderKind::Qobuz, "qobuz-kob-hi-res", format.clone())
-        .unwrap()
-        .with_edition_label("Remastered 2013");
+    let version = AlbumVersion::new(
+        &album.id,
+        ProviderKind::Qobuz,
+        "qobuz-kob-hi-res",
+        format.clone(),
+    )
+    .unwrap()
+    .with_edition_label("Remastered 2013");
     album.add_version(version);
 
     LibraryRepository::insert_canonical_album(&pool, &album, Some("art-miles"))
@@ -265,7 +286,10 @@ async fn test_library_repository_crud_cascade_and_batch() {
     assert_eq!(fetched_album.title, "Kind of Blue");
     assert_eq!(fetched_album.artist_name, "Miles Davis");
     assert_eq!(fetched_album.versions.len(), 1);
-    assert_eq!(fetched_album.versions[0].edition_label.as_deref(), Some("Remastered 2013"));
+    assert_eq!(
+        fetched_album.versions[0].edition_label.as_deref(),
+        Some("Remastered 2013")
+    );
 
     // 3. Batch insert 500 tracks into this version
     let version_id = &fetched_album.versions[0].id;
@@ -297,6 +321,13 @@ async fn test_library_repository_crud_cascade_and_batch() {
         .unwrap();
     assert_eq!(count.0, 500);
 
+    // Once present tracks exist, search_artists_by_name surfaces Miles Davis.
+    let search_res = LibraryRepository::search_artists_by_name(&pool, "Miles")
+        .await
+        .unwrap();
+    assert_eq!(search_res.len(), 1);
+    assert_eq!(search_res[0].id, "art-miles");
+
     // 4. Album Credits
     LibraryRepository::insert_album_credit(&pool, "alb-kob", "art-miles", "Trumpet, Bandleader")
         .await
@@ -313,10 +344,11 @@ async fn test_library_repository_crud_cascade_and_batch() {
         .await
         .unwrap();
 
-    let v_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM album_versions WHERE canonical_album_id = 'alb-kob'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let v_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM album_versions WHERE canonical_album_id = 'alb-kob'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(v_count.0, 0);
 
     let t_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM track_sources WHERE version_id = ?")
@@ -344,11 +376,19 @@ async fn test_profile_favorites_and_play_history() {
     .unwrap();
 
     // Favorites
-    assert!(!LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123").await.unwrap());
+    assert!(
+        !LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123")
+            .await
+            .unwrap()
+    );
     LibraryRepository::add_favorite(&pool, &p.id, "album", "alb-123")
         .await
         .unwrap();
-    assert!(LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123").await.unwrap());
+    assert!(
+        LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123")
+            .await
+            .unwrap()
+    );
 
     let favs = LibraryRepository::list_favorites_for_profile(&pool, &p.id, Some("album"))
         .await
@@ -360,7 +400,11 @@ async fn test_profile_favorites_and_play_history() {
         .await
         .unwrap();
     assert!(removed);
-    assert!(!LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123").await.unwrap());
+    assert!(
+        !LibraryRepository::is_favorite(&pool, &p.id, "album", "alb-123")
+            .await
+            .unwrap()
+    );
 
     // Play History
     // First set up artist, album, version, track for relational foreign key
@@ -371,22 +415,53 @@ async fn test_profile_favorites_and_play_history() {
         musicbrainz_id: None,
         biography: None,
         image_path: None,
+        preference: 0,
     };
-    LibraryRepository::insert_artist(&pool, &artist).await.unwrap();
+    LibraryRepository::insert_artist(&pool, &artist)
+        .await
+        .unwrap();
 
     let album = CanonicalAlbum::new("Historical Album", "Historical Artist").unwrap();
-    LibraryRepository::insert_canonical_album(&pool, &album, Some("art-hist")).await.unwrap();
+    LibraryRepository::insert_canonical_album(&pool, &album, Some("art-hist"))
+        .await
+        .unwrap();
 
-    let version = AlbumVersion::new(&album.id, ProviderKind::Local, "loc-v1", AudioFormat::cd_quality()).unwrap();
-    LibraryRepository::insert_album_version(&pool, &version).await.unwrap();
+    let version = AlbumVersion::new(
+        &album.id,
+        ProviderKind::Local,
+        "loc-v1",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    LibraryRepository::insert_album_version(&pool, &version)
+        .await
+        .unwrap();
 
-    let track = TrackSource::new(&version.id, ProviderKind::Local, "loc-t1", "Track 1", 1, 1, 200_000, AudioFormat::cd_quality()).unwrap();
-    LibraryRepository::insert_track_source(&pool, &track).await.unwrap();
+    let track = TrackSource::new(
+        &version.id,
+        ProviderKind::Local,
+        "loc-t1",
+        "Track 1",
+        1,
+        1,
+        200_000,
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    LibraryRepository::insert_track_source(&pool, &track)
+        .await
+        .unwrap();
 
-    LibraryRepository::record_play(&pool, &p.id, &track.id, 180_000).await.unwrap();
-    LibraryRepository::record_play(&pool, &p.id, &track.id, 200_000).await.unwrap();
+    LibraryRepository::record_play(&pool, &p.id, &track.id, 180_000)
+        .await
+        .unwrap();
+    LibraryRepository::record_play(&pool, &p.id, &track.id, 200_000)
+        .await
+        .unwrap();
 
-    let history = LibraryRepository::get_recent_history(&pool, &p.id, 10).await.unwrap();
+    let history = LibraryRepository::get_recent_history(&pool, &p.id, 10)
+        .await
+        .unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].track_source_id, track.id);
 }
@@ -397,9 +472,30 @@ async fn test_fts5_search_ranking_and_sanitization() {
 
     // 1. Insert directly into search_fts using sync helpers
     let mut tx = pool.begin().await.unwrap();
-    sync_artist_fts(&mut tx, "art-floyd", "Pink Floyd", Some("Progressive rock band")).await.unwrap();
-    sync_artist_fts(&mut tx, "art-daft", "Daft Punk", Some("Electronic music duo")).await.unwrap();
-    sync_artist_fts(&mut tx, "art-sakamoto", "坂本龍一", Some("Japanese composer")).await.unwrap();
+    sync_artist_fts(
+        &mut tx,
+        "art-floyd",
+        "Pink Floyd",
+        Some("Progressive rock band"),
+    )
+    .await
+    .unwrap();
+    sync_artist_fts(
+        &mut tx,
+        "art-daft",
+        "Daft Punk",
+        Some("Electronic music duo"),
+    )
+    .await
+    .unwrap();
+    sync_artist_fts(
+        &mut tx,
+        "art-sakamoto",
+        "坂本龍一",
+        Some("Japanese composer"),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 
     // 2. Search exact and prefix
@@ -431,7 +527,12 @@ async fn test_fts5_search_ranking_and_sanitization() {
     // 4. Empty and whitespace queries return empty Vec
     assert!(search_library(&pool, "").await.unwrap().is_empty());
     assert!(search_library(&pool, "   ").await.unwrap().is_empty());
-    assert!(search_library(&pool, "::: +++ --- ***").await.unwrap().is_empty());
+    assert!(
+        search_library(&pool, "::: +++ --- ***")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // 5. Rebuild search index test
     let count = rebuild_search_index(&pool).await.unwrap();
@@ -465,12 +566,11 @@ async fn test_credential_isolation_and_fallback() {
 
     // Secret Isolation verification: ensure no sensitive keys exist in SQLite schema
     let pool = open_test_database().await.unwrap();
-    let schemas: Vec<(String,)> = sqlx::query_as(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    let schemas: Vec<(String,)> =
+        sqlx::query_as("SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
 
     let forbidden_keys = [
         "user_auth_token",
@@ -610,6 +710,7 @@ async fn test_wal_concurrency_stress_64_tasks_8_conns() {
                 musicbrainz_id: Some(format!("mb-64-{}", i)),
                 biography: Some("Concurrent 64-task WAL stress artist".into()),
                 image_path: None,
+                preference: 0,
             };
             LibraryRepository::insert_artist(&pool, &artist)
                 .await
@@ -686,16 +787,27 @@ async fn test_migration_0002_replaygain_and_preferences() {
         musicbrainz_id: None,
         biography: None,
         image_path: None,
+        preference: 0,
     };
-    LibraryRepository::insert_artist(&pool, &artist).await.unwrap();
+    LibraryRepository::insert_artist(&pool, &artist)
+        .await
+        .unwrap();
 
     let album = CanonicalAlbum::new("OK Computer", "Radiohead").unwrap();
     LibraryRepository::insert_canonical_album(&pool, &album, Some(&artist.id))
         .await
         .unwrap();
 
-    let version = AlbumVersion::new(&album.id, ProviderKind::Local, "loc-okc", AudioFormat::cd_quality()).unwrap();
-    LibraryRepository::insert_album_version(&pool, &version).await.unwrap();
+    let version = AlbumVersion::new(
+        &album.id,
+        ProviderKind::Local,
+        "loc-okc",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    LibraryRepository::insert_album_version(&pool, &version)
+        .await
+        .unwrap();
 
     let track1 = TrackSource::new(
         &version.id,
@@ -723,7 +835,9 @@ async fn test_migration_0002_replaygain_and_preferences() {
     .unwrap()
     .with_replay_gain(Some(-6.5), Some(-8.1), Some(0.97), Some(0.99));
 
-    LibraryRepository::insert_track_source(&pool, &track1).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &track1)
+        .await
+        .unwrap();
     LibraryRepository::insert_track_sources_batch(&pool, std::slice::from_ref(&track2))
         .await
         .unwrap();
@@ -759,7 +873,12 @@ async fn test_migration_0002_replaygain_and_preferences() {
     assert_eq!(fetched2.replay_gain_album_peak, Some(0.92));
 
     // App preferences roundtrip
-    assert_eq!(LibraryRepository::get_preference(&pool, "active_zone").await.unwrap(), None);
+    assert_eq!(
+        LibraryRepository::get_preference(&pool, "active_zone")
+            .await
+            .unwrap(),
+        None
+    );
     LibraryRepository::set_preference(&pool, "active_zone", "zone-main")
         .await
         .unwrap();
@@ -786,7 +905,10 @@ async fn test_migration_0002_replaygain_and_preferences() {
 async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
     let pool = open_test_database().await.unwrap();
 
-    assert_eq!(normalize_match_key("  The Dark Side of the Moon! "), "the dark side of the moon");
+    assert_eq!(
+        normalize_match_key("  The Dark Side of the Moon! "),
+        "the dark side of the moon"
+    );
 
     let prof = ProfileRepository::create_profile(
         &pool,
@@ -810,15 +932,10 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
     .await
     .unwrap();
 
-    let producer = LibraryRepository::upsert_artist_by_mbid_or_name(
-        &pool,
-        "Alan Parsons",
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let producer =
+        LibraryRepository::upsert_artist_by_mbid_or_name(&pool, "Alan Parsons", None, None, None)
+            .await
+            .unwrap();
 
     // Source 1: Local FLAC album
     let mut alb1 = CanonicalAlbum::new("Dark Side of the Moon", "Pink Floyd")
@@ -852,7 +969,9 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
     .unwrap()
     .with_isrc("GBAYE7300004")
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk1).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk1)
+        .await
+        .unwrap();
 
     // Source 2: Qobuz album with punctuation difference, UPC + MBID
     let mut alb2 = CanonicalAlbum::new("Dark Side of the Moon!", "Pink Floyd")
@@ -895,7 +1014,9 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
     .unwrap()
     .with_isrc("GBAYE7300004")
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk2).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk2)
+        .await
+        .unwrap();
 
     // Credits & favorites on both before merge (including overlapping credit & favorite)
     let c1 = LibraryRepository::upsert_album_credit(&pool, &alb1.id, &producer.id, "Engineer")
@@ -920,9 +1041,15 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
         .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    sync_album_fts(&mut tx, &alb2.id, &alb2.title, Some("Pink Floyd"), Some(1973))
-        .await
-        .unwrap();
+    sync_album_fts(
+        &mut tx,
+        &alb2.id,
+        &alb2.title,
+        Some("Pink Floyd"),
+        Some(1973),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 
     // Cross-source match checks (MBID, UPC, ISRC, Normalized key)
@@ -956,10 +1083,15 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
         .id,
         "alb-qobuz"
     );
-    assert!(!LibraryRepository::find_canonical_album_ids_by_isrcs(&pool, &["GB-AYE-73-00004".to_string()])
+    assert!(
+        !LibraryRepository::find_canonical_album_ids_by_isrcs(
+            &pool,
+            &["GB-AYE-73-00004".to_string()]
+        )
         .await
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
 
     // Deduplicate canonical albums -> merges alb-local into richer alb-qobuz
     let merged = LibraryRepository::deduplicate_canonical_albums(&pool)
@@ -979,15 +1111,30 @@ async fn test_canonical_album_cross_source_match_merge_dedup_and_details() {
         .unwrap()
         .expect("album detail should exist");
     assert_eq!(detail.album.release_year, Some(1973));
-    assert_eq!(detail.album.musicbrainz_release_group_id.as_deref(), Some("mb-rg-dsotm"));
-    assert_eq!(detail.album.cover_url.as_deref(), Some("https://example.com/dsotm.jpg"));
+    assert_eq!(
+        detail.album.musicbrainz_release_group_id.as_deref(),
+        Some("mb-rg-dsotm")
+    );
+    assert_eq!(
+        detail.album.cover_url.as_deref(),
+        Some("https://example.com/dsotm.jpg")
+    );
     assert_eq!(detail.versions.len(), 2);
-    assert_eq!(detail.versions.iter().map(|v| v.tracks.len()).sum::<usize>(), 2);
+    assert_eq!(
+        detail
+            .versions
+            .iter()
+            .map(|v| v.tracks.len())
+            .sum::<usize>(),
+        2
+    );
     assert_eq!(detail.credits.len(), 2); // Engineer (deduped) + Producer
 
-    assert!(LibraryRepository::is_favorite(&pool, &prof.id, "album", &survivor_id)
-        .await
-        .unwrap());
+    assert!(
+        LibraryRepository::is_favorite(&pool, &prof.id, "album", &survivor_id)
+            .await
+            .unwrap()
+    );
 
     // Artist detail includes credited album even when not primary_artist_id
     LibraryRepository::mark_album_enriched(&pool, &survivor_id)
@@ -1023,10 +1170,16 @@ async fn test_paired_clients_persistence_and_token_hashes() {
         last_seen_at: "2026-11-17T11:00:00Z".into(),
     };
 
-    LibraryRepository::insert_paired_client(&pool, &c1).await.unwrap();
-    LibraryRepository::insert_paired_client(&pool, &c2).await.unwrap();
+    LibraryRepository::insert_paired_client(&pool, &c1)
+        .await
+        .unwrap();
+    LibraryRepository::insert_paired_client(&pool, &c2)
+        .await
+        .unwrap();
 
-    let hashes = LibraryRepository::list_paired_token_hashes(&pool).await.unwrap();
+    let hashes = LibraryRepository::list_paired_token_hashes(&pool)
+        .await
+        .unwrap();
     assert_eq!(hashes.len(), 2);
     assert!(hashes.contains(&"hash_alpha_111".to_string()));
     assert!(hashes.contains(&"hash_beta_222".to_string()));
@@ -1037,9 +1190,23 @@ async fn test_paired_clients_persistence_and_token_hashes() {
     let clients = LibraryRepository::list_paired_clients(&pool).await.unwrap();
     assert_eq!(clients.len(), 2);
 
-    assert!(LibraryRepository::delete_paired_client(&pool, "client-1").await.unwrap());
-    assert!(!LibraryRepository::delete_paired_client(&pool, "client-1").await.unwrap());
-    assert_eq!(LibraryRepository::list_paired_token_hashes(&pool).await.unwrap().len(), 1);
+    assert!(
+        LibraryRepository::delete_paired_client(&pool, "client-1")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !LibraryRepository::delete_paired_client(&pool, "client-1")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        LibraryRepository::list_paired_token_hashes(&pool)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1273,9 +1440,16 @@ async fn test_rescan_clears_removed_tags_and_preserves_id_and_play_history() {
     LibraryRepository::insert_canonical_album(&pool, &album, Some(&artist.id))
         .await
         .unwrap();
-    let ver = AlbumVersion::new(&album.id, ProviderKind::Local, "v-rescan", AudioFormat::cd_quality())
+    let ver = AlbumVersion::new(
+        &album.id,
+        ProviderKind::Local,
+        "v-rescan",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    LibraryRepository::insert_album_version(&pool, &ver)
+        .await
         .unwrap();
-    LibraryRepository::insert_album_version(&pool, &ver).await.unwrap();
 
     let initial = TrackSource::new(
         &ver.id,
@@ -1536,9 +1710,16 @@ async fn test_unicode_deterministic_artist_ids_and_file_cache_info() {
     LibraryRepository::insert_canonical_album(&pool, &album, Some(&a1.id))
         .await
         .unwrap();
-    let ver = AlbumVersion::new(&album.id, ProviderKind::Local, "v-cache", AudioFormat::cd_quality())
+    let ver = AlbumVersion::new(
+        &album.id,
+        ProviderKind::Local,
+        "v-cache",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    LibraryRepository::insert_album_version(&pool, &ver)
+        .await
         .unwrap();
-    LibraryRepository::insert_album_version(&pool, &ver).await.unwrap();
     let trk = TrackSource::new(
         &ver.id,
         ProviderKind::Local,
@@ -1607,8 +1788,13 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
     // Album A under D:/Music/A (missing from disk)
     let mut alb_a = CanonicalAlbum::new("Album A", "Prune Artist").unwrap();
     alb_a.id = "alb-a".into();
-    let ver_a = AlbumVersion::new(&alb_a.id, ProviderKind::Local, "D:/Music/A", AudioFormat::cd_quality())
-        .unwrap();
+    let ver_a = AlbumVersion::new(
+        &alb_a.id,
+        ProviderKind::Local,
+        "D:/Music/A",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
     alb_a.add_version(ver_a.clone());
     LibraryRepository::insert_canonical_album(&pool, &alb_a, Some(&artist.id))
         .await
@@ -1624,7 +1810,9 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
         AudioFormat::cd_quality(),
     )
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk_a).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk_a)
+        .await
+        .unwrap();
 
     // Album A2 under D:/Music/A2 (prefix trap! must NOT be touched when scoping to D:/Music/A)
     let mut alb_a2 = CanonicalAlbum::new("Album A2", "Prune Artist").unwrap();
@@ -1651,7 +1839,9 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
         AudioFormat::cd_quality(),
     )
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk_a2).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk_a2)
+        .await
+        .unwrap();
 
     // Unrelated pre-existing trackless version on Album A2 (must NOT be deleted)
     let trackless_ver = AlbumVersion::new(
@@ -1668,8 +1858,13 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
     // Album B under D:/Music/B (kept)
     let mut alb_b = CanonicalAlbum::new("Album B", "Prune Artist").unwrap();
     alb_b.id = "alb-b".into();
-    let ver_b = AlbumVersion::new(&alb_b.id, ProviderKind::Local, "D:/Music/B", AudioFormat::cd_quality())
-        .unwrap();
+    let ver_b = AlbumVersion::new(
+        &alb_b.id,
+        ProviderKind::Local,
+        "D:/Music/B",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
     alb_b.add_version(ver_b.clone());
     LibraryRepository::insert_canonical_album(&pool, &alb_b, Some(&artist.id))
         .await
@@ -1685,7 +1880,9 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
         AudioFormat::cd_quality(),
     )
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk_b).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk_b)
+        .await
+        .unwrap();
 
     // Attach play_history, credits, favorites, artwork_cache, artwork_overrides, search_fts to Album A
     LibraryRepository::record_play(&pool, &prof.id, &trk_a.id, 60_000)
@@ -1745,64 +1942,89 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
     rebuild_search_index(&pool).await.unwrap();
 
     // Scoped prune on D:\Music\A (mixed slashes & case) with empty existing_paths
-    let report = LibraryRepository::prune_missing_local_tracks(
-        &pool,
-        Some(r"d:\music\a\"),
-        &HashSet::new(),
-    )
-    .await
-    .unwrap();
+    let report =
+        LibraryRepository::prune_missing_local_tracks(&pool, Some(r"d:\music\a\"), &HashSet::new())
+            .await
+            .unwrap();
     assert_eq!(report.tracks_pruned, 1);
     assert_eq!(report.versions_pruned, 1);
     assert_eq!(report.albums_pruned, 1);
     assert_eq!(report.invalidated_artwork_paths.len(), 2);
-    assert!(report
-        .invalidated_artwork_paths
-        .contains(&"C:/cache/trk_a_512.jpg".to_string()));
-    assert!(report
-        .invalidated_artwork_paths
-        .contains(&"C:/cache/alb_a_512.png".to_string()));
+    assert!(
+        report
+            .invalidated_artwork_paths
+            .contains(&"C:/cache/trk_a_512.jpg".to_string())
+    );
+    assert!(
+        report
+            .invalidated_artwork_paths
+            .contains(&"C:/cache/alb_a_512.png".to_string())
+    );
 
-    assert!(LibraryRepository::find_track_source_by_id(&pool, &trk_a.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(LibraryRepository::find_canonical_album_by_id(&pool, &alb_a.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(LibraryRepository::get_artwork_override(&pool, "track", &trk_a.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(LibraryRepository::get_artwork_override(&pool, "album", &alb_a.id)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(!LibraryRepository::is_favorite(&pool, &prof.id, "album", &alb_a.id)
-        .await
-        .unwrap());
-    assert!(LibraryRepository::get_recent_history(&pool, &prof.id, 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        LibraryRepository::find_track_source_by_id(&pool, &trk_a.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        LibraryRepository::find_canonical_album_by_id(&pool, &alb_a.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        LibraryRepository::get_artwork_override(&pool, "track", &trk_a.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        LibraryRepository::get_artwork_override(&pool, "album", &alb_a.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !LibraryRepository::is_favorite(&pool, &prof.id, "album", &alb_a.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        LibraryRepository::get_recent_history(&pool, &prof.id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    // Album A2 (prefix boundary) + trackless Qobuz version + Album B remain intact
-    assert!(LibraryRepository::find_track_source_by_id(&pool, &trk_a2.id)
-        .await
-        .unwrap()
-        .is_some());
+    // Album A2 (prefix boundary) + trackless Qobuz version + Album B remain intact in DB,
+    // while list_versions_for_album defensively returns only versions with present tracks.
+    assert!(
+        LibraryRepository::find_track_source_by_id(&pool, &trk_a2.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let raw_ver_count_before: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM album_versions WHERE canonical_album_id = ?")
+            .bind(&alb_a2.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(raw_ver_count_before.0, 2);
     assert_eq!(
         LibraryRepository::list_versions_for_album(&pool, &alb_a2.id)
             .await
             .unwrap()
             .len(),
-        2
+        1
     );
-    assert!(LibraryRepository::find_track_source_by_id(&pool, &trk_b.id)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        LibraryRepository::find_track_source_by_id(&pool, &trk_b.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Unscoped prune keeping only d:/music/b/02.flac (case-insensitive) prunes trk_a2, keeps trk_b and trackless_ver
     let mut keep = HashSet::new();
@@ -1813,17 +2035,25 @@ async fn test_prune_missing_local_tracks_scoped_boundary_and_cascade() {
     assert_eq!(report_2.tracks_pruned, 1);
     assert_eq!(report_2.versions_pruned, 1); // ver_a2 pruned; trackless_ver preserved!
     assert_eq!(report_2.albums_pruned, 0); // alb_a2 still has trackless_ver
-    assert_eq!(
+    let raw_ver_count_after: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM album_versions WHERE canonical_album_id = ?")
+            .bind(&alb_a2.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(raw_ver_count_after.0, 1);
+    assert!(
         LibraryRepository::list_versions_for_album(&pool, &alb_a2.id)
             .await
             .unwrap()
-            .len(),
-        1
+            .is_empty()
     );
-    assert!(LibraryRepository::find_track_source_by_id(&pool, &trk_b.id)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        LibraryRepository::find_track_source_by_id(&pool, &trk_b.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1836,8 +2066,13 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
 
     let mut alb1 = CanonicalAlbum::new("Art Album 1", "Art Artist").unwrap();
     alb1.id = "alb-art-1".into();
-    let ver1 = AlbumVersion::new(&alb1.id, ProviderKind::Local, "v-art-1", AudioFormat::cd_quality())
-        .unwrap();
+    let ver1 = AlbumVersion::new(
+        &alb1.id,
+        ProviderKind::Local,
+        "v-art-1",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
     alb1.add_version(ver1.clone());
     LibraryRepository::insert_canonical_album(&pool, &alb1, Some(&artist.id))
         .await
@@ -1853,14 +2088,21 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
         AudioFormat::cd_quality(),
     )
     .unwrap();
-    LibraryRepository::insert_track_source(&pool, &trk1).await.unwrap();
+    LibraryRepository::insert_track_source(&pool, &trk1)
+        .await
+        .unwrap();
 
     let mut alb2 = CanonicalAlbum::new("Art Album 2", "Art Artist")
         .unwrap()
         .with_album_artist("Art Album Artist");
     alb2.id = "alb-art-2".into();
-    let ver2 = AlbumVersion::new(&alb2.id, ProviderKind::Qobuz, "q-art-2", AudioFormat::cd_quality())
-        .unwrap();
+    let ver2 = AlbumVersion::new(
+        &alb2.id,
+        ProviderKind::Qobuz,
+        "q-art-2",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
     alb2.add_version(ver2);
     LibraryRepository::insert_canonical_album(&pool, &alb2, Some(&artist.id))
         .await
@@ -1893,10 +2135,12 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
         .await
         .unwrap();
     assert_eq!(invalidated, vec!["C:/cache/t1_256.webp".to_string()]);
-    assert!(LibraryRepository::get_artwork_cache(&pool, "trk:1:256")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        LibraryRepository::get_artwork_cache(&pool, "trk:1:256")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Album cache + delete_artwork_cache + clear_artwork_cache
     LibraryRepository::upsert_artwork_cache(
@@ -1935,12 +2179,16 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
     )
     .await
     .unwrap();
-    assert!(LibraryRepository::delete_artwork_cache(&pool, "standalone:ph")
-        .await
-        .unwrap());
-    assert!(!LibraryRepository::delete_artwork_cache(&pool, "standalone:ph")
-        .await
-        .unwrap());
+    assert!(
+        LibraryRepository::delete_artwork_cache(&pool, "standalone:ph")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !LibraryRepository::delete_artwork_cache(&pool, "standalone:ph")
+            .await
+            .unwrap()
+    );
 
     // Overrides validation & CRUD
     assert!(
@@ -1979,15 +2227,19 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
             .image_path,
         "D:/Covers/custom2.jpg"
     );
-    assert!(LibraryRepository::get_artwork_override(&pool, "album", &alb2.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        LibraryRepository::get_artwork_override(&pool, "album", &alb2.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     // Stale target album artwork_cache was invalidated when alb2's override was adopted
-    assert!(LibraryRepository::get_artwork_cache(&pool, "alb:1:512")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        LibraryRepository::get_artwork_cache(&pool, "alb:1:512")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Insert fresh post-merge cache entry for alb1, then verify delete_canonical_album cascades it
     LibraryRepository::upsert_artwork_cache(
@@ -2013,14 +2265,18 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
     LibraryRepository::delete_canonical_album(&pool, &alb1.id)
         .await
         .unwrap();
-    assert!(LibraryRepository::get_artwork_cache(&pool, "alb:1:user:512")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(LibraryRepository::get_artwork_override(&pool, "album", &alb1.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        LibraryRepository::get_artwork_cache(&pool, "alb:1:user:512")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        LibraryRepository::get_artwork_override(&pool, "album", &alb1.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // clear_artwork_cache returns any remaining paths and empties table
     LibraryRepository::upsert_artwork_cache(
@@ -2043,10 +2299,12 @@ async fn test_artwork_cache_overrides_merge_and_delete_cascade() {
     .unwrap();
     let cleared = LibraryRepository::clear_artwork_cache(&pool).await.unwrap();
     assert_eq!(cleared, vec!["C:/cache/temp1.png".to_string()]);
-    assert!(LibraryRepository::clear_artwork_cache(&pool)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        LibraryRepository::clear_artwork_cache(&pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -2076,7 +2334,10 @@ async fn test_concurrent_upsert_artist_by_mbid_or_name_no_toctou_race() {
 
     let expected_id = deterministic_artist_id("Concurrent 坂本龍一");
     for handle in handles {
-        let artist = handle.await.unwrap().expect("concurrent upsert should succeed");
+        let artist = handle
+            .await
+            .unwrap()
+            .expect("concurrent upsert should succeed");
         assert_eq!(artist.id, expected_id);
     }
 
@@ -2128,4 +2389,346 @@ async fn test_concurrent_upsert_artist_by_mbid_or_name_no_toctou_race() {
             .await
             .unwrap();
     assert_eq!(count_mbid.0, 1);
+}
+
+#[tokio::test]
+async fn test_normalize_match_key_nfkc_and_db_pragmas() {
+    assert_eq!(
+        normalize_match_key("  The Dark Side of the Moon! "),
+        "the dark side of the moon"
+    );
+    // NFD vs NFC equivalence
+    assert_eq!(
+        normalize_match_key("Cafe\u{0301}"),
+        normalize_match_key("Café")
+    );
+    assert_eq!(normalize_match_key("Cafe\u{0301}"), "café");
+    // NFKC full-width compatibility and Japanese NFD vs NFC dakuten
+    assert_eq!(normalize_match_key("Ａｌｂｕｍ　１"), "album 1");
+    assert_eq!(
+        normalize_match_key("カ\u{3099}ラ"),
+        normalize_match_key("ガラ")
+    );
+
+    // Verify tuned SQLite pragmas on open_database
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("pragma_test.db");
+    let pool = open_database(&db_path).await.unwrap();
+
+    let busy: (i64,) = sqlx::query_as("PRAGMA busy_timeout")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(busy.0, 5_000);
+
+    let cache_size: (i64,) = sqlx::query_as("PRAGMA cache_size")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cache_size.0, -32_000);
+
+    let temp_store: (i64,) = sqlx::query_as("PRAGMA temp_store")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(temp_store.0, 2); // MEMORY
+
+    let wal_ckpt: (i64,) = sqlx::query_as("PRAGMA wal_autocheckpoint")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(wal_ckpt.0, 2000);
+}
+
+#[tokio::test]
+async fn test_prune_orphan_albums_and_versions_detail_filtering_and_isrc_fast_path() {
+    let pool = open_test_database().await.unwrap();
+    let prof = ProfileRepository::create_profile(
+        &pool,
+        &Profile::new("Orphan User", "#112233", true).unwrap(),
+    )
+    .await
+    .unwrap();
+    let artist =
+        LibraryRepository::upsert_artist_by_mbid_or_name(&pool, "Orphan Artist", None, None, None)
+            .await
+            .unwrap();
+
+    // 1. Live album with 1 live version (1 present track) + 1 0-track orphan local version
+    let mut alb_live = CanonicalAlbum::new("Live Album", "Orphan Artist").unwrap();
+    alb_live.id = "alb-live".into();
+    let ver_live = AlbumVersion::new(
+        &alb_live.id,
+        ProviderKind::Local,
+        "D:/Music/Live::new",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    let ver_orphan = AlbumVersion::new(
+        &alb_live.id,
+        ProviderKind::Local,
+        "D:/Music/Live::old",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    alb_live.add_version(ver_live.clone());
+    alb_live.add_version(ver_orphan.clone());
+    LibraryRepository::insert_canonical_album(&pool, &alb_live, Some(&artist.id))
+        .await
+        .unwrap();
+
+    let trk_live = TrackSource::new(
+        &ver_live.id,
+        ProviderKind::Local,
+        "D:/Music/Live/01.flac",
+        "Present Song",
+        1,
+        1,
+        200_000,
+        AudioFormat::cd_quality(),
+    )
+    .unwrap()
+    .with_isrc("GBAYE7300001")
+    .unwrap();
+    let saved_live = LibraryRepository::insert_track_source(&pool, &trk_live)
+        .await
+        .unwrap();
+
+    // 2. Soft-missing-only album (1 track marked 'missing')
+    let mut alb_missing = CanonicalAlbum::new("Missing Track Album", "Orphan Artist").unwrap();
+    alb_missing.id = "alb-missing".into();
+    let ver_missing = AlbumVersion::new(
+        &alb_missing.id,
+        ProviderKind::Local,
+        "D:/Music/Missing::v1",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    alb_missing.add_version(ver_missing.clone());
+    LibraryRepository::insert_canonical_album(&pool, &alb_missing, Some(&artist.id))
+        .await
+        .unwrap();
+    let trk_missing = TrackSource::new(
+        &ver_missing.id,
+        ProviderKind::Local,
+        "D:/Music/Missing/01.flac",
+        "Ghost Song",
+        1,
+        1,
+        180_000,
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    let saved_missing = LibraryRepository::insert_track_source(&pool, &trk_missing)
+        .await
+        .unwrap();
+    // Insert a legacy lowercase-hyphenated ISRC directly to test fallback matching
+    sqlx::query(
+        "UPDATE track_sources SET isrc = 'us-leg-99-00001', file_status = 'missing' WHERE id = ?",
+    )
+    .bind(&saved_missing.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 3. Completely empty local album with artwork/metadata/favorites/FTS records
+    let mut alb_empty_local = CanonicalAlbum::new("Empty Local Album", "Orphan Artist").unwrap();
+    alb_empty_local.id = "alb-empty-local".into();
+    let ver_empty_local = AlbumVersion::new(
+        &alb_empty_local.id,
+        ProviderKind::Local,
+        "D:/Music/Empty::v1",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    alb_empty_local.add_version(ver_empty_local);
+    LibraryRepository::insert_canonical_album(&pool, &alb_empty_local, Some(&artist.id))
+        .await
+        .unwrap();
+    LibraryRepository::set_artwork_override(&pool, "album", &alb_empty_local.id, "D:/old.jpg")
+        .await
+        .unwrap();
+    IngestionRepository::set_metadata_override(
+        &pool,
+        "album",
+        &alb_empty_local.id,
+        "title",
+        "\"Custom Empty\"",
+        MetadataLayer::UserEdit,
+    )
+    .await
+    .unwrap();
+    LibraryRepository::add_favorite(&pool, &prof.id, "album", &alb_empty_local.id)
+        .await
+        .unwrap();
+    LibraryRepository::upsert_artwork_cache(
+        &pool,
+        &ArtworkCacheEntry {
+            cache_key: "alb:empty:512".into(),
+            track_id: None,
+            album_id: Some(alb_empty_local.id.clone()),
+            source_kind: "cover".into(),
+            mime_type: Some("image/jpeg".into()),
+            width: Some(512),
+            height: Some(512),
+            max_dim: 512,
+            cache_path: "C:/cache/alb_empty_512.jpg".into(),
+            source_mtime: Some(100),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    // Also insert an orphaned canonical_track with no referencing track_sources
+    let ct_live = IngestionRepository::upsert_canonical_track_for_source(
+        &pool,
+        &saved_live.id,
+        &alb_live.id,
+        &saved_live,
+        &["Orphan Artist".to_string()],
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO canonical_tracks (id, canonical_album_id, title, sort_title, artist_name, disc_number, track_number, duration_ms, created_at, updated_at) \
+         VALUES ('ct-orphan', 'alb-live', 'Orphan CT', 'Orphan CT', 'Orphan Artist', 1, 9, 1000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 4. Empty Qobuz album (must NOT be pruned when provider_id_filter = Some("local"))
+    let mut alb_empty_qobuz = CanonicalAlbum::new("Empty Qobuz Album", "Orphan Artist").unwrap();
+    alb_empty_qobuz.id = "alb-empty-qobuz".into();
+    let ver_empty_qobuz = AlbumVersion::new(
+        &alb_empty_qobuz.id,
+        ProviderKind::Qobuz,
+        "qob-empty-1",
+        AudioFormat::cd_quality(),
+    )
+    .unwrap();
+    alb_empty_qobuz.add_version(ver_empty_qobuz);
+    LibraryRepository::insert_canonical_album(&pool, &alb_empty_qobuz, Some(&artist.id))
+        .await
+        .unwrap();
+
+    // Verify get_album_detail filters out 0-track & missing-only versions BEFORE pruning
+    let live_detail = LibraryRepository::get_album_detail(&pool, &alb_live.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_detail.versions.len(), 1);
+    assert_eq!(live_detail.versions[0].version.id, ver_live.id);
+    assert_eq!(live_detail.album.versions.len(), 1);
+    assert_eq!(live_detail.album.versions[0].id, ver_live.id);
+
+    // Missing-only album has 0 present versions, so get_album_detail defensively returns None
+    assert!(
+        LibraryRepository::get_album_detail(&pool, &alb_missing.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Verify get_artist_detail returns only albums with >= 1 present track
+    let art_detail = LibraryRepository::get_artist_detail(&pool, &artist.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(art_detail.albums.len(), 1);
+    assert_eq!(art_detail.albums[0].id, alb_live.id);
+    assert_eq!(art_detail.albums[0].versions.len(), 1);
+
+    // Verify rebuild_search_index excludes empty & missing-only albums/tracks
+    rebuild_search_index(&pool).await.unwrap();
+    let fts_empty = search_library(&pool, "Empty Local Album").await.unwrap();
+    assert!(fts_empty.is_empty());
+    let fts_ghost = search_library(&pool, "Ghost Song").await.unwrap();
+    assert!(fts_ghost.is_empty());
+    let fts_live = search_library(&pool, "Present Song").await.unwrap();
+    assert!(!fts_live.is_empty());
+
+    // Verify ISRC fast path (indexed exact) and fallback (legacy lowercase hyphenated)
+    let by_isrc_fast = LibraryRepository::find_canonical_album_ids_by_isrcs(
+        &pool,
+        &["GB-AYE-73-00001".to_string()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(by_isrc_fast, vec![alb_live.id.clone()]);
+
+    let by_isrc_fallback =
+        LibraryRepository::find_canonical_album_ids_by_isrcs(&pool, &["USLEG9900001".to_string()])
+            .await
+            .unwrap();
+    assert_eq!(by_isrc_fallback, vec![alb_missing.id.clone()]);
+
+    // Prune local orphans -> removes ver_orphan, ver_empty_local, alb_empty_local, ct-orphan; keeps Qobuz + live
+    let rep_local = LibraryRepository::prune_orphan_albums_and_versions(&pool, Some("local"))
+        .await
+        .unwrap();
+    assert_eq!(rep_local.versions_pruned, 2);
+    assert_eq!(rep_local.albums_pruned, 1);
+    assert_eq!(rep_local.canonical_tracks_pruned, 1);
+    assert_eq!(
+        rep_local.invalidated_artwork_paths,
+        vec!["C:/cache/alb_empty_512.jpg".to_string()]
+    );
+
+    assert!(
+        LibraryRepository::find_canonical_album_by_id(&pool, &alb_empty_local.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        LibraryRepository::get_artwork_override(&pool, "album", &alb_empty_local.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        IngestionRepository::get_overrides_for_entity(&pool, "album", &alb_empty_local.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !LibraryRepository::is_favorite(&pool, &prof.id, "album", &alb_empty_local.id)
+            .await
+            .unwrap()
+    );
+    // Live canonical track survives; orphan canonical track deleted
+    assert!(
+        IngestionRepository::get_canonical_track_with_sources(&pool, &ct_live.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        IngestionRepository::get_canonical_track_with_sources(&pool, "ct-orphan")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Qobuz empty album was untouched by local-scoped prune
+    assert!(
+        LibraryRepository::find_canonical_album_by_id(&pool, &alb_empty_qobuz.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Unscoped prune cleans the remaining Qobuz orphan version + album
+    let rep_all = LibraryRepository::prune_orphan_albums_and_versions(&pool, None)
+        .await
+        .unwrap();
+    assert_eq!(rep_all.versions_pruned, 1);
+    assert_eq!(rep_all.albums_pruned, 1);
+    assert!(
+        LibraryRepository::find_canonical_album_by_id(&pool, &alb_empty_qobuz.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

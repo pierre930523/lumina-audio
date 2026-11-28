@@ -56,7 +56,9 @@ pub async fn initiate_pairing(
         port: None,
     });
 
-    let dev_name = req.device_name.unwrap_or_else(|| "Lumina-Desktop".to_string());
+    let dev_name = req
+        .device_name
+        .unwrap_or_else(|| "Lumina-Desktop".to_string());
     let host = req.host.unwrap_or_else(|| "127.0.0.1".to_string());
     let port = req.port.unwrap_or(9888);
 
@@ -92,7 +94,13 @@ pub async fn verify_pairing(
 
     let token = state
         .pairing_manager
-        .attempt_pairing(&client_ip, &client_id, &device_name, &platform, &payload.pin)
+        .attempt_pairing(
+            &client_ip,
+            &client_id,
+            &device_name,
+            &platform,
+            &payload.pin,
+        )
         .await?;
 
     Ok(Json(VerifyPairResponse {
@@ -127,4 +135,3 @@ pub async fn unified_pair(
         Ok(Json(serde_json::to_value(resp.0).unwrap()))
     }
 }
-

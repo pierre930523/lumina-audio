@@ -10,138 +10,8 @@ import 'auth_manager.dart';
 import 'l1_stream_cache.dart';
 import 'stream_resolver.dart';
 
-/// Result of [SingleFlightResolver.refreshAfter403] CAS recovery.
-@immutable
-sealed class RefreshAfter403Result {
-  const RefreshAfter403Result();
-}
-
-/// Refreshed URL/manifest has a compatible format and byte length and may
-/// seamlessly resume the active stream.
-final class RefreshAfter403Updated extends RefreshAfter403Result {
-  final StreamSourceSpec spec;
-  final bool reusedFromCache;
-
-  const RefreshAfter403Updated({
-    required this.spec,
-    this.reusedFromCache = false,
-  });
-}
-
-/// Refreshed URL/manifest changed format, container layout, cipher, or
-/// `contentLength`; caller must NOT splice bytes into the active decoder.
-final class RefreshAfter403FormatChanged extends RefreshAfter403Result {
-  static const String code = 'STREAM_FORMAT_CHANGED';
-
-  final StreamSourceSpec spec;
-  final String reason;
-
-  const RefreshAfter403FormatChanged({
-    required this.spec,
-    required this.reason,
-  });
-}
-
-/// Re-resolution encountered HTTP 401 and silent refresh failed or is
-/// unavailable; provider circuit breaker is now in `AuthRequired` state.
-final class RefreshAfter403AuthRequired extends RefreshAfter403Result {
-  final String providerId;
-  final String message;
-
-  const RefreshAfter403AuthRequired({
-    required this.providerId,
-    required this.message,
-  });
-}
-
-/// Re-resolution failed for a non-auth error (network, 403/404/451, DRM, cancel).
-final class RefreshAfter403Failed extends RefreshAfter403Result {
-  final String message;
-  final int? statusCode;
-  final bool isCancelled;
-  final StreamingErrorKind? errorKind;
-
-  const RefreshAfter403Failed({
-    required this.message,
-    this.statusCode,
-    this.isCancelled = false,
-    this.errorKind,
-  });
-
-  bool get isRegionRestricted =>
-      errorKind == StreamingErrorKind.regionRestricted;
-
-  bool get isUnavailable => errorKind == StreamingErrorKind.trackUnavailable;
-}
-
-/// Composite Single-Flight deduplication key:
-/// `(provider_id, track_id, quality_key, network_epoch)`.
-@immutable
-class SingleFlightKey {
-  final String providerId;
-  final String trackId;
-  final String qualityKey;
-  final int networkEpoch;
-
-  const SingleFlightKey({
-    required this.providerId,
-    required this.trackId,
-    required this.qualityKey,
-    required this.networkEpoch,
-  });
-
-  factory SingleFlightKey.fromStreamKey(StreamKey key, int networkEpoch) {
-    return SingleFlightKey(
-      providerId: key.providerId,
-      trackId: key.trackId,
-      qualityKey: key.qualityKey,
-      networkEpoch: networkEpoch,
-    );
-  }
-
-  @override
-  bool operator ==(Object other) {
-    return identical(this, other) ||
-        (other is SingleFlightKey &&
-            other.providerId == providerId &&
-            other.trackId == trackId &&
-            other.qualityKey == qualityKey &&
-            other.networkEpoch == networkEpoch);
-  }
-
-  @override
-  int get hashCode =>
-      Object.hash(providerId, trackId, qualityKey, networkEpoch);
-
-  @override
-  String toString() =>
-      'SingleFlightKey($providerId:$trackId@$qualityKey#e$networkEpoch)';
-}
-
-class _FlightWaiter {
-  final Completer<StreamSourceSpec> completer = Completer<StreamSourceSpec>();
-  final CancellationToken? cancelToken;
-  VoidCallback? cancelListener;
-
-  _FlightWaiter(this.cancelToken);
-
-  void detachCancelListener() {
-    final listener = cancelListener;
-    if (listener != null) {
-      cancelToken?.removeListener(listener);
-      cancelListener = null;
-    }
-  }
-}
-
-class _InFlightResolution {
-  final SingleFlightKey flightKey;
-  final CancellationToken taskCancel = CancellationToken();
-  final List<_FlightWaiter> waiters = <_FlightWaiter>[];
-  bool completed = false;
-
-  _InFlightResolution(this.flightKey);
-}
+part 'single_flight/refresh_after_403_result.dart';
+part 'single_flight/single_flight_refresh_ext.dart';
 
 /// Cross-platform Single-Flight stream resolution coordinator paired with
 /// [L1StreamCache].
@@ -309,15 +179,6 @@ class SingleFlightResolver {
 
   /// Phase 3 HTTP 403/410 mid-stream URL recovery with CAS conditional L1
   /// invalidation and format/content-length drift detection.
-  ///
-  /// - Only evicts the L1 entry if `cached.url == failedUrl` (CAS); if another
-  ///   caller already refreshed the URL, reuses the fresh cached spec.
-  /// - Strictly separates HTTP 401 (routes to [AuthManager.handleUnauthorized]
-  ///   for at most one silent refresh retry before tripping `AuthRequired`)
-  ///   from HTTP 403/410 (never trips `AuthRequired`).
-  /// - Compares refreshed format/content_length against the active stream
-  ///   baseline and returns [RefreshAfter403FormatChanged] (`STREAM_FORMAT_CHANGED`)
-  ///   when unsafe to splice bytes.
   Future<RefreshAfter403Result> refreshAfter403(
     StreamKey key, {
     required String failedUrl,
@@ -331,251 +192,20 @@ class SingleFlightResolver {
     TrackInfo? legacyTrack,
     Future<StreamSourceSpec> Function(CancellationToken taskCancel)?
         customInvoker,
-  }) async {
-    if (cancelToken?.isCancelled == true) {
-      return const RefreshAfter403Failed(
-        message: '操作已取消',
-        isCancelled: true,
+  }) =>
+      _refreshAfter403Impl(
+        key,
+        failedUrl: failedUrl,
+        expectedContentLength: expectedContentLength,
+        expectedMimeType: expectedMimeType,
+        expectedStreamKind: expectedStreamKind,
+        expectedAudioFormat: expectedAudioFormat,
+        expectedInitRangeEnd: expectedInitRangeEnd,
+        allowFormatChange: allowFormatChange,
+        cancelToken: cancelToken,
+        legacyTrack: legacyTrack,
+        customInvoker: customInvoker,
       );
-    }
-
-    final auth = _authManager;
-    if (auth != null && auth.isPlaybackAuthBlocked(key.providerId)) {
-      return RefreshAfter403AuthRequired(
-        providerId: key.providerId,
-        message: auth.authErrorFor(key.providerId) ?? '授權已失效，請重新登入',
-      );
-    }
-
-    final resolver = registry.resolverFor(key.providerId);
-    if (resolver == null) {
-      return RefreshAfter403Failed(message: '未註冊的串流解析器：${key.providerId}');
-    }
-    final caps = resolver.capabilities;
-
-    // Capture baseline metadata before CAS invalidation.
-    final previousSpec = caps.supportsL1UrlCache ? l1Cache.peek(key, caps) : null;
-    final baseContentLength =
-        expectedContentLength ?? _extractContentLength(previousSpec);
-    final baseMime =
-        _normalizeMime(expectedMimeType ?? _extractMimeType(previousSpec));
-    final baseKind = expectedStreamKind ?? previousSpec?.kind;
-    final baseAudioFormat = expectedAudioFormat ?? previousSpec?.audioFormat;
-    final baseInitRangeEnd = expectedInitRangeEnd ??
-        (previousSpec is DirectRangeSpec ? previousSpec.initRangeEnd : null);
-    final baseCipher =
-        previousSpec is EncryptedRangeSpec ? previousSpec.cipher : null;
-
-    // CAS conditional invalidation: if another caller already refreshed this
-    // key to a different URL, preserve and reuse that fresh spec immediately.
-    if (caps.supportsL1UrlCache) {
-      final cas = l1Cache.compareAndEvict(key, caps, failedUrl);
-      if (!cas.evicted && cas.currentSpec != null) {
-        return _evaluateRefreshedSpec(
-          freshSpec: cas.currentSpec!,
-          reusedFromCache: true,
-          allowFormatChange: allowFormatChange,
-          baseContentLength: baseContentLength,
-          baseMime: baseMime,
-          baseKind: baseKind,
-          baseAudioFormat: baseAudioFormat,
-          baseInitRangeEnd: baseInitRangeEnd,
-          baseCipher: baseCipher,
-        );
-      }
-    }
-
-    var retriedAuth = false;
-    while (true) {
-      try {
-        final freshSpec = await resolve(
-          key,
-          cancelToken: cancelToken,
-          bypassCache: false,
-          legacyTrack: legacyTrack,
-          customInvoker: customInvoker,
-        );
-        return _evaluateRefreshedSpec(
-          freshSpec: freshSpec,
-          reusedFromCache: false,
-          allowFormatChange: allowFormatChange,
-          baseContentLength: baseContentLength,
-          baseMime: baseMime,
-          baseKind: baseKind,
-          baseAudioFormat: baseAudioFormat,
-          baseInitRangeEnd: baseInitRangeEnd,
-          baseCipher: baseCipher,
-        );
-      } on StreamingException catch (e) {
-        if (e.isCancelled) {
-          return RefreshAfter403Failed(
-            message: e.message,
-            statusCode: e.statusCode,
-            isCancelled: true,
-            errorKind: e.kind,
-          );
-        }
-        if (e.isRegionRestricted || e.isUnavailable) {
-          // Geo-blocked / taken-down tracks are permanent per-track failures:
-          // never trigger token refresh or trip the provider auth breaker.
-          return RefreshAfter403Failed(
-            message: e.message,
-            statusCode: e.statusCode,
-            errorKind: e.kind,
-          );
-        }
-        if (AuthManager.isUnauthorizedError(e)) {
-          if (auth != null && auth.isGuestPlaybackCapable(key.providerId)) {
-            return RefreshAfter403Failed(
-              message: e.message,
-              statusCode: e.statusCode,
-              errorKind: e.kind,
-            );
-          }
-          if (auth != null) {
-            final refreshed = await auth.handleUnauthorized(
-              key.providerId,
-              e.message,
-              alreadyRetried: retriedAuth,
-            );
-            if (refreshed && !retriedAuth) {
-              retriedAuth = true;
-              continue;
-            }
-            return RefreshAfter403AuthRequired(
-              providerId: key.providerId,
-              message: auth.authErrorFor(key.providerId) ?? e.message,
-            );
-          }
-          return RefreshAfter403AuthRequired(
-            providerId: key.providerId,
-            message: e.message,
-          );
-        }
-        return RefreshAfter403Failed(
-          message: e.message,
-          statusCode: e.statusCode,
-          errorKind: e.kind,
-        );
-      } catch (e) {
-        return RefreshAfter403Failed(message: e.toString());
-      }
-    }
-  }
-
-  static RefreshAfter403Result _evaluateRefreshedSpec({
-    required StreamSourceSpec freshSpec,
-    required bool reusedFromCache,
-    required bool allowFormatChange,
-    required int? baseContentLength,
-    required String? baseMime,
-    required String? baseKind,
-    required AudioFormat? baseAudioFormat,
-    required int? baseInitRangeEnd,
-    required StreamCipher? baseCipher,
-  }) {
-    if (allowFormatChange) {
-      return RefreshAfter403Updated(
-        spec: freshSpec,
-        reusedFromCache: reusedFromCache,
-      );
-    }
-    final diffReason = _detectFormatDrift(
-      freshSpec: freshSpec,
-      baseContentLength: baseContentLength,
-      baseMime: baseMime,
-      baseKind: baseKind,
-      baseAudioFormat: baseAudioFormat,
-      baseInitRangeEnd: baseInitRangeEnd,
-      baseCipher: baseCipher,
-    );
-    if (diffReason != null) {
-      return RefreshAfter403FormatChanged(
-        spec: freshSpec,
-        reason: diffReason,
-      );
-    }
-    return RefreshAfter403Updated(
-      spec: freshSpec,
-      reusedFromCache: reusedFromCache,
-    );
-  }
-
-  static String? _detectFormatDrift({
-    required StreamSourceSpec freshSpec,
-    required int? baseContentLength,
-    required String? baseMime,
-    required String? baseKind,
-    required AudioFormat? baseAudioFormat,
-    required int? baseInitRangeEnd,
-    required StreamCipher? baseCipher,
-  }) {
-    if (baseKind != null && freshSpec.kind != baseKind) {
-      return 'stream kind changed: $baseKind -> ${freshSpec.kind}';
-    }
-
-    final freshLen = _extractContentLength(freshSpec);
-    if (baseContentLength != null &&
-        freshLen != null &&
-        baseContentLength != freshLen) {
-      return 'content_length changed: $baseContentLength -> $freshLen';
-    }
-
-    final freshMime = _normalizeMime(_extractMimeType(freshSpec));
-    if (baseMime != null && freshMime != null && baseMime != freshMime) {
-      return 'mime_type changed: $baseMime -> $freshMime';
-    }
-
-    final freshFmt = freshSpec.audioFormat;
-    if (baseAudioFormat != null && freshFmt != null) {
-      if (baseAudioFormat.codec != freshFmt.codec ||
-          baseAudioFormat.sampleRateHz != freshFmt.sampleRateHz ||
-          baseAudioFormat.bitDepth != freshFmt.bitDepth ||
-          baseAudioFormat.channels != freshFmt.channels) {
-        return 'audio_format changed: ${baseAudioFormat.label} -> ${freshFmt.label}';
-      }
-    }
-
-    if (baseInitRangeEnd != null && freshSpec is DirectRangeSpec) {
-      final freshInit = freshSpec.initRangeEnd;
-      if (freshInit != null && freshInit != baseInitRangeEnd) {
-        return 'init_range_end changed: $baseInitRangeEnd -> $freshInit';
-      }
-    }
-
-    if (baseCipher != null &&
-        freshSpec is EncryptedRangeSpec &&
-        freshSpec.cipher != baseCipher) {
-      return 'stream cipher changed';
-    }
-
-    return null;
-  }
-
-  static int? _extractContentLength(StreamSourceSpec? spec) {
-    return switch (spec) {
-      DirectRangeSpec() => spec.contentLength,
-      EncryptedRangeSpec() => spec.contentLength,
-      _ => null,
-    };
-  }
-
-  static String? _extractMimeType(StreamSourceSpec? spec) {
-    return switch (spec) {
-      DirectRangeSpec() => spec.mimeType,
-      SegmentedManifestSpec() => spec.mimeType,
-      EncryptedRangeSpec() => spec.mimeType,
-      _ => null,
-    };
-  }
-
-  static String? _normalizeMime(String? raw) {
-    final trimmed = raw?.trim().toLowerCase();
-    if (trimmed == null || trimmed.isEmpty) return null;
-    final semi = trimmed.indexOf(';');
-    final base = semi >= 0 ? trimmed.substring(0, semi).trim() : trimmed;
-    return base.isEmpty ? null : base;
-  }
 
   Future<StreamSourceSpec> _attachWaiter(
     _InFlightResolution flight,
@@ -634,7 +264,6 @@ class SingleFlightResolver {
       }
 
       if (flight.completed) {
-        // Every waiter already cancelled while in flight.
         return;
       }
 

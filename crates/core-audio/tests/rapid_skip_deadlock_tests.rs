@@ -155,7 +155,10 @@ fn test_stalled_http_and_blocking_bridge_cancel_promptly() {
     cancel_body.cancel();
     let read_res = jh_read.join().unwrap();
     let elapsed_read = t1.elapsed();
-    assert!(read_res.is_err(), "cancelled HttpRangeMediaSource::read must error");
+    assert!(
+        read_res.is_err(),
+        "cancelled HttpRangeMediaSource::read must error"
+    );
     assert_eq!(
         read_res.unwrap_err().kind(),
         std::io::ErrorKind::Interrupted
@@ -190,7 +193,10 @@ fn test_stalled_http_and_blocking_bridge_cancel_promptly() {
     cancel_chunk.cancel();
     let br_res = jh_bridge.join().unwrap();
     let elapsed_bridge = t2.elapsed();
-    assert!(br_res.is_err(), "cancelled BlockingStreamBridge::read must error");
+    assert!(
+        br_res.is_err(),
+        "cancelled BlockingStreamBridge::read must error"
+    );
     assert_eq!(br_res.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
     assert!(
         elapsed_bridge < Duration::from_millis(50),
@@ -202,10 +208,8 @@ fn test_stalled_http_and_blocking_bridge_cancel_promptly() {
 
 #[test]
 fn test_30_rapid_skips_mixed_rates_no_deadlock_minimal_reopens_no_thread_leaks() {
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_rapid_skip_test_{}",
-        std::process::id()
-    ));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("lumina_rapid_skip_test_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let wav_44k: PathBuf = tmp_dir.join("track_44100.wav");
@@ -439,10 +443,7 @@ fn test_skip_to_standby_and_concurrent_auto_standby_no_abba_deadlock() {
     }
 
     // Queue next spec so relay_loop can fire TriggerAutoStandby concurrently with skip_to_standby.
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "lumina_abba_test_{}",
-        std::process::id()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("lumina_abba_test_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp_dir);
     let wav_44k = tmp_dir.join("auto_next.wav");
     write_sine_wav(&wav_44k, 44_100, 1200);
@@ -501,8 +502,8 @@ mod wasapi_skip_silence_tests {
     use std::time::{Duration, Instant};
 
     use core_audio::backend::wasapi_win::{
-        run_wasapi_render_loop, WasapiExclusiveOpenSpec, WasapiHotSwapPayload, WasapiRenderControl,
-        WasapiStreamOps, Win32Event,
+        WasapiExclusiveOpenSpec, WasapiHotSwapPayload, WasapiRenderControl, WasapiStreamOps,
+        Win32Event, run_wasapi_render_loop,
     };
     use core_audio::buffer::SpscRingBuffer;
     use core_audio::verification::{AudioVerificationEngine, VerificationConfig, WireSampleFormat};
@@ -510,8 +511,8 @@ mod wasapi_skip_silence_tests {
         AudioCodec, ChannelLayout, DeviceTransportKind, Endianness, Interleaving, OutputMode,
         SampleFormatKind, UnifiedAudioFormat,
     };
-    use windows::core::HRESULT;
     use windows::Win32::Media::Audio::AUDCLNT_BUFFERFLAGS_SILENT;
+    use windows::core::HRESULT;
 
     #[derive(Default)]
     struct FakeOpsState {
@@ -531,7 +532,11 @@ mod wasapi_skip_silence_tests {
     }
 
     impl FakeOps {
-        fn new(buf_event: Arc<Win32Event>, period_bytes: usize, state: Arc<Mutex<FakeOpsState>>) -> Self {
+        fn new(
+            buf_event: Arc<Win32Event>,
+            period_bytes: usize,
+            state: Arc<Mutex<FakeOpsState>>,
+        ) -> Self {
             Self {
                 buf_event,
                 buf: vec![0u8; period_bytes],
@@ -558,7 +563,13 @@ mod wasapi_skip_silence_tests {
             self.buf_event.reset();
         }
         fn current_padding(&mut self) -> Result<u32, HRESULT> {
-            Ok(self.state.lock().unwrap().padding_queue.pop_front().unwrap_or(0))
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .padding_queue
+                .pop_front()
+                .unwrap_or(0))
         }
         fn get_buffer(&mut self, _num_frames: u32) -> Result<*mut u8, HRESULT> {
             Ok(self.buf.as_mut_ptr())
@@ -676,7 +687,10 @@ mod wasapi_skip_silence_tests {
         );
         {
             let st = state.lock().unwrap();
-            assert_eq!(st.start_calls, 1, "must not reopen IAudioClient during skip");
+            assert_eq!(
+                st.start_calls, 1,
+                "must not reopen IAudioClient during skip"
+            );
             assert_eq!(st.stop_calls, 0);
             let silent_flag = AUDCLNT_BUFFERFLAGS_SILENT.0 as u32;
             assert!(
@@ -716,12 +730,18 @@ mod wasapi_skip_silence_tests {
         buf_event.signal();
         thread::sleep(Duration::from_millis(15));
         buf_event.signal();
-        th.join().expect("render thread exits cleanly on Track 2 EOF");
+        th.join()
+            .expect("render thread exits cleanly on Track 2 EOF");
 
         let st = state.lock().unwrap();
-        assert_eq!(st.start_calls, 1, "Hot-swap must reuse live IAudioClient (start_calls == 1)");
+        assert_eq!(
+            st.start_calls, 1,
+            "Hot-swap must reuse live IAudioClient (start_calls == 1)"
+        );
         assert!(
-            st.rendered_buffers.iter().any(|b| b.iter().all(|&x| x == 0x44)),
+            st.rendered_buffers
+                .iter()
+                .any(|b| b.iter().all(|&x| x == 0x44)),
             "Track 2 audio bytes (0x44) must render after lock-free hot-swap"
         );
         assert_eq!(
@@ -788,14 +808,22 @@ mod wasapi_skip_silence_tests {
 
         let st = state.lock().unwrap();
         assert!(
-            st.release_calls.iter().all(|&(frames, flags)| frames == 4 && flags == 0),
+            st.release_calls
+                .iter()
+                .all(|&(frames, flags)| frames == 4 && flags == 0),
             "DoP skip_silence must release full period with flags=0 (wire silence, never AUDCLNT_BUFFERFLAGS_SILENT); got {:?}",
             st.release_calls
         );
         assert!(st.rendered_buffers.len() >= 2);
         let skip_buf = st.rendered_buffers.last().unwrap();
-        assert_eq!(&skip_buf[0..8], &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]);
-        assert_eq!(&skip_buf[8..16], &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]);
+        assert_eq!(
+            &skip_buf[0..8],
+            &[0x00, 0x69, 0x69, 0x05, 0x00, 0x69, 0x69, 0x05]
+        );
+        assert_eq!(
+            &skip_buf[8..16],
+            &[0x00, 0x69, 0x69, 0xFA, 0x00, 0x69, 0x69, 0xFA]
+        );
     }
 
     #[test]
@@ -913,11 +941,14 @@ mod wasapi_skip_silence_tests {
         ctrl.set_paused(false);
         thread::sleep(Duration::from_millis(20));
         buf_event.signal();
-        th.join().expect("render thread exits cleanly on Track 3 EOF");
+        th.join()
+            .expect("render thread exits cleanly on Track 3 EOF");
 
         let st = state.lock().unwrap();
         assert!(
-            st.rendered_buffers.iter().any(|b| b.iter().all(|&x| x == 0x55)),
+            st.rendered_buffers
+                .iter()
+                .any(|b| b.iter().all(|&x| x == 0x55)),
             "Track 3 audio (0x55) must be primed cleanly on resume after paused hot-swap"
         );
     }

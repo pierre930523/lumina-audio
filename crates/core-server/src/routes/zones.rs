@@ -1,10 +1,11 @@
 use crate::error::ServerError;
 use crate::state::AppState;
+use crate::ws::messages::WsMessage;
 use crate::zones::{
     ClockSyncMeasurement, ZoneDiscoverRequest, ZoneGroupRequest, ZoneGroupStatus, ZoneInfo,
 };
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -36,7 +37,12 @@ pub async fn upsert_zone(
     State(state): State<Arc<AppState>>,
     Json(zone): Json<ZoneInfo>,
 ) -> Json<ZoneInfo> {
-    Json(state.zone_manager.upsert_zone(zone).await)
+    let updated = state.zone_manager.upsert_zone(zone).await;
+    let zones = state.zone_manager.list_zones().await;
+    let _ = state
+        .broadcast_tx
+        .send(WsMessage::ZonesChanged { payload: zones });
+    Json(updated)
 }
 
 pub async fn discover_zones(
@@ -49,6 +55,9 @@ pub async fn discover_zones(
         .discover_zones(state.player.as_ref(), req)
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?;
+    let _ = state.broadcast_tx.send(WsMessage::ZonesChanged {
+        payload: zones.clone(),
+    });
     Ok(Json(zones))
 }
 
@@ -61,6 +70,10 @@ pub async fn group_zones(
         .group_zones(req)
         .await
         .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let zones = state.zone_manager.list_zones().await;
+    let _ = state
+        .broadcast_tx
+        .send(WsMessage::ZonesChanged { payload: zones });
     Ok(Json(res))
 }
 
@@ -81,6 +94,10 @@ pub async fn sync_zone_clock(
         )
         .await
         .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let zones = state.zone_manager.list_zones().await;
+    let _ = state
+        .broadcast_tx
+        .send(WsMessage::ZonesChanged { payload: zones });
     Ok(Json(res))
 }
 
@@ -94,6 +111,10 @@ pub async fn set_zone_volume(
         .set_zone_volume(&id, req.volume)
         .await
         .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let zones = state.zone_manager.list_zones().await;
+    let _ = state
+        .broadcast_tx
+        .send(WsMessage::ZonesChanged { payload: zones });
     Ok(Json(zone))
 }
 
